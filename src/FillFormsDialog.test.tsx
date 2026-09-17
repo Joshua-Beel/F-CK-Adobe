@@ -5,7 +5,7 @@ import type { DocumentFormFields, SavedCopy } from './bridge';
 import type { DocumentInfo } from './model';
 
 const document: DocumentInfo = { id: 4, name: 'form.pdf', path: 'C:/form.pdf', pages: [{ width: 612, height: 792 }], revision: 7, dirty: true, can_undo: true, can_redo: false };
-const fields: DocumentFormFields = { documentId: 4, revision: 7, status: 'supported', reason: null, input: 'printable-ascii', valueByteLimit: 4096, fields: [{ kind: 'text', fieldId: 'name', name: 'Name', page: 0, value: 'Ada', maxLength: 12 }, { kind: 'text', fieldId: 'city', name: 'City', page: 0, value: '', maxLength: null }, { kind: 'checkbox', fieldId: 'approved', name: 'Approve terms', page: 1, checked: true }, { kind: 'checkbox', fieldId: 'updates', name: 'Receive updates', page: 1, checked: false }, { kind: 'radio', fieldId: 'contact', name: 'Contact method', page: 2, options: [{ optionId: 'contact-email', label: 'Email updates' }, { optionId: 'contact-post', label: 'Postal mail' }], selectedOptionId: 'contact-email' }, { kind: 'radio', fieldId: 'frequency', name: 'Contact frequency', page: 2, options: [{ optionId: 'frequency-weekly', label: 'Weekly' }, { optionId: 'frequency-monthly', label: 'Monthly' }], selectedOptionId: null }] };
+const fields: DocumentFormFields = { documentId: 4, revision: 7, status: 'supported', reason: null, input: 'printable-ascii', valueByteLimit: 4096, fields: [{ kind: 'text', fieldId: 'name', name: 'Name', page: 0, value: 'Ada', maxLength: 12 }, { kind: 'text', fieldId: 'city', name: 'City', page: 0, value: '', maxLength: null }, { kind: 'checkbox', fieldId: 'approved', name: 'Approve terms', page: 1, checked: true }, { kind: 'checkbox', fieldId: 'updates', name: 'Receive updates', page: 1, checked: false }, { kind: 'radio', fieldId: 'contact', name: 'Contact method', page: 2, options: [{ optionId: 'contact-email', label: 'Email updates' }, { optionId: 'contact-post', label: 'Postal mail' }], selectedOptionId: 'contact-email' }, { kind: 'radio', fieldId: 'frequency', name: 'Contact frequency', page: 2, options: [{ optionId: 'frequency-weekly', label: 'Weekly' }, { optionId: 'frequency-monthly', label: 'Monthly' }], selectedOptionId: null }, { kind: 'choice', fieldId: 'shipping', name: 'Shipping method', page: 3, presentation: 'dropdown', options: [{ optionId: 'shipping-ground', label: 'Ground' }, { optionId: 'shipping-air', label: 'Air' }], selectedOptionId: 'shipping-ground' }, { kind: 'choice', fieldId: 'window', name: 'Delivery window', page: 3, presentation: 'list', options: [{ optionId: 'window-morning', label: 'Morning' }, { optionId: 'window-afternoon', label: 'Afternoon' }, { optionId: 'window-evening', label: 'Evening' }], selectedOptionId: null }] };
 const output: SavedCopy = { path: 'C:/filled.pdf', document: { ...document, id: 8, name: 'filled.pdf', path: 'C:/filled.pdf', revision: 0, dirty: false, can_undo: false } };
 const save = (ui: ReactTestRenderer) => ui.root.findAllByType('button').find(button => button.children.join('') === 'Save filled copy')!;
 
@@ -22,20 +22,23 @@ describe('FillFormsDialog', () => {
     act(() => ui.root.findByProps({ 'aria-label': 'Name' }).props.onChange({ target: { value: 'Ada Lovelace' } }));
     act(() => ui.root.findByProps({ 'aria-label': 'Approve terms, page 2' }).props.onChange({ target: { checked: false } }));
     act(() => ui.root.findByProps({ 'aria-label': 'Contact frequency: Monthly, page 3' }).props.onChange());
+    act(() => ui.root.findByProps({ 'aria-label': 'Shipping method, page 4' }).props.onChange({ target: { value: 'shipping-air' } }));
     await act(async () => save(ui).props.onClick());
-    expect(fill).toHaveBeenCalledWith(4, 7, [{ fieldId: 'name', kind: 'text', value: 'Ada Lovelace' }, { fieldId: 'approved', kind: 'checkbox', checked: false }, { fieldId: 'frequency', kind: 'radio', optionId: 'frequency-monthly' }]);
+    expect(fill).toHaveBeenCalledWith(4, 7, [{ fieldId: 'name', kind: 'text', value: 'Ada Lovelace' }, { fieldId: 'approved', kind: 'checkbox', checked: false }, { fieldId: 'frequency', kind: 'radio', optionId: 'frequency-monthly' }, { fieldId: 'shipping', kind: 'choice', optionId: 'shipping-air' }]);
     expect(close).toHaveBeenCalledOnce();
     act(() => ui.unmount());
   });
 
   it('validates text without dropping blank, false, or blank-radio values and recognizes reverted inputs as unchanged', () => {
-    const initial = { name: 'Ada', city: '', approved: true, updates: false, contact: 'contact-email', frequency: null };
+    const initial = { name: 'Ada', city: '', approved: true, updates: false, contact: 'contact-email', frequency: null, shipping: 'shipping-ground', window: null };
     expect(formPatches(fields.fields, initial)).toEqual([]);
-    expect(formPatches(fields.fields, { ...initial, city: 'Paris', approved: false, updates: true, contact: 'contact-post', frequency: 'frequency-monthly' })).toEqual([{ fieldId: 'city', kind: 'text', value: 'Paris' }, { fieldId: 'approved', kind: 'checkbox', checked: false }, { fieldId: 'updates', kind: 'checkbox', checked: true }, { fieldId: 'contact', kind: 'radio', optionId: 'contact-post' }, { fieldId: 'frequency', kind: 'radio', optionId: 'frequency-monthly' }]);
+    expect(formPatches(fields.fields, { ...initial, city: 'Paris', approved: false, updates: true, contact: 'contact-post', frequency: 'frequency-monthly', shipping: 'shipping-air', window: 'window-evening' })).toEqual([{ fieldId: 'city', kind: 'text', value: 'Paris' }, { fieldId: 'approved', kind: 'checkbox', checked: false }, { fieldId: 'updates', kind: 'checkbox', checked: true }, { fieldId: 'contact', kind: 'radio', optionId: 'contact-post' }, { fieldId: 'frequency', kind: 'radio', optionId: 'frequency-monthly' }, { fieldId: 'shipping', kind: 'choice', optionId: 'shipping-air' }, { fieldId: 'window', kind: 'choice', optionId: 'window-evening' }]);
     expect(validateFormPatches(fields.fields, initial, 4096)).toContain('Change at least one');
     expect(validateFormPatches(fields.fields, { ...initial, name: 'Åda' }, 4096)).toContain('printable ASCII');
     expect(validateFormPatches(fields.fields, { ...initial, contact: null }, 4096)).toContain('cannot be cleared');
     expect(validateFormPatches(fields.fields, { ...initial, frequency: 'unknown' }, 4096)).toContain('form changed');
+    expect(validateFormPatches(fields.fields, { ...initial, shipping: null }, 4096)).toContain('cannot be cleared');
+    expect(validateFormPatches(fields.fields, { ...initial, window: 'unknown' }, 4096)).toContain('form changed');
     const name = fields.fields[0];
     if (name.kind !== 'text') throw new Error('fixture field changed');
     expect(validateFormPatches([{ ...name, maxLength: 3 }], { name: 'ABCD' }, 4096)).toContain('3-character');
@@ -78,6 +81,26 @@ describe('FillFormsDialog', () => {
     await act(async () => save(ui).props.onClick());
     expect(fill).toHaveBeenCalledWith(4, 7, [{ fieldId: 'contact', kind: 'radio', optionId: 'contact-post' }, { fieldId: 'frequency', kind: 'radio', optionId: 'frequency-weekly' }]);
     expect(close).not.toHaveBeenCalled();
+    act(() => ui.unmount());
+  });
+
+  it('uses source-named dropdown and list choices without an inferred clear value', async () => {
+    const { ui, fill, close } = await mount({ fill: vi.fn().mockResolvedValue(null) });
+    const dropdown = ui.root.findByProps({ 'aria-label': 'Shipping method, page 4' });
+    const list = ui.root.findByProps({ 'aria-label': 'Delivery window, page 4' });
+    expect(dropdown.type).toBe('select');
+    expect(dropdown.props.value).toBe('shipping-ground');
+    expect(dropdown.props.size).toBeUndefined();
+    expect(list.type).toBe('select');
+    expect(list.props.value).toBe('');
+    expect(list.props.size).toBe(3);
+    expect(list.findAllByType('option').map(option => option.children.join(''))).toEqual(['Choose an option', 'Morning', 'Afternoon', 'Evening']);
+    act(() => dropdown.props.onChange({ target: { value: 'shipping-air' } }));
+    act(() => list.props.onChange({ target: { value: 'window-evening' } }));
+    await act(async () => save(ui).props.onClick());
+    expect(fill).toHaveBeenCalledWith(4, 7, [{ fieldId: 'shipping', kind: 'choice', optionId: 'shipping-air' }, { fieldId: 'window', kind: 'choice', optionId: 'window-evening' }]);
+    expect(close).not.toHaveBeenCalled();
+    expect(ui.root.findByProps({ 'aria-label': 'Delivery window, page 4' }).props.value).toBe('window-evening');
     act(() => ui.unmount());
   });
 

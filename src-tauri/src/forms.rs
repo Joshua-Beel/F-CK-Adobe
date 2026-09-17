@@ -23,6 +23,7 @@ mod tests {
     const FIXTURE: &[u8] = include_bytes!("../tests/fixtures/reportlab-plain-fields.pdf");
     const MIXED: &[u8] = include_bytes!("../tests/fixtures/reportlab-mixed-fields.pdf");
     const RADIO: &[u8] = include_bytes!("../tests/fixtures/reportlab-radio-fields.pdf");
+    const CHOICE:&[u8]=include_bytes!("../tests/fixtures/reportlab-choice-fields.pdf");
     fn session(bytes: Vec<u8>) -> EditSession { EditSession::new(bytes, 1) }
     fn fixture() -> EditSession { session(FIXTURE.to_vec()) }
     fn mutated(change: impl FnOnce(&mut Document)) -> EditSession {
@@ -31,6 +32,32 @@ mod tests {
     }
     fn field_ids(document: &Document) -> Vec<ObjectId> {
         dict(document, document.catalog().unwrap().get(b"AcroForm").unwrap()).unwrap().get(b"Fields").unwrap().as_array().unwrap().iter().map(|value| value.as_reference().unwrap()).collect()
+    }
+    #[test]
+    fn choices_tagged_display_export_mapping_defaults_and_unchanged_appearance_are_exact() {
+        let source=session(CHOICE.to_vec());let parsed=FormDocument::parse(&source).unwrap();let original=parsed.document.clone();let field=&parsed.fields[0].dto;let choice=field.choice.as_ref().unwrap();assert_eq!(choice.presentation,"dropdown");assert_eq!(field.value,"south-002");let wire=serde_json::to_value(FormDocument::query(&source,9)).unwrap();assert_eq!(wire["fields"][0]["kind"],"choice");assert_eq!(wire["fields"][0]["presentation"],"dropdown");assert_eq!(wire["fields"][0]["options"][0]["label"],"North Hub");assert!(wire["fields"][0].get("value").is_none()&&wire["fields"][0]["options"][0].get("export").is_none());let patch:FieldValue=serde_json::from_value(serde_json::json!({"kind":"choice","fieldId":field.field_id,"optionId":choice.options[0].option_id})).unwrap();assert!(serde_json::from_value::<FieldValue>(serde_json::json!({"kind":"choice","fieldId":field.field_id,"optionId":null})).is_err());assert!(serde_json::from_value::<FieldValue>(serde_json::json!({"kind":"choice","fieldId":field.field_id,"optionId":choice.options[0].option_id,"value":"forged"})).is_err());
+        let(bytes,fields)=parsed.prepare(&[patch]).unwrap();assert_eq!(fields[0].value,"north-001");let output=FormDocument::parse(&session(bytes)).unwrap();let ids=field_ids(&original);let changed=output.document.get_dictionary(ids[0]).unwrap();assert_eq!(text(changed.get(b"V").unwrap()).unwrap(),"north-001");assert_eq!(changed.get(b"I").unwrap().as_array().unwrap(),&vec![Object::Integer(0)]);for key in[b"Opt".as_slice(),b"DV",b"BS",b"MK",b"Rect",b"DA"]{assert_eq!(changed.get(key).unwrap(),original.get_dictionary(ids[0]).unwrap().get(key).unwrap());}assert_eq!(output.document.get_object(ids[1]).unwrap(),original.get_object(ids[1]).unwrap());for(id,value)in&original.objects{assert_eq!(output.document.get_object(*id).unwrap(),if *id==ids[0]{output.document.get_object(*id).unwrap()}else{value});}assert_eq!(source.source,CHOICE);
+    }
+    #[test]
+    fn choices_unchanged_patches_keep_original_appearance_and_blank_state() {
+        let source=session(CHOICE.to_vec());let parsed=FormDocument::parse(&source).unwrap();let original=parsed.document.clone();let ids=field_ids(&original);let patches=parsed.fields.iter().enumerate().map(|(index,field)|FieldValue::Choice {field_id:field.dto.field_id.clone(),option_id:field.dto.choice.as_ref().unwrap().options[if index==0{1}else{0}].option_id.clone()}).collect::<Vec<_>>();let(bytes,_)=parsed.prepare(&patches).unwrap();let output=Document::load_mem(&bytes).unwrap();assert_eq!(output.get_object(ids[0]).unwrap(),original.get_object(ids[0]).unwrap(),"An unchanged submitted field must retain its original AP reference and state");
+        let mut blank=Document::load_mem(include_bytes!("../tests/fixtures/reportlab-choice-blank-fields.pdf")).unwrap();let ids=field_ids(&blank);blank.get_dictionary_mut(ids[0]).unwrap().remove(b"V");blank.get_dictionary_mut(ids[0]).unwrap().set("I",Vec::<Object>::new());let mut bytes=Vec::new();blank.save_to(&mut bytes).unwrap();let source=session(bytes.clone());let parsed=FormDocument::parse(&source).unwrap();let patch=FieldValue::Choice {field_id:parsed.fields[1].dto.field_id.clone(),option_id:parsed.fields[1].dto.choice.as_ref().unwrap().options[0].option_id.clone()};let(output,_)=parsed.prepare(&[patch]).unwrap();let output=Document::load_mem(&output).unwrap();assert_eq!(output.get_object(ids[0]).unwrap(),blank.get_object(ids[0]).unwrap());assert_eq!(source.source,bytes);
+    }
+    #[test]
+    fn choices_mixed_kinds_unchanged_patches_validate_and_preserve_original_objects() {
+        let mut doc=Document::load_mem(CHOICE).unwrap();let pages=doc.catalog().unwrap().get(b"Pages").unwrap().as_reference().unwrap();let form=doc.catalog().unwrap().get(b"AcroForm").unwrap().as_reference().unwrap();let mut roots=field_ids(&doc).into_iter().map(Object::Reference).collect::<Vec<_>>();for fixture in[MIXED,RADIO]{let mut extra=Document::load_mem(fixture).unwrap();extra.renumber_objects_with(doc.max_id+1);let field_roots=field_ids(&extra);roots.extend(field_roots.into_iter().map(Object::Reference));let page=*extra.get_pages().values().next().unwrap();extra.get_dictionary_mut(page).unwrap().set("Parent",pages);doc.objects.extend(extra.objects);doc.max_id=doc.objects.keys().map(|id|id.0).max().unwrap();doc.get_dictionary_mut(pages).unwrap().get_mut(b"Kids").unwrap().as_array_mut().unwrap().push(Object::Reference(page));}doc.get_dictionary_mut(pages).unwrap().set("Count",3);doc.get_dictionary_mut(form).unwrap().set("Fields",roots);let mut bytes=Vec::new();doc.save_to(&mut bytes).unwrap();let source=EditSession::new(bytes.clone(),3);let parsed=FormDocument::parse(&source).unwrap();let original=parsed.document.clone();assert_eq!(parsed.fields.len(),5);let mut patches=Vec::new();let mut changed_id=None;for field in &parsed.fields{let dto=&field.dto;patches.push(if let Some(choice)=&dto.choice{let index=if choice.presentation=="list"{changed_id=Some(field.object);0}else{1};FieldValue::Choice {field_id:dto.field_id.clone(),option_id:choice.options[index].option_id.clone()}}else if let Some(radio)=&dto.radio{FieldValue::Radio {field_id:dto.field_id.clone(),option_id:radio.selected_option_id.clone().unwrap()}}else if let Some(checked)=dto.checked{FieldValue::Checkbox {field_id:dto.field_id.clone(),checked}}else{FieldValue::Text {field_id:dto.field_id.clone(),value:dto.value.clone()}});}let(output,_)=parsed.prepare(&patches).unwrap();let output=Document::load_mem(&output).unwrap();for(id,value)in&original.objects{if Some(*id)!=changed_id{assert_eq!(output.get_object(*id).unwrap(),value,"Only the semantically changed field may alter an original object");}}
+        let fields=FormDocument::parse(&source).unwrap().fields;let changed=patches[1].clone();for field in &fields{let dto=&field.dto;let wrong=if dto.checked.is_some(){FieldValue::Choice {field_id:dto.field_id.clone(),option_id:"forged".into()}}else if dto.radio.is_some(){FieldValue::Text {field_id:dto.field_id.clone(),value:dto.value.clone()}}else if dto.choice.is_some(){FieldValue::Checkbox {field_id:dto.field_id.clone(),checked:false}}else{FieldValue::Radio {field_id:dto.field_id.clone(),option_id:"forged".into()}};assert!(FormDocument::parse(&source).unwrap().prepare(&[changed.clone(),wrong]).is_err());}assert!(FormDocument::parse(&source).unwrap().prepare(&[changed.clone(),patches[0].clone(),patches[0].clone()]).is_err());assert!(FormDocument::parse(&source).unwrap().prepare(&[changed,FieldValue::Choice {field_id:"unknown".into(),option_id:"unknown".into()}]).is_err());assert_eq!(source.source,bytes);
+    }
+    #[test]
+    fn choices_options_budget_all_labels_fit_strings_and_unknown_appearances_refuse() {
+        let build=|count:usize|{let mut doc=Document::load_mem(CHOICE).unwrap();let original=field_ids(&doc)[0];let field=doc.get_dictionary(original).unwrap().clone();let page=*doc.get_pages().values().next().unwrap();let form=doc.catalog().unwrap().get(b"AcroForm").unwrap().as_reference().unwrap();let mut refs=Vec::new();for index in 0..count{let mut field=field.clone();field.set("T",Object::string_literal(format!("Choice {index}")));let mut options=field.get(b"Opt").unwrap().as_array().unwrap().clone();options.extend((3..32).map(|option|Object::string_literal(format!("Option {option}"))));field.set("Opt",options);refs.push(Object::Reference(doc.add_object(field)));}doc.get_dictionary_mut(form).unwrap().set("Fields",refs.clone());doc.get_dictionary_mut(page).unwrap().set("Annots",refs);let mut bytes=Vec::new();doc.save_to(&mut bytes).unwrap();session(bytes)};assert_eq!(FormDocument::parse(&build(8)).unwrap().fields.iter().map(|field|field.dto.choice.as_ref().unwrap().options.len()).sum::<usize>(),256);assert_eq!(FormDocument::parse(&build(9)).err().unwrap(),"Form filling is limited to 256 radio and choice options in total.");
+        let mut doc=Document::load_mem(CHOICE).unwrap();for id in field_ids(&doc){let field=doc.get_dictionary_mut(id).unwrap();let options=field.get(b"Opt").unwrap().as_array().unwrap().iter().map(|option|option.as_array().unwrap()[1].clone()).collect::<Vec<_>>();let value=options[1].clone();field.set("Opt",options);field.set("V",value.clone());field.set("DV",value);}let mut bytes=Vec::new();doc.save_to(&mut bytes).unwrap();assert_eq!(FormDocument::parse(&session(bytes)).unwrap().fields[0].dto.value,"South Hub");
+        for kind in 0..4{let mut doc=Document::load_mem(CHOICE).unwrap();let ids=field_ids(&doc);match kind{0=>{doc.get_dictionary_mut(ids[0]).unwrap().get_mut(b"Opt").unwrap().as_array_mut().unwrap()[0]=Object::Array(vec![Object::string_literal("north-001"),Object::string_literal("W".repeat(80))]);},1=>{doc.get_dictionary_mut(ids[1]).unwrap().set("Rect",vec![60.into(),504.into(),280.into(),544.into()]);},2=>{doc.get_dictionary_mut(ids[1]).unwrap().remove(b"AP");},_=>{let normal=doc.get_dictionary(ids[0]).unwrap().get(b"AP").unwrap().as_dict().unwrap().get(b"N").unwrap().as_reference().unwrap();let stream=doc.get_object_mut(normal).unwrap().as_stream_mut().unwrap();let content=stream.decompressed_content_with_limit(MAX_AP).unwrap();stream.dict.remove(b"Filter");stream.set_content(String::from_utf8(content).unwrap().replace("South Hub","Forged").into_bytes());}}let mut bytes=Vec::new();doc.save_to(&mut bytes).unwrap();assert_eq!(FormDocument::query(&session(bytes),1).status,"unsupported","Choice layout case {kind}");}
+    }
+    #[test]
+    fn choices_refuse_unsafe_flags_ambiguous_options_indices_styles_and_patch_kinds() {
+        for kind in 0..17{let mut doc=Document::load_mem(CHOICE).unwrap();let ids=field_ids(&doc);let field=doc.get_dictionary_mut(ids[0]).unwrap();match kind{0=>field.set("Ff",131072|262144),1=>field.set("Ff",131072|2097152),2=>field.set("Ff",131072|524288),3=>field.set("Ff",131073),4=>field.set("I",vec![Object::Integer(0)]),5=>field.set("I",vec![Object::Integer(1),Object::Integer(2)]),6=>field.set("TI",1),7=>field.set("V",Object::string_literal("unknown")),8=>field.set("DV",Object::string_literal("unknown")),9=>field.set("Opt",vec![Object::string_literal("duplicate");2]),10=>field.set("Opt",vec![Object::string_literal("A");33]),11=>field.set("Opt",vec![Object::Array(vec![Object::string_literal("export"),Object::string_literal("label"),Object::string_literal("extra")])]),12=>field.set("Q",1),13=>field.set("F",6),14=>field.set("Parent",ids[1]),15=>field.set("AA",dictionary!{}),_=>field.set("Opt",vec![Object::string_literal("é")])}let mut bytes=Vec::new();doc.save_to(&mut bytes).unwrap();assert_eq!(FormDocument::query(&session(bytes),1).status,"unsupported","Choice adversarial case {kind}");}
+        let source=session(CHOICE.to_vec());let field=FormDocument::parse(&source).unwrap().fields[0].dto.clone();for patches in[vec![FieldValue::Text {field_id:field.field_id.clone(),value:"North Hub".into()}],vec![FieldValue::Radio {field_id:field.field_id.clone(),option_id:field.choice.as_ref().unwrap().options[0].option_id.clone()}],vec![FieldValue::Choice {field_id:field.field_id.clone(),option_id:"unknown".into()}]]{assert!(FormDocument::parse(&source).unwrap().prepare(&patches).is_err());}assert_eq!(source.source,CHOICE);
     }
     #[test]
     fn radios_tagged_selected_blank_source_switching_and_raw_appearances_are_exact() {
@@ -240,7 +267,12 @@ mod tests {
     }
 }
 #[derive(Clone, Debug)]
-pub struct FormField { pub field_id: String, pub name: String, pub page: usize, pub value: String, pub max_length: Option<usize>, pub checked: Option<bool>, pub(crate) on_state: Option<String>, pub radio: Option<RadioInfo> }
+pub struct FormField { pub field_id: String, pub name: String, pub page: usize, pub value: String, pub max_length: Option<usize>, pub checked: Option<bool>, pub(crate) on_state: Option<String>, pub radio: Option<RadioInfo>, pub choice:Option<ChoiceInfo> }
+#[derive(Clone,Debug)]
+pub struct ChoiceInfo { pub presentation:&'static str, pub options:Vec<ChoiceOption>, pub selected_option_id:Option<String> }
+#[derive(Clone,Debug,Serialize)]
+#[serde(rename_all="camelCase")]
+pub struct ChoiceOption { pub option_id:String, pub label:String, #[serde(skip)] pub(crate) export:String }
 #[derive(Clone,Debug)]
 pub struct RadioInfo { pub options:Vec<RadioOption>, pub selected_option_id:Option<String> }
 #[derive(Clone,Debug,Serialize)]
@@ -248,9 +280,10 @@ pub struct RadioInfo { pub options:Vec<RadioOption>, pub selected_option_id:Opti
 pub struct RadioOption { pub option_id:String, pub label:String, #[serde(skip)] pub(crate) object:ObjectId }
 impl Serialize for FormField {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        let mut map = serializer.serialize_map(Some(6))?;
+        let mut map = serializer.serialize_map(Some(if self.choice.is_some(){7}else{6}))?;
         map.serialize_entry("fieldId", &self.field_id)?; map.serialize_entry("name", &self.name)?; map.serialize_entry("page", &self.page)?;
-        if let Some(radio)=&self.radio {map.serialize_entry("kind","radio")?;map.serialize_entry("options",&radio.options)?;map.serialize_entry("selectedOptionId",&radio.selected_option_id)?;}
+        if let Some(choice)=&self.choice {map.serialize_entry("kind","choice")?;map.serialize_entry("presentation",choice.presentation)?;map.serialize_entry("options",&choice.options)?;map.serialize_entry("selectedOptionId",&choice.selected_option_id)?;}
+        else if let Some(radio)=&self.radio {map.serialize_entry("kind","radio")?;map.serialize_entry("options",&radio.options)?;map.serialize_entry("selectedOptionId",&radio.selected_option_id)?;}
         else if let Some(checked) = self.checked { map.serialize_entry("kind", "checkbox")?; map.serialize_entry("checked", &checked)?; }
         else { map.serialize_entry("kind", "text")?; map.serialize_entry("value", &self.value)?; map.serialize_entry("maxLength", &self.max_length)?; }
         map.end()
@@ -262,8 +295,9 @@ pub enum FieldValue {
     Text { #[serde(rename = "fieldId")] field_id: String, value: String },
     Checkbox { #[serde(rename = "fieldId")] field_id: String, checked: bool },
     Radio { #[serde(rename="fieldId")] field_id:String, #[serde(rename="optionId")] option_id:String },
+    Choice { #[serde(rename="fieldId")] field_id:String, #[serde(rename="optionId")] option_id:String },
 }
-impl FieldValue { fn field_id(&self) -> &str { match self { Self::Text { field_id, .. } | Self::Checkbox { field_id, .. } | Self::Radio {field_id,..} => field_id } } }
+impl FieldValue { fn field_id(&self) -> &str { match self { Self::Text { field_id, .. } | Self::Checkbox { field_id, .. } | Self::Radio {field_id,..} | Self::Choice {field_id,..} => field_id } } }
 
 #[derive(Clone)]
 struct Style { width: f32, height: f32, border: f32, background: Option<Vec<f32>>, border_color: Option<Vec<f32>>, text_color: Vec<f32>, font: String, size: f32, font_object: Object }
@@ -409,6 +443,26 @@ fn radio_group(doc:&Document,parent:&Dictionary,id:ObjectId,widgets:&HashMap<Obj
     Ok((group_page.ok_or("The radio page is missing.")?,RadioInfo {options,selected_option_id:selected},current))
 }
 
+fn validate_text_appearance(document:&Document,field:&Dictionary,style:&Style,expected:&Content<Vec<Operation>>,required:bool,ap_bytes:&mut usize)->Result<(),String> {
+if let Ok(ap) = field.get(b"AP") {
+    let ap = dict(&document, ap)?; keys(ap, &[b"N"])?;
+    let stream = object(&document, ap.get(b"N").map_err(|_| "The form normal appearance is missing.")?)?.as_stream().map_err(|_| "The form normal appearance is invalid.")?;
+    keys(&stream.dict, &[b"Type", b"Subtype", b"FormType", b"BBox", b"Matrix", b"Resources", b"Length", b"Filter"])?;
+    if stream.dict.get(b"Subtype").and_then(Object::as_name).ok() != Some(b"Form") || stream.dict.get(b"FormType").ok().is_some_and(|value| value.as_i64().ok() != Some(1)) { return Err("The form appearance type is unsupported.".into()); }
+    if stream.dict.get(b"Type").ok().is_some_and(|value| value.as_name().ok() != Some(b"XObject")) { return Err("The form appearance object type is invalid.".into()); }
+    let bbox = numbers(stream.dict.get(b"BBox").map_err(|_| "The form appearance bounds are missing.")?)?;
+    if bbox.len() != 4 || !bbox.iter().zip([0.0, 0.0, style.width, style.height]).all(|(a,b)| (a-b).abs() < 0.0001) { return Err("The form appearance bounds do not match its widget.".into()); }
+    if stream.dict.get(b"Matrix").ok().map(numbers).transpose()?.is_some_and(|matrix| matrix != vec![1.0,0.0,0.0,1.0,0.0,0.0]) { return Err("Rotated or transformed form appearances are unsupported.".into()); }
+    let resources = dict(&document, stream.dict.get(b"Resources").map_err(|_| "The form appearance resources are missing.")?)?; keys(resources, &[b"Font", b"ProcSet"])?;
+    if resources.get(b"ProcSet").ok().is_some_and(|value| value.as_array().ok().is_none_or(|values| values.as_slice() != [Object::Name(b"PDF".to_vec()), Object::Name(b"Text".to_vec())])) { return Err("The form appearance procedure resources are unsupported.".into()); }
+    let fonts = dict(&document, resources.get(b"Font").map_err(|_| "The appearance font resource is missing.")?)?;
+    if fonts.len() != 1 { return Err("The appearance font resources are unsupported.".into()); } font(&document, fonts.get(style.font.as_bytes()).map_err(|_| "The appearance font differs from the form font.")?)?;
+    let decoded = stream.decompressed_content_with_limit(MAX_AP).map_err(|_| "The form appearance exceeds its decoding limit or uses an unsupported filter.")?; *ap_bytes += decoded.len(); if *ap_bytes > MAX_TEXT { return Err("The form appearances exceed 1 MiB.".into()); }
+    if !same_appearance(&Content::decode(&decoded).map_err(|_| "The form appearance cannot be parsed.")?, expected) { return Err("The form contains an unknown appearance or layout; filling it could discard artwork.".into()); }
+} else if required { return Err("A populated form field without its original appearance is unsupported.".into()); }
+    Ok(())
+}
+
 fn style(doc: &Document, form: &Dictionary, field: &Dictionary) -> Result<Style, String> {
     let rect = numbers(field.get(b"Rect").map_err(|_| "A form field has no rectangle.")?)?;
     if rect.len() != 4 { return Err("A form field rectangle is malformed.".into()); }
@@ -440,11 +494,42 @@ fn style(doc: &Document, form: &Dictionary, field: &Dictionary) -> Result<Style,
 // Standard Helvetica ASCII advance widths, matching ReportLab's standard-font metrics (1/1000 em).
 const WIDTHS: [u16; 95] = [278,278,355,556,556,889,667,191,333,333,389,584,278,333,278,278,556,556,556,556,556,556,556,556,556,556,278,278,584,584,584,556,1015,667,667,722,722,667,611,778,722,278,500,667,556,833,722,778,667,778,722,667,611,722,667,944,667,667,611,278,278,278,469,556,333,556,556,500,556,556,278,556,556,222,222,500,222,833,556,556,556,556,333,500,278,556,500,722,500,500,500,334,260,334,584];
 fn fits(field: &ParsedField, value: &str) -> Result<(), String> {
+    if field.dto.choice.is_some(){return Err("The submitted form patch has the wrong field kind.".into());}
     let style = field.style.as_ref().ok_or("The submitted form patch has the wrong field kind.")?;
+    fits_style(style,value,field.dto.max_length)
+}
+fn fits_style(style:&Style,value:&str,max_length:Option<usize>)->Result<(),String> {
     ascii(value)?;
-    if field.dto.max_length.is_some_and(|max| value.len() > max) { return Err("The form value exceeds the field's MaxLength.".into()); }
+    if max_length.is_some_and(|max| value.len() > max) { return Err("The form value exceeds the field's MaxLength.".into()); }
     let advance = value.bytes().map(|byte| WIDTHS[(byte - 32) as usize] as f32).sum::<f32>() * style.size / 1000.0;
     if advance > style.width - 8.0 * style.border - 1.0 || advance + 0.04 * style.size > style.width - 6.0 * style.border || value.starts_with(['j','/']) && style.border * 2.0 < 0.03 * style.size { return Err("The text does not fit this field at its existing font size without clipping. Use a shorter value.".into()); } Ok(())
+}
+
+fn choice_appearance(style:&Style,choice:&ChoiceInfo)->Result<Content<Vec<Operation>>,String> {
+    let selected=choice.options.iter().position(|option|Some(&option.option_id)==choice.selected_option_id.as_ref());
+    if choice.presentation=="dropdown"{return Ok(appearance(style,selected.map(|index|choice.options[index].label.as_str()).unwrap_or("")));}
+    let inner=style.height-4.0*style.border;let slots=(inner/(1.2*style.size)).floor() as usize;
+    if slots<choice.options.len(){return Err("This list box cannot display every option without scrolling or clipping.".into());}
+    let leading=inner/slots as f32;let last=style.height-2.0*style.border-style.size-(choice.options.len()-1) as f32*leading;
+    if last-0.225*style.size<2.0*style.border{return Err("The list box cannot display every option without clipping descenders.".into());}
+    let mut content=appearance(style,"");content.operations.truncate(content.operations.len()-4);
+    if let Some(index)=selected{content.operations.extend([op("rg",&[0.600006,0.756866,0.854904]),op("re",&[2.0*style.border,style.height-2.0*style.border-(index+1) as f32*leading,style.width-4.0*style.border,leading]),op("f",&[])]);}
+    content.operations.extend([op("g",&[0.0]),op("G",&[0.0])]);
+    for(index,option)in choice.options.iter().enumerate(){content.operations.push(op("BT",&[]));if index==0{content.operations.push(Operation::new("Tf",vec![Object::Name(style.font.as_bytes().to_vec()),Object::Real(style.size)]));}content.operations.extend([if Some(index)==selected{op("g",&[0.0])}else{paint(&style.text_color,false)},op("Td",&[4.0*style.border,style.height-2.0*style.border-style.size-index as f32*leading]),Operation::new("Tj",vec![Object::string_literal(option.label.as_bytes().to_vec())]),op("ET",&[])]);}
+    content.operations.extend([op("Q",&[]),op("EMC",&[])]);Ok(content)
+}
+fn choice_field(document:&Document,form:&Dictionary,field:&Dictionary,id:ObjectId,ap_bytes:&mut usize)->Result<(ChoiceInfo,Style,String),String> {
+    let flags=field.get(b"Ff").ok().map(|value|value.as_i64().map_err(|_|"The choice field flags are invalid.")).transpose()?.unwrap_or(0);
+    let presentation=match flags{0|2=>"list",131072|131074=>"dropdown",_=>return Err("Only noneditable single-select dropdowns and list boxes are supported.".into())};
+    if field.get(b"TI").ok().is_some_and(|value|value.as_i64().ok()!=Some(0)){return Err("Choice fields with a scrolled top index are unsupported.".into());}
+    let opts=object(document,field.get(b"Opt").map_err(|_|"The choice options are missing.")?)?.as_array().map_err(|_|"The choice options are invalid.")?;
+    if !(1..=32).contains(&opts.len()){return Err("Each choice field requires between one and 32 options.".into());}
+    let mut options=Vec::new();let mut exports=HashSet::new();let mut labels=HashSet::new();
+    for(index,value)in opts.iter().enumerate(){let value=object(document,value)?;let(export,label)=match value{Object::String(..)=>{let value=text(value)?;(value.clone(),value)},Object::Array(pair) if pair.len()==2=>(text(object(document,&pair[0])?)?,text(object(document,&pair[1])?)?),_=>return Err("A choice option must be a string or an export/display string pair.".into())};ascii(&export)?;ascii(&label)?;if export.trim().is_empty()||label.trim().is_empty()||!exports.insert(export.clone())||!labels.insert(label.clone()){return Err("Choice export values and display labels must be nonblank and distinct.".into());}options.push(ChoiceOption {option_id:format!("choice-{}-{}-{index}",id.0,id.1),label,export});}
+    let value=field.get(b"V").ok().map(text).transpose()?.unwrap_or_default();ascii(&value)?;let selected=if value.is_empty(){None}else{Some(options.iter().position(|option|option.export==value).ok_or("The choice value does not match a source export option.")?)};
+    if let Ok(indices)=field.get(b"I"){let indices=object(document,indices)?.as_array().map_err(|_|"The choice selected indices are invalid.")?;match selected{None if indices.is_empty()=>{},Some(index) if indices.len()==1&&indices[0].as_i64().ok()==Some(index as i64)=>{},_=>return Err("The choice value and selected index disagree.".into())}}
+    if let Ok(default)=field.get(b"DV"){let default=text(default)?;ascii(&default)?;if !default.is_empty()&&!options.iter().any(|option|option.export==default){return Err("The choice default does not match a source export option.".into());}}
+    let choice=ChoiceInfo {presentation,selected_option_id:selected.map(|index|options[index].option_id.clone()),options};let style=style(document,form,field)?;for option in &choice.options{fits_style(&style,&option.label,None)?;}let expected=choice_appearance(&style,&choice)?;validate_text_appearance(document,field,&style,&expected,presentation=="list"||selected.is_some(),ap_bytes)?;Ok((choice,style,value))
 }
 
 impl FormDocument {
@@ -485,7 +570,7 @@ impl FormDocument {
         if roots.len() > MAX_FIELDS { return Err("Form filling is limited to 256 fields.".into()); }
         let mut widgets = HashMap::new();
         for (page, id) in pages.iter().enumerate() { if let Ok(annots) = document.get_dictionary(*id).map_err(|_| "Invalid form page.")?.get(b"Annots") { let annots = object(&document, annots)?.as_array().map_err(|_| "The form widget list is invalid.")?; if annots.len() > MAX_FIELDS { return Err("The form widget list is too large.".into()); } for annot in annots { let id = annot.as_reference().map_err(|_| "Only referenced form widgets are supported.")?; if widgets.insert(id, page).is_some() { return Err("Repeated or ambiguous form widgets are not supported.".into()); } if widgets.len() > MAX_FIELDS { return Err("Form filling is limited to 256 total page widgets.".into()); } } } }
-        let mut fields = Vec::new(); let mut names = HashSet::new(); let mut ids = HashSet::new();let mut consumed_widgets=HashSet::new(); let mut text_bytes = 0; let mut ap_bytes = 0;
+        let mut fields = Vec::new(); let mut names = HashSet::new(); let mut ids = HashSet::new();let mut consumed_widgets=HashSet::new(); let mut text_bytes = 0; let mut ap_bytes = 0;let mut option_count=0;
         for reference in roots {
             let id = reference.as_reference().map_err(|_| "Only flat referenced form fields are supported.")?;
             if !ids.insert(id) { return Err("Repeated form field references are not supported.".into()); }
@@ -494,16 +579,19 @@ impl FormDocument {
                 let name=text(field.get(b"T").map_err(|_|"The radio field name is missing.")?)?;
                 if name.trim().is_empty() || name.len()>1024 || name.chars().any(char::is_control) || !names.insert(name.clone()){return Err("Unnamed or duplicate radio fields are unsupported.".into());}
                 let(page,radio,value)=radio_group(&document,field,id,&widgets,&pages,&mut consumed_widgets,&mut ap_bytes)?;
+                option_count+=radio.options.len();if option_count>256{return Err("Form filling is limited to 256 radio and choice options in total.".into());}
                 text_bytes+=name.len()+value.len()+radio.options.iter().map(|option|option.label.len()).sum::<usize>();if text_bytes>MAX_TEXT{return Err("The form names, options and values exceed 1 MiB.".into());}
-                fields.push(ParsedField {dto:FormField {field_id:format!("field-{}-{}",id.0,id.1),name,page,value,max_length:None,checked:None,on_state:None,radio:Some(radio)},object:id,style:None,on_state:None});continue;
+                fields.push(ParsedField {dto:FormField {field_id:format!("field-{}-{}",id.0,id.1),name,page,value,max_length:None,checked:None,on_state:None,radio:Some(radio),choice:None},object:id,style:None,on_state:None});continue;
             }
             if !consumed_widgets.insert(id){return Err("A form widget is repeated or shared between fields.".into());}
             let is_checkbox=field.get(b"FT").and_then(Object::as_name).ok()==Some(b"Btn");
+            let is_choice=field.get(b"FT").and_then(Object::as_name).ok()==Some(b"Ch");
             if is_checkbox { keys(field,&[b"Type",b"Subtype",b"FT",b"T",b"TU",b"V",b"DV",b"AS",b"F",b"Ff",b"Rect",b"P",b"AP",b"BS",b"MK",b"H"])?; }
+            else if is_choice{keys(field,&[b"Type",b"Subtype",b"FT",b"T",b"TU",b"V",b"DV",b"F",b"Ff",b"Rect",b"P",b"DA",b"AP",b"BS",b"MK",b"Q",b"Opt",b"I",b"TI"])?;}
             else { keys(field, &[b"Type", b"Subtype", b"FT", b"T", b"TU", b"V", b"DV", b"F", b"Ff", b"Rect", b"P", b"DA", b"AP", b"BS", b"MK", b"MaxLen", b"Q"])?; }
-            if field.get(b"Subtype").and_then(Object::as_name).ok() != Some(b"Widget") || !is_checkbox && field.get(b"FT").and_then(Object::as_name).ok() != Some(b"Tx") { return Err("Only flat single-line text fields and checkboxes with one merged widget are supported.".into()); }
+            if field.get(b"Subtype").and_then(Object::as_name).ok() != Some(b"Widget") || !is_checkbox&&!is_choice && field.get(b"FT").and_then(Object::as_name).ok() != Some(b"Tx") { return Err("Only supported text, checkbox, and choice fields with one merged widget are accepted.".into()); }
             if field.get(b"Type").ok().is_some_and(|value| value.as_name().ok() != Some(b"Annot")) { return Err("The form widget annotation type is invalid.".into()); }
-            if field.get(b"F").and_then(Object::as_i64).ok() != Some(4) || field.get(b"Ff").ok().is_some_and(|value| !matches!(value.as_i64().ok(), Some(0 | 2))) || field.get(b"Q").ok().is_some_and(|value| value.as_i64().ok() != Some(0)) { return Err("The form flags or text alignment are unsupported.".into()); }
+            if field.get(b"F").and_then(Object::as_i64).ok() != Some(4) || !is_choice&&field.get(b"Ff").ok().is_some_and(|value| !matches!(value.as_i64().ok(), Some(0 | 2))) || field.get(b"Q").ok().is_some_and(|value| value.as_i64().ok() != Some(0)) { return Err("The form flags or text alignment are unsupported.".into()); }
             let page = *widgets.get(&id).ok_or("The canonical form field has no unique page widget.")?;
             if field.get(b"P").and_then(Object::as_reference).ok() != Some(pages[page]) { return Err("The form widget page relationship is inconsistent.".into()); }
             let name = text(field.get(b"T").map_err(|_| "An unnamed form field is unsupported.")?)?;
@@ -511,32 +599,18 @@ impl FormDocument {
             if is_checkbox {
                 let (on_state,checked)=checkbox(&document,field,&mut ap_bytes)?;
                 text_bytes+=name.len(); if text_bytes>MAX_TEXT {return Err("The form text exceeds 1 MiB.".into());}
-                fields.push(ParsedField {dto:FormField {field_id:format!("field-{}-{}",id.0,id.1),name,page,value:checked.to_string(),max_length:None,checked:Some(checked),on_state:Some(String::from_utf8(on_state.clone()).map_err(|_|"Invalid checkbox state name.")?),radio:None},object:id,style:None,on_state:Some(on_state)});
+                fields.push(ParsedField {dto:FormField {field_id:format!("field-{}-{}",id.0,id.1),name,page,value:checked.to_string(),max_length:None,checked:Some(checked),on_state:Some(String::from_utf8(on_state.clone()).map_err(|_|"Invalid checkbox state name.")?),radio:None,choice:None},object:id,style:None,on_state:Some(on_state)});
                 continue;
             }
+            if is_choice{let(choice,style,value)=choice_field(&document,form,field,id,&mut ap_bytes)?;option_count+=choice.options.len();if option_count>256{return Err("Form filling is limited to 256 radio and choice options in total.".into());}text_bytes+=name.len()+value.len()+choice.options.iter().map(|option|option.label.len()+option.export.len()).sum::<usize>();if text_bytes>MAX_TEXT{return Err("The form names, options and values exceed 1 MiB.".into());}fields.push(ParsedField {dto:FormField {field_id:format!("field-{}-{}",id.0,id.1),name,page,value,max_length:None,checked:None,on_state:None,radio:None,choice:Some(choice)},object:id,style:Some(style),on_state:None});continue;}
             let value = field.get(b"V").ok().map(text).transpose()?.unwrap_or_default(); ascii(&value)?;
             if let Ok(default) = field.get(b"DV") { ascii(&text(default)?)?; }
             text_bytes += name.len() + value.len(); if text_bytes > MAX_TEXT { return Err("The form text exceeds 1 MiB.".into()); }
             let max_length = field.get(b"MaxLen").ok().map(|value| value.as_i64().map_err(|_| "The form MaxLength is invalid.").and_then(|value| usize::try_from(value).map_err(|_| "The form MaxLength is invalid."))).transpose()?;
             if max_length.is_some_and(|value| value == 0 || value > i32::MAX as usize) { return Err("The form MaxLength is unsupported.".into()); }
             let style = style(&document, form, field)?;
-            if let Ok(ap) = field.get(b"AP") {
-                let ap = dict(&document, ap)?; keys(ap, &[b"N"])?;
-                let stream = object(&document, ap.get(b"N").map_err(|_| "The form normal appearance is missing.")?)?.as_stream().map_err(|_| "The form normal appearance is invalid.")?;
-                keys(&stream.dict, &[b"Type", b"Subtype", b"FormType", b"BBox", b"Matrix", b"Resources", b"Length", b"Filter"])?;
-                if stream.dict.get(b"Subtype").and_then(Object::as_name).ok() != Some(b"Form") || stream.dict.get(b"FormType").ok().is_some_and(|value| value.as_i64().ok() != Some(1)) { return Err("The form appearance type is unsupported.".into()); }
-                if stream.dict.get(b"Type").ok().is_some_and(|value| value.as_name().ok() != Some(b"XObject")) { return Err("The form appearance object type is invalid.".into()); }
-                let bbox = numbers(stream.dict.get(b"BBox").map_err(|_| "The form appearance bounds are missing.")?)?;
-                if bbox.len() != 4 || !bbox.iter().zip([0.0, 0.0, style.width, style.height]).all(|(a,b)| (a-b).abs() < 0.0001) { return Err("The form appearance bounds do not match its widget.".into()); }
-                if stream.dict.get(b"Matrix").ok().map(numbers).transpose()?.is_some_and(|matrix| matrix != vec![1.0,0.0,0.0,1.0,0.0,0.0]) { return Err("Rotated or transformed form appearances are unsupported.".into()); }
-                let resources = dict(&document, stream.dict.get(b"Resources").map_err(|_| "The form appearance resources are missing.")?)?; keys(resources, &[b"Font", b"ProcSet"])?;
-                if resources.get(b"ProcSet").ok().is_some_and(|value| value.as_array().ok().is_none_or(|values| values.as_slice() != [Object::Name(b"PDF".to_vec()), Object::Name(b"Text".to_vec())])) { return Err("The form appearance procedure resources are unsupported.".into()); }
-                let fonts = dict(&document, resources.get(b"Font").map_err(|_| "The appearance font resource is missing.")?)?;
-                if fonts.len() != 1 { return Err("The appearance font resources are unsupported.".into()); } font(&document, fonts.get(style.font.as_bytes()).map_err(|_| "The appearance font differs from the form font.")?)?;
-                let decoded = stream.decompressed_content_with_limit(MAX_AP).map_err(|_| "The form appearance exceeds its decoding limit or uses an unsupported filter.")?; ap_bytes += decoded.len(); if ap_bytes > MAX_TEXT { return Err("The form appearances exceed 1 MiB.".into()); }
-                if !same_appearance(&Content::decode(&decoded).map_err(|_| "The form appearance cannot be parsed.")?, &appearance(&style, &value)) { return Err("The form contains an unknown appearance or layout; filling it could discard artwork.".into()); }
-            } else if !value.is_empty() { return Err("A populated form field without its original appearance is unsupported.".into()); }
-            let parsed = ParsedField { dto: FormField { field_id: format!("field-{}-{}", id.0, id.1), name, page, value, max_length, checked:None, on_state:None, radio:None }, object: id, style:Some(style), on_state:None }; fits(&parsed, &parsed.dto.value)?; fields.push(parsed);
+            validate_text_appearance(&document,field,&style,&appearance(&style,&value),!value.is_empty(),&mut ap_bytes)?;
+            let parsed = ParsedField { dto: FormField { field_id: format!("field-{}-{}", id.0, id.1), name, page, value, max_length, checked:None, on_state:None, radio:None,choice:None }, object: id, style:Some(style), on_state:None }; fits(&parsed, &parsed.dto.value)?; fields.push(parsed);
         }
         if consumed_widgets.len() != widgets.len() { return Err("The form contains orphaned or foreign page annotations.".into()); }
         Ok(Self { document, fields, pages: pages.len() })
@@ -547,20 +621,22 @@ impl FormDocument {
     }
     pub fn prepare(mut self, values: &[FieldValue]) -> Result<(Vec<u8>, Vec<FormField>), String> {
         if values.is_empty() || values.len() > MAX_FIELDS { return Err("Change between one and 256 form fields before saving a copy.".into()); }
-        let mut seen = HashSet::new(); let mut changed = false;
+        let mut seen = HashSet::new(); let mut changed = HashSet::new();
         for patch in values {
             if !seen.insert(patch.field_id()) { return Err("A form field was submitted more than once.".into()); }
             let field=self.fields.iter_mut().find(|field|field.dto.field_id==patch.field_id()).ok_or("A form field no longer exists. Refresh the field list.")?;
-            match patch {
-                FieldValue::Text {value,..}=>{fits(field,value)?;changed|=*value!=field.dto.value;field.dto.value=value.clone();},
-                FieldValue::Checkbox {checked,..}=>{let current=field.dto.checked.ok_or("The submitted form patch has the wrong field kind.")?;changed|=current!=*checked;field.dto.checked=Some(*checked);field.dto.value=checked.to_string();},
-                FieldValue::Radio {option_id,..}=>{let radio=field.dto.radio.as_mut().ok_or("The submitted form patch has the wrong field kind.")?;let option=radio.options.iter().find(|option|&option.option_id==option_id).ok_or("The radio option no longer exists. Refresh the field list.")?;changed|=radio.selected_option_id.as_ref()!=Some(option_id);radio.selected_option_id=Some(option_id.clone());field.dto.value=option.label.clone();},
-            }
+            let different=match patch {
+                FieldValue::Text {value,..}=>{fits(field,value)?;let different=*value!=field.dto.value;field.dto.value=value.clone();different},
+                FieldValue::Checkbox {checked,..}=>{let current=field.dto.checked.ok_or("The submitted form patch has the wrong field kind.")?;field.dto.checked=Some(*checked);field.dto.value=checked.to_string();current!=*checked},
+                FieldValue::Radio {option_id,..}=>{let radio=field.dto.radio.as_mut().ok_or("The submitted form patch has the wrong field kind.")?;let option=radio.options.iter().find(|option|&option.option_id==option_id).ok_or("The radio option no longer exists. Refresh the field list.")?;let different=radio.selected_option_id.as_ref()!=Some(option_id);radio.selected_option_id=Some(option_id.clone());field.dto.value=option.label.clone();different},
+                FieldValue::Choice {option_id,..}=>{let choice=field.dto.choice.as_mut().ok_or("The submitted form patch has the wrong field kind.")?;let option=choice.options.iter().find(|option|&option.option_id==option_id).ok_or("The choice option no longer exists. Refresh the field list.")?;let different=choice.selected_option_id.as_ref()!=Some(option_id);choice.selected_option_id=Some(option_id.clone());field.dto.value=option.export.clone();different},
+            };
+            if different{changed.insert(field.dto.field_id.clone());}
         }
-        if !changed { return Err("Change at least one form value before saving a new copy.".into()); }
-        if self.fields.iter().map(|field| field.dto.name.len() + field.dto.value.len()+field.dto.radio.as_ref().map(|radio|radio.options.iter().map(|option|option.label.len()).sum::<usize>()).unwrap_or(0)).sum::<usize>() > MAX_TEXT { return Err("The form names, options and values exceed 1 MiB.".into()); }
+        if changed.is_empty() { return Err("Change at least one form value before saving a new copy.".into()); }
+        if self.fields.iter().map(|field| field.dto.name.len() + field.dto.value.len()+field.dto.radio.as_ref().map(|radio|radio.options.iter().map(|option|option.label.len()).sum::<usize>()).unwrap_or(0)+field.dto.choice.as_ref().map(|choice|choice.options.iter().map(|option|option.label.len()+option.export.len()).sum::<usize>()).unwrap_or(0)).sum::<usize>() > MAX_TEXT { return Err("The form names, options and values exceed 1 MiB.".into()); }
         for field in &self.fields {
-            if !seen.contains(field.dto.field_id.as_str()) { continue; }
+            if !changed.contains(field.dto.field_id.as_str()) { continue; }
             if let Some(radio)=&field.dto.radio {
                 let selected=radio.options.iter().find(|option|Some(&option.option_id)==radio.selected_option_id.as_ref()).ok_or("A radio patch must select one existing option.")?;
                 self.document.get_dictionary_mut(field.object).map_err(|_|"The radio parent disappeared during preparation.")?.set("V",Object::Name(selected.label.as_bytes().to_vec()));
@@ -572,10 +648,11 @@ impl FormDocument {
                 continue;
             }
             let style=field.style.as_ref().ok_or("Missing form text style.")?;
-            let content = appearance(style, &field.dto.value).encode().map_err(|_| "Could not encode the form appearance.")?;
+            let content = if let Some(choice)=&field.dto.choice{choice_appearance(style,choice)?}else{appearance(style,&field.dto.value)}.encode().map_err(|_| "Could not encode the form appearance.")?;
             let resources = dictionary! { "Font" => dictionary! { style.font.as_bytes() => style.font_object.clone() }, "ProcSet" => vec![Object::Name(b"PDF".to_vec()), Object::Name(b"Text".to_vec())] };
             let ap = self.document.add_object(Stream::new(dictionary! { "Type" => "XObject", "Subtype" => "Form", "FormType" => 1, "BBox" => real(&[0.0,0.0,style.width,style.height]), "Matrix" => real(&[1.0,0.0,0.0,1.0,0.0,0.0]), "Resources" => resources }, content));
             let widget = self.document.get_dictionary_mut(field.object).map_err(|_| "The form field disappeared during preparation.")?; widget.set("V", Object::string_literal(field.dto.value.as_bytes().to_vec())); widget.set("AP", dictionary! { "N" => ap });
+            if let Some(choice)=&field.dto.choice{let index=choice.options.iter().position(|option|Some(&option.option_id)==choice.selected_option_id.as_ref()).ok_or("A choice patch must select one source option.")?;widget.set("I",vec![Object::Integer(index as i64)]);}
         }
         let mut bytes = Vec::new(); self.document.save_to(&mut bytes).map_err(|_| "Could not serialize the filled form.")?; if bytes.len() > MAX_OUTPUT { return Err("The filled form output exceeds 256 MiB.".into()); } Ok((bytes, self.fields.into_iter().map(|field| field.dto).collect()))
     }
