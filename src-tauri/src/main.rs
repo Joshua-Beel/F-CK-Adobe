@@ -22,6 +22,9 @@ async fn render_page(service: State<'_, PdfService>, id: u64, page: u16, width: 
 async fn close_document(service: State<'_, PdfService>, id: u64) -> Result<(), String> { service.close(id).await }
 
 #[tauri::command]
+async fn page_text(service: State<'_, PdfService>, id: u64, page: u16, revision: u64) -> Result<String, String> { service.text(id, page, revision).await }
+
+#[tauri::command]
 async fn edit_pages(service: State<'_, PdfService>, id: u64, edit: editor::PageEdit) -> Result<DocumentInfo, String> {
     service.edit(id, edit).await
 }
@@ -38,6 +41,6 @@ fn main() {
         let library = app.path().resource_dir()?.join("resources/pdfium/bin/pdfium.dll");
         app.manage(PdfService::start(library));
         Ok(())
-    }).invoke_handler(tauri::generate_handler![open_document, open_example, render_page, close_document, edit_pages, save_copy])
+    }).invoke_handler(tauri::generate_handler![open_document, open_example, render_page, close_document, edit_pages, save_copy, page_text])
       .run(tauri::generate_context!()).expect("Desktop application failed");
 }

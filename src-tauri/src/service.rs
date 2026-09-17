@@ -14,6 +14,7 @@ type Reply<T> = oneshot::Sender<Result<T, String>>;
 enum Request {
     Open(PathBuf, Reply<DocumentInfo>),
     Render(u64, u16, i32, Reply<Vec<u8>>),
+    Text(u64, u16, u64, Reply<String>),
     Close(u64, Reply<()>),
     Edit(u64, PageEdit, Reply<DocumentInfo>),
     Save(u64, Option<Vec<usize>>, PathBuf, Reply<SavedCopy>),
@@ -90,6 +91,19 @@ impl PdfService {
                         };
                         let _ = reply.send(result);
                     },
+                    Request::Text(id, page, revision, reply) => {
+                        if reply.is_closed() { continue; }
+                        let result = (|| {
+                            let (session, _) = sessions.get(&id).ok_or("Document is closed")?;
+                            if session.revision != revision { return Err("Document changed. Search again.".into()); }
+                            let spec = session.plan.get(page as usize).ok_or("Page is out of range")?;
+                            let document = documents.get(&id).ok_or("Document is closed")?;
+                            let source = document.pages().get(spec.source as i32).map_err(|e| e.to_string())?;
+                            let text = source.text().map_err(|e| e.to_string())?;
+                            Ok(text.all())
+                        })();
+                        let _ = reply.send(result);
+                    }
                     Request::Edit(id, edit, reply) => {
                         let result = (|| {
                             let (session, original) = sessions.get_mut(&id).ok_or("Document is closed")?;
@@ -129,6 +143,9 @@ impl PdfService {
     pub async fn close(&self, id: u64) -> Result<(), String> {
         let (tx, rx) = oneshot::channel(); self.sender.send(Request::Close(id, tx)).map_err(|e| e.to_string())?; rx.await.map_err(|e| e.to_string())?
     }
+    pub async fn text(&self, id: u64, page: u16, revision: u64) -> Result<String, String> {
+        let (tx, rx) = oneshot::channel(); self.sender.send(Request::Text(id, page, revision, tx)).map_err(|e| e.to_string())?; rx.await.map_err(|e| e.to_string())?
+    }
     pub async fn edit(&self, id: u64, edit: PageEdit) -> Result<DocumentInfo, String> {
         let (tx, rx) = oneshot::channel(); self.sender.send(Request::Edit(id, edit, tx)).map_err(|e| e.to_string())?; rx.await.map_err(|e| e.to_string())?
     }
@@ -149,6 +166,29 @@ fn current_info(session: &EditSession, original: &DocumentInfo) -> DocumentInfo 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn text_follows_page_edits_and_rejects_stale_or_closed_requests() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let service = PdfService::start(root.join("resources/pdfium/bin/pdfium.dll"));
+        for (fixture, count) in [("resources/welcome.pdf", 6), ("../test-corpus/synthetic-scan-98.pdf", 98), ("../test-corpus/synthetic-text-1500.pdf", 1500)] {
+            let (tx, rx) = oneshot::channel(); service.sender.send(Request::Open(root.join(fixture), tx)).unwrap();
+            let info = rx.blocking_recv().unwrap().unwrap();
+            let read = |page, revision| {
+                let (tx, rx) = oneshot::channel(); service.sender.send(Request::Text(info.id, page, revision, tx)).unwrap();
+                rx.blocking_recv().unwrap()
+            };
+            for page in 0..count {
+                assert!(read(page, 0).unwrap().contains(&format!("Page {} of {count}", page + 1)));
+            }
+            assert!(read(count, 0).is_err());
+            let (tx, rx) = oneshot::channel(); service.sender.send(Request::Edit(info.id, PageEdit::Move { from: 0, to: 1 }, tx)).unwrap();
+            let changed = rx.blocking_recv().unwrap().unwrap();
+            assert!(read(0, 0).is_err());
+            assert!(read(0, changed.revision).unwrap().contains(&format!("Page 2 of {count}")));
+            let (tx, rx) = oneshot::channel(); service.sender.send(Request::Close(info.id, tx)).unwrap(); rx.blocking_recv().unwrap().unwrap();
+            assert!(read(0, changed.revision).is_err());
+        }
+    }
     #[test]
     fn cache_evicts_and_clears_closed_documents() {
         let mut cache = Cache { entries: VecDeque::new(), weight: 0 };

@@ -15,6 +15,7 @@ Version 0.2.0 has a signed update package, but no Windows publisher signature. T
 ## What works
 
 - **Reading:** open PDFs in tabs, scroll through pages, pan, jump to a page, zoom from 10% to 400%, or fit the page to the window width.
+- **Search (source build):** Ctrl+F searches embedded PDF text, with optional case matching, selectable excerpts, and links to matching pages. Search follows page edits; scans need OCR first. Results show one excerpt per matching page, up to 500 pages.
 - **Organizing pages:** select thumbnails or enter a page range, rotate pages, move a page earlier or later, delete pages, and extract a selection into a new PDF.
 - **Saving:** undo and redo page edits, then use **Save a Copy**. Your original stays untouched, and the app asks before closing a document with unsaved edits.
 - **Workspace:** light and dark themes, an All tools panel, and recent files and stars for the current session.
@@ -27,6 +28,7 @@ Your PDFs stay on your computer. There's no document upload service or telemetry
 | --- | --- |
 | Open a PDF | Ctrl+O |
 | Save a copy | Ctrl+S |
+| Find text | Ctrl+F |
 | Undo / redo | Ctrl+Z / Ctrl+Shift+Z or Ctrl+Y |
 | Close a tab / switch tabs | Ctrl+W / Ctrl+Tab |
 | Actual size / fit width | Ctrl+1 / Ctrl+2 |
@@ -37,11 +39,11 @@ Your PDFs stay on your computer. There's no document upload service or telemetry
 
 ## What's still missing
 
-Text and image editing, text selection and search, printing, OCR, signatures, and redaction aren't ready yet. Unavailable tools are disabled in the interface. Recent files and preferences don't survive a restart yet, and password-protected PDFs aren't supported.
+Text and image editing, text selection directly on PDF pages, printing, OCR, signatures, and redaction aren't ready yet. Search excerpts can be selected and copied, but matches aren't highlighted on the page yet. Unavailable tools are disabled in the interface. Recent files and preferences don't survive a restart yet, and password-protected PDFs aren't supported.
 
 Saving currently means writing a new copy. You can't overwrite an existing file or save changes back to the original. Some page operations are also blocked on signed PDFs, forms, tagged documents, or files with bookmarks and annotations. The [Organize Pages guide](docs/tools/organize-pages.md) explains those limits.
 
-Next up are the reading basics: text selection, search, bookmarks, better page navigation, and remembering your files and settings. There's also more testing to do with real documents. The generated 98-page scan and 1,500-page text file are useful test cases, but they don't tell us how every large PDF will behave. The full list is in [Known gaps](docs/gaps.md).
+Next up are the remaining reading basics: text selection on pages, search highlighting, bookmarks, better page navigation, and remembering your files and settings. There's also more testing to do with real documents. The generated 98-page scan and 1,500-page text file are useful test cases, but they don't tell us how every large PDF will behave. The full list is in [Known gaps](docs/gaps.md).
 
 ## Run from source
 
@@ -83,6 +85,7 @@ For more background, see the [architecture notes](docs/decisions.md), [PDFium do
 
 ## Recent changes
 
+- Added embedded-text search to the source build, with matching-page navigation, case matching, cancellation, selectable excerpts, and protection against stale results. All 15 frontend/release and 8 native tests pass; native extraction checks every page of all three valid fixtures. Production frontend and native debug builds pass. Desktop interaction verification is pending because window automation failed to acquire reliable input. This feature is not included in the already-tagged 0.2.1 signing build.
 - Prepared 0.2.1 to exercise Azure publisher signing and the upgrade from 0.2.0. Release verification is in progress; this is not yet a verified published installer.
 - Release signing uses protected repository Actions secrets and retains publisher and updater verification.
 - Rewrote this README around installing and using the app, with clearer setup instructions and less development-log clutter.
