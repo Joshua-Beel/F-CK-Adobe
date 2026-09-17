@@ -1,0 +1,63 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="UTF-8" />
+  <title>Selected text highlight browser test</title>
+  <style>
+    body { margin: 24px; font-family: system-ui, sans-serif; }
+    .paper { width: 420px; min-height: 260px; padding: 28px; background: #fff; box-shadow: 0 1px 5px #0003; }
+    .layer { line-height: 1.8; user-select: text; outline: 0; }
+    .glyph { display: inline; }
+    .newline { display: block; height: 1.8em; font-size: 0; }
+    .controls { display: flex; gap: 8px; margin-top: 16px; }
+    output { display: block; margin-top: 14px; font-family: ui-monospace, monospace; white-space: pre-wrap; }
+  </style>
+</head>
+<body>
+  <p>This mocked native geometry-index layer proves browser selection mapping only. It does not create or save a PDF annotation.</p>
+  <div class="paper">
+    <div id="layer" class="layer" contenteditable="true" data-text-layer="9:0:1" aria-label="Geometry text layer"><span class="glyph" data-geometry-index="0">A</span><span class="glyph newline" data-geometry-index="1">&#10;</span><span class="glyph" data-geometry-index="2">🙂</span><span class="glyph" data-geometry-index="3">B</span></div>
+    <div id="other-layer" class="layer" contenteditable="true" data-text-layer="9:1:1" aria-label="Other geometry text layer"><span class="glyph" data-geometry-index="0">Other page</span></div>
+  </div>
+  <div class="controls">
+    <button id="capture">Highlight selected text</button>
+    <button id="stale">Invalidate revision</button>
+    <button id="cross-page">Test cross-page rejection</button>
+  </div>
+  <output id="result">Select text with the mouse or keyboard.</output>
+  <script type="module">
+    const { textHighlightFromBrowserSelection } = await import('./textHighlightSelection.ts');
+    const layer = document.getElementById('layer');
+    const result = document.getElementById('result');
+    const context = { id: 9, page: 0, revision: 1 };
+    const show = selection => {
+      document.body.dataset.selection = selection ? selection.start + ':' + selection.end : 'none';
+      result.textContent = selection ? 'native range ' + selection.start + ':' + selection.end : 'No valid single-layer range.';
+    };
+    const update = () => show(textHighlightFromBrowserSelection(document.getSelection(), layer, context));
+    document.addEventListener('selectionchange', update);
+    document.getElementById('capture').addEventListener('pointerdown', () => {
+      const selection = textHighlightFromBrowserSelection(document.getSelection(), layer, context);
+      document.body.dataset.captured = selection ? selection.start + ':' + selection.end : 'none';
+    });
+    document.getElementById('stale').addEventListener('click', () => {
+      layer.dataset.textLayer = '9:0:2';
+      show(textHighlightFromBrowserSelection(document.getSelection(), layer, context));
+    });
+    document.getElementById('cross-page').addEventListener('click', () => {
+      try {
+        const other = document.getElementById('other-layer').firstChild.firstChild;
+        const range = document.createRange();
+        range.setStart(layer.firstChild.firstChild, 0);
+        range.setEnd(other, other.textContent.length);
+        const browserSelection = document.getSelection();
+        browserSelection.removeAllRanges();
+        browserSelection.addRange(range);
+        show(textHighlightFromBrowserSelection(browserSelection, layer, context));
+      } catch (error) {
+        result.textContent = `Cross-page setup failed: ${error.message}`;
+      }
+    });
+  </script>
+</body>
+</html>

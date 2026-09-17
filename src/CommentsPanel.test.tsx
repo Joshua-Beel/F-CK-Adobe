@@ -28,7 +28,7 @@ describe('CommentsPanel', () => {
     const addHighlight = vi.fn();
     let ui!: ReactTestRenderer;
     act(() => { ui = create(<CommentsPanel document={document} page={0} annotations={annotations} error="" selectedId={null} onAddComment={vi.fn()} onAddHighlight={addHighlight} onSelect={vi.fn()} close={vi.fn()} />); });
-    expect(JSON.stringify(ui.toJSON())).toContain('Area highlight');
+    expect(JSON.stringify(ui.toJSON())).toContain('Highlight');
     expect(JSON.stringify(ui.toJSON())).toContain('No description');
     act(() => ui.root.findAllByType('button').find(button => button.children.join('') === 'Add area highlight on page 1')!.props.onClick());
     expect(addHighlight).toHaveBeenCalledOnce();

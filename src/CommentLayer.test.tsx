@@ -29,6 +29,28 @@ describe('CommentLayer', () => {
     expect(select).toHaveBeenCalledWith(expect.objectContaining({ id: 'one' }));
   });
 
+  it('uses text-highlight quads instead of a multiline union rectangle', () => {
+    const select = vi.fn();
+    const annotation = { id: 'text', kind: 'highlight' as const, page: 2, rect: { x: .1, y: .1, width: .8, height: .7 }, quads: [{ x: .1, y: .1, width: .2, height: .04 }, { x: .1, y: .7, width: .2, height: .04 }], contents: null };
+    let ui!: ReactTestRenderer;
+    act(() => { ui = create(<CommentLayer page={2} pageWidth={612} pageHeight={792} creatingComment={false} creatingHighlight={false} interactive onCommentCreate={vi.fn()} onHighlightCreate={vi.fn()} onSelect={select} imageBounds={imageBounds} annotations={[annotation]} />); });
+    const buttons = ui.root.findAllByType('button');
+    expect(buttons).toHaveLength(2);
+    expect(buttons[1].props.style).toEqual({ left: '10%', top: '70%', width: '20%', height: '4%' });
+    act(() => buttons[1].props.onClick({ stopPropagation: vi.fn() }));
+    expect(select).toHaveBeenCalledWith(annotation);
+  });
+
+  it('keeps all on-page targets through 512 visible rects and routes 513 to the Comments list', () => {
+    const annotations = (count: number) => Array.from({ length: count }, (_, index) => ({ id: `h${index}`, kind: 'highlight' as const, page: 0, rect: { x: 0, y: 0, width: .1, height: .1 }, quads: index === count - 1 ? [] : [{ x: .1, y: .1, width: .01, height: .01 }], contents: null }));
+    let ui!: ReactTestRenderer;
+    act(() => { ui = create(<CommentLayer page={0} pageWidth={612} pageHeight={792} creatingComment={false} creatingHighlight={false} interactive onCommentCreate={vi.fn()} onHighlightCreate={vi.fn()} onSelect={vi.fn()} imageBounds={imageBounds} annotations={annotations(513)} />); });
+    expect(ui.root.findAllByType('button')).toHaveLength(512);
+    act(() => { ui.update(<CommentLayer page={0} pageWidth={612} pageHeight={792} creatingComment={false} creatingHighlight={false} interactive onCommentCreate={vi.fn()} onHighlightCreate={vi.fn()} onSelect={vi.fn()} imageBounds={imageBounds} annotations={annotations(514)} />); });
+    expect(ui.root.findAllByType('button')).toHaveLength(0);
+    expect(ui.root.findByProps({ role: 'status' }).children.join('')).toContain('Use Comments');
+  });
+
   it('leaves large saved highlight areas out of Pan and Select pointer handling', () => {
     const annotation = { id: 'h1', kind: 'highlight' as const, page: 0, rect: { x: .05, y: .05, width: .9, height: .9 }, contents: null };
     let ui!: ReactTestRenderer;

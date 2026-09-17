@@ -7,7 +7,7 @@ const HISTORY_BUDGET: usize = 32 * 1024 * 1024;
 fn snapshot_bytes(snapshot: &Vec<PageSpec>) -> usize {
     std::mem::size_of::<Vec<PageSpec>>() + snapshot.capacity() * std::mem::size_of::<PageSpec>()
         + snapshot.iter().map(|page| page.notes.capacity() * std::mem::size_of::<crate::comments::Note>()
-            + page.notes.iter().map(|note| note.id.capacity() + note.contents.capacity()).sum::<usize>()).sum::<usize>()
+            + page.notes.iter().map(|note| note.id.capacity() + note.contents.capacity() + note.quads.as_ref().map_or(0, |quads| quads.capacity() * std::mem::size_of::<CropBox>())).sum::<usize>()).sum::<usize>()
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -101,7 +101,7 @@ impl EditSession {
                 let spec = next.get_mut(page).ok_or("Page is out of range")?;
                 let page_id = *document.get_pages().values().nth(spec.source).ok_or("Source page mapping is invalid.")?;
                 rect.validate_within(spec.crop.unwrap_or(visible_box(&document, page_id)?))?;
-                spec.notes.push(crate::comments::Note { id: crate::comments::id(self.next_note), rect, contents: contents.to_owned(), kind: crate::comments::AnnotationKind::Note });
+                spec.notes.push(crate::comments::Note { quads: None, id: crate::comments::id(self.next_note), rect, contents: contents.to_owned(), kind: crate::comments::AnnotationKind::Note });
             }
             (None, Some(id), contents) => {
                 let (page, position) = next.iter().enumerate().find_map(|(page, spec)| spec.notes.iter().position(|note| note.id == id).map(|position| (page, position))).ok_or("The note no longer exists. Refresh comments.")?;
@@ -123,7 +123,7 @@ impl EditSession {
                 let spec = next.get_mut(page).ok_or("Page is out of range")?;
                 let page_id = *document.get_pages().values().nth(spec.source).ok_or("Source page mapping is invalid.")?;
                 rect.validate_within(spec.crop.unwrap_or(visible_box(&document, page_id)?))?;
-                spec.notes.push(crate::comments::Note { id: crate::comments::highlight_id(self.next_note), rect, contents, kind: crate::comments::AnnotationKind::Highlight });
+                spec.notes.push(crate::comments::Note { quads: None, id: crate::comments::highlight_id(self.next_note), rect, contents, kind: crate::comments::AnnotationKind::Highlight });
             }
             (None, Some(id), delete) => {
                 let (page, position) = next.iter().enumerate().find_map(|(page, spec)| spec.notes.iter().position(|note| note.id == id).map(|position| (page, position))).ok_or("The highlight no longer exists. Refresh annotations.")?;
@@ -132,6 +132,19 @@ impl EditSession {
             }
             _ => return Err("Invalid Area highlight operation.".into()),
         }
+        crate::comments::validate_plan(&next)?; Ok(next)
+    }
+    pub fn proposed_text_highlight(&self, page: usize, quads: Vec<CropBox>, contents: Option<&str>) -> Result<Vec<PageSpec>, String> {
+        if let Some(reason) = &self.comments_reason { return Err(reason.clone()); }
+        let document = self.load_source()?; crate::comments::read(&document)?;
+        if self.next_note == u64::MAX { return Err("This document has exhausted its annotation IDs.".into()); }
+        let bounds = crate::comments::highlight_union(&quads)?;
+        let mut next = self.plan.clone();
+        let spec = next.get_mut(page).ok_or("Page is out of range")?;
+        let page_id = *document.get_pages().values().nth(spec.source).ok_or("Source page mapping is invalid.")?;
+        let visible = spec.crop.unwrap_or(visible_box(&document, page_id)?);
+        if bounds.left < visible.left || bounds.bottom < visible.bottom || bounds.right > visible.right || bounds.top > visible.top { return Err("The selected text is outside the current visible page.".into()); }
+        spec.notes.push(crate::comments::Note { id: crate::comments::highlight_id(self.next_note), rect: bounds, contents: crate::comments::highlight_contents(contents)?, kind: crate::comments::AnnotationKind::Highlight, quads: Some(quads) });
         crate::comments::validate_plan(&next)?; Ok(next)
     }
     fn notes_changed(&self, plan: &[PageSpec]) -> bool {
@@ -341,6 +354,17 @@ pub fn write_new_file(path: &Path, bytes: &[u8]) -> Result<(), String> {
 mod tests {
     use super::*;
     fn sample() -> Vec<u8> { std::fs::read(Path::new(env!("CARGO_MANIFEST_DIR")).join("resources/welcome.pdf")).unwrap() }
+    #[test]
+    fn text_highlights_history_counts_quad_capacity_and_keeps_saved_plan() {
+        let mut session = EditSession::new(sample(), 6); let bounds = CropBox { left: 40.0, bottom: 60.0, right: 70.0, top: 90.0 };
+        let next = session.proposed_text_highlight(0, vec![bounds; 256], Some("Saved text highlight")).unwrap(); session.commit_comments(next); session.mark_saved();
+        let saved = session.saved.clone(); let id = session.plan[0].notes[0].id.clone(); let allocated = snapshot_bytes(&session.plan);
+        let mut measured = session.plan.clone(); measured[0].notes[0].quads.as_mut().unwrap().reserve(256); let with_quads = snapshot_bytes(&measured); let quads = measured[0].notes[0].quads.take().unwrap();
+        assert!(quads.capacity() > quads.len()); assert_eq!(with_quads - snapshot_bytes(&measured), quads.capacity() * std::mem::size_of::<CropBox>(), "History must count allocated quad capacity, including spare slots, independently of unrelated clone capacities");
+        session.history_budget = allocated * 2;
+        for index in 0..6 { let next = session.proposed_highlight(None, Some(&id), Some(&format!("Body {index}")), false).unwrap(); session.commit_comments(next); assert_history_budget(&session); }
+        assert_eq!(session.saved, saved); assert_eq!(session.plan[0].notes[0].quads, saved[0].notes[0].quads); session.apply(PageEdit::Undo).unwrap(); session.apply(PageEdit::Redo).unwrap(); assert_history_budget(&session);
+    }
     #[test]
     fn comments_history_counts_string_capacity_and_evicts_without_losing_current_or_saved_notes() {
         let mut session = EditSession::new(sample(), 6);

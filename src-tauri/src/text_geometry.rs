@@ -1,5 +1,6 @@
 use pdfium_render::prelude::*;
 use serde::Serialize;
+use crate::editor::CropBox;
 
 const MAX_CHARACTERS: usize = 20_000;
 const COORDINATE_SIZE: i32 = 1_000_000;
@@ -44,13 +45,29 @@ fn normalized_bounds(corners: [(i32, i32); 4]) -> Result<Option<TextBounds>, &'s
     Ok(Some(TextBounds { x, y, width: right.min(1.0) - x, height: bottom.min(1.0) - y }))
 }
 
+pub struct InspectedGeometry { pub geometry: PageTextGeometry, source_bounds: Vec<Option<CropBox>> }
+impl InspectedGeometry {
+    pub fn highlight_bounds(&self, start: usize, end: usize) -> Result<Vec<CropBox>, String> {
+        if self.geometry.status != "ok" || self.geometry.truncated { return Err(self.geometry.reason.clone().unwrap_or_else(|| "This page does not support text highlights.".into())); }
+        if start >= end || end > self.geometry.characters.len() { return Err("Select a valid character range on one current page.".into()); }
+        let bounds = self.source_bounds[start..end].iter().flatten().copied().collect::<Vec<_>>();
+        if bounds.is_empty() { return Err("The selected range has no positioned characters.".into()); }
+        if bounds.len() > crate::comments::MAX_HIGHLIGHT_QUADS { return Err("A text highlight is limited to 256 positioned characters. Select a shorter range.".into()); }
+        Ok(bounds)
+    }
+}
 pub fn inspect(page: &PdfPage<'_>, id: u64, index: u16, revision: u64) -> Result<PageTextGeometry, String> {
+    Ok(inspect_with_source(page, id, index, revision)?.geometry)
+}
+pub fn inspect_with_source(page: &PdfPage<'_>, id: u64, index: u16, revision: u64) -> Result<InspectedGeometry, String> {
     let mut result = PageTextGeometry { id, page: index, revision, status: "ok", truncated: false, characters: Vec::new(), reason: None };
+    let mut source_bounds = Vec::new();
     let extraction = (|| -> Result<(), String> {
         let width = page.width().value;
         let height = page.height().value;
         if !width.is_finite() || !height.is_finite() || width <= 0.0 || height <= 0.0 { return Err("The page has invalid dimensions.".into()); }
         let rotation = page.rotation().map_err(|error| error.to_string())?.as_degrees() as u16;
+        let visible = page.boundaries().bounding().map_err(|error| error.to_string())?.bounds;
         let config = PdfRenderConfig::new().set_fixed_size(COORDINATE_SIZE, COORDINATE_SIZE);
         let text = page.text().map_err(|error| error.to_string())?;
         let count = text.len().max(0) as usize;
@@ -67,6 +84,7 @@ pub fn inspect(page: &PdfPage<'_>, id: u64, index: u16, revision: u64) -> Result
             if value.is_control() && !matches!(value, '\r' | '\n' | '\t') { return Err("Text contains unsupported control characters.".into()); }
             if matches!(value, '\r' | '\n' | '\t') {
                 result.characters.push(TextCharacter { text: value.to_string(), bounds: None, angle: rotation });
+                source_bounds.push(None);
                 continue;
             }
             let source_angle = cardinal_angle(character.matrix().map_err(|error| error.to_string())?).ok_or("Selection does not support skewed, mirrored, or angled text on this page.")?;
@@ -75,7 +93,7 @@ pub fn inspect(page: &PdfPage<'_>, id: u64, index: u16, revision: u64) -> Result
             let (left, bottom, right, top) = (bounds.left().value, bounds.bottom().value, bounds.right().value, bounds.top().value);
             if ![left, bottom, right, top].iter().all(|value| value.is_finite()) || right < left || top < bottom { return Err("Text has invalid bounds.".into()); }
             if right == left || top == bottom {
-                if value.is_whitespace() { result.characters.push(TextCharacter { text: value.to_string(), bounds: None, angle }); continue; }
+                if value.is_whitespace() { result.characters.push(TextCharacter { text: value.to_string(), bounds: None, angle }); source_bounds.push(None); continue; }
                 return Err("Text has invalid bounds.".into());
             }
             let mut corners = [(0, 0); 4];
@@ -84,6 +102,9 @@ pub fn inspect(page: &PdfPage<'_>, id: u64, index: u16, revision: u64) -> Result
             }
             if let Some(bounds) = normalized_bounds(corners).map_err(str::to_string)? {
                 result.characters.push(TextCharacter { text: value.to_string(), bounds: Some(bounds), angle });
+                let clipped = CropBox { left: left.max(visible.left().value), bottom: bottom.max(visible.bottom().value), right: right.min(visible.right().value), top: top.min(visible.top().value) };
+                if clipped.right <= clipped.left || clipped.top <= clipped.bottom { return Err("Text bounds do not agree with the visible page.".into()); }
+                source_bounds.push(Some(clipped));
             }
         }
         Ok(())
@@ -91,15 +112,24 @@ pub fn inspect(page: &PdfPage<'_>, id: u64, index: u16, revision: u64) -> Result
     if let Err(reason) = extraction {
         result.status = "unsupported";
         result.characters.clear();
+        source_bounds.clear();
         result.truncated = false;
         result.reason = Some(reason);
     }
-    Ok(result)
+    Ok(InspectedGeometry { geometry: result, source_bounds })
 }
 
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+    #[test]
+    fn text_highlights_range_indices_whitespace_unsupported_and_quad_cap() {
+        let bounds = CropBox { left: 10.0, bottom: 10.0, right: 20.0, top: 30.0 };
+        let mut inspected = InspectedGeometry { geometry: PageTextGeometry { id: 1, page: 0, revision: 3, status: "ok", truncated: false, reason: None, characters: (0..258).map(|index| TextCharacter { text: if index == 0 { "😀" } else if index == 1 { "\n" } else { "A" }.into(), bounds: if index == 1 { None } else { Some(TextBounds { x: 0.1, y: 0.1, width: 0.1, height: 0.1 }) }, angle: 0 }).collect() }, source_bounds: (0..258).map(|index| if index == 1 { None } else { Some(bounds) }).collect() };
+        assert_eq!(inspected.highlight_bounds(0, 2).unwrap(), vec![bounds]); assert!(inspected.highlight_bounds(1, 2).is_err()); assert_eq!(inspected.highlight_bounds(0, 257).unwrap().len(), 256);
+        for (start, end) in [(0, 258), (4, 3), (2, 2), (257, 259), (usize::MAX, usize::MAX)] { assert!(inspected.highlight_bounds(start, end).is_err()); }
+        inspected.geometry.truncated = true; assert!(inspected.highlight_bounds(0, 1).is_err()); inspected.geometry.truncated = false; inspected.geometry.status = "unsupported"; assert!(inspected.highlight_bounds(0, 1).is_err());
+    }
 
     pub(crate) fn fixture(rotation: i64, matrix: [f32; 6], text: &str) -> Vec<u8> {
         use lopdf::{dictionary, content::{Content, Operation}, Object, Stream};

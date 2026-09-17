@@ -9,7 +9,7 @@ use crate::combine::CopyOperation;
 pub struct CropRect { pub x: f64, pub y: f64, pub width: f64, pub height: f64 }
 #[derive(Clone, Copy, Deserialize)]
 pub struct CombineSource { pub id: u64, pub revision: u64 }
-enum CommentMutation { Create(u16, CropRect, String), Update(String, String), Delete(String), CreateHighlight(u16, CropRect, Option<String>), UpdateHighlight(String, Option<String>), DeleteHighlight(String) }
+enum CommentMutation { Create(u16, CropRect, String), Update(String, String), Delete(String), CreateHighlight(u16, CropRect, Option<String>), CreateTextHighlight(u16, usize, usize, Option<String>), UpdateHighlight(String, Option<String>), DeleteHighlight(String) }
 
 #[derive(Clone, Serialize)]
 pub struct PageSize { width: f32, height: f32 }
@@ -426,8 +426,18 @@ impl PdfService {
                             let document = documents.get(&id).ok_or("Document is closed")?;
                             for (index, spec) in session.plan.iter().enumerate() {
                                 for note in &spec.notes {
-                                    let rect = with_planned_page(document, spec, |page| displayed_note_rect(page, note.rect))?;
-                                    result.annotations.push(crate::comments::AnnotationInfo { id: note.id.clone(), kind: note.kind, page: index, rect, contents: (!note.contents.is_empty()).then(|| note.contents.clone()) });
+                                    let (rect, quads) = with_planned_page(document, spec, |page| {
+                                        if note.kind == crate::comments::AnnotationKind::Note { return Ok((displayed_note_rect(page, note.rect)?, None)); }
+                                        let source = note.quads.as_deref().unwrap_or(std::slice::from_ref(&note.rect));
+                                        let quads = source.iter().map(|bounds| displayed_note_rect(page, *bounds)).collect::<Result<Vec<_>, _>>()?.into_iter().flatten().collect::<Vec<_>>();
+                                        let rect = quads.first().map(|first| {
+                                            let mut bounds = (first.x, first.y, first.x + first.width, first.y + first.height);
+                                            for quad in &quads { bounds.0 = bounds.0.min(quad.x); bounds.1 = bounds.1.min(quad.y); bounds.2 = bounds.2.max(quad.x + quad.width); bounds.3 = bounds.3.max(quad.y + quad.height); }
+                                            crate::comments::DisplayRect { x: bounds.0, y: bounds.1, width: bounds.2 - bounds.0, height: bounds.3 - bounds.1 }
+                                        });
+                                        Ok((rect, Some(quads)))
+                                    })?;
+                                    result.annotations.push(crate::comments::AnnotationInfo { id: note.id.clone(), kind: note.kind, page: index, rect, contents: (!note.contents.is_empty()).then(|| note.contents.clone()), quads });
                                 }
                             }
                             Ok(result)
@@ -456,6 +466,11 @@ impl PdfService {
                                 }
                                 CommentMutation::UpdateHighlight(id, contents) => session.proposed_highlight(None, Some(&id), contents.as_deref(), false)?,
                                 CommentMutation::DeleteHighlight(id) => session.proposed_highlight(None, Some(&id), None, true)?,
+                                CommentMutation::CreateTextHighlight(page, start, end, contents) => {
+                                    let spec = session.plan.get(page as usize).ok_or("Page is out of range")?;
+                                    let quads = with_planned_page(document, spec, |source| crate::text_geometry::inspect_with_source(source, id, page, revision)?.highlight_bounds(start, end))?;
+                                    session.proposed_text_highlight(page as usize, quads, contents.as_deref())?
+                                }
                             };
                             if next == session.plan { return current_info(session, original, document); }
                             let rendered = load_note_document(pdfium.as_ref().map_err(Clone::clone)?, document, session, &next)?;
@@ -616,6 +631,9 @@ impl PdfService {
     }
     pub async fn annotations(&self, id: u64, revision: u64) -> Result<crate::comments::AnnotationList, String> {
         let (tx, rx) = oneshot::channel(); self.sender.send(Request::Annotations(id, revision, tx)).map_err(|error| error.to_string())?; rx.await.map_err(|error| error.to_string())?
+    }
+    pub async fn create_text_highlight(&self, id: u64, revision: u64, page: u16, start: usize, end: usize, contents: Option<String>) -> Result<DocumentInfo, String> {
+        let (tx, rx) = oneshot::channel(); self.sender.send(Request::Comment(id, revision, CommentMutation::CreateTextHighlight(page, start, end, contents), tx)).map_err(|error| error.to_string())?; rx.await.map_err(|error| error.to_string())?
     }
     pub async fn create_highlight(&self, id: u64, revision: u64, page: u16, rect: CropRect, contents: Option<String>) -> Result<DocumentInfo, String> {
         let (tx, rx) = oneshot::channel(); self.sender.send(Request::Comment(id, revision, CommentMutation::CreateHighlight(page, rect, contents), tx)).map_err(|error| error.to_string())?; rx.await.map_err(|error| error.to_string())?
@@ -862,6 +880,117 @@ mod tests {
         for (x, y, _) in pixels { bounds.0 = bounds.0.min(x); bounds.1 = bounds.1.min(y); bounds.2 = bounds.2.max(x); bounds.3 = bounds.3.max(y); }
         for (actual, expected) in [(bounds.0 as f64, rect.x * image.width() as f64), (bounds.1 as f64, rect.y * image.height() as f64), ((bounds.2 + 1) as f64, (rect.x + rect.width) * image.width() as f64), ((bounds.3 + 1) as f64, (rect.y + rect.height) * image.height() as f64)] { assert!((actual - expected).abs() <= 2.0, "Actual highlight pixel extent {actual}, independently expected {expected}"); }
     }
+    fn text_highlights_assert_pixels(before: &image::RgbImage, after: &image::RgbImage, quads: &[crate::comments::DisplayRect], ink_threshold: u8) {
+        assert_eq!(before.dimensions(), after.dimensions()); let mut tinted = 0; let mut dark = 0; let mut outside = 0;
+        let inside = |x: u32, y: u32, rect: &crate::comments::DisplayRect, margin: f64| x as f64 >= rect.x * before.width() as f64 + margin && x as f64 <= (rect.x + rect.width) * before.width() as f64 - margin && y as f64 >= rect.y * before.height() as f64 + margin && y as f64 <= (rect.y + rect.height) * before.height() as f64 - margin;
+        for (x, y, pixel) in after.enumerate_pixels() {
+            let old = before.get_pixel(x, y);
+            if quads.iter().any(|rect| inside(x, y, rect, 2.0)) {
+                assert!((pixel[0] as i16 - old[0] as i16).abs() <= 1 && (pixel[1] as i16 - old[1] as i16).abs() <= 1);
+                assert!((pixel[2] as f64 - old[2] as f64 * 0.75).abs() <= 2.0, "Text-highlight quads must use one multiply fill even where they overlap: old {old:?}, after {pixel:?}");
+                if old.0.iter().all(|value| *value > 240) { tinted += 1; }
+                if old.0.iter().all(|value| *value < ink_threshold) { dark += 1; }
+            } else if !quads.iter().any(|rect| inside(x, y, rect, -3.0)) { assert_eq!(pixel, old, "Pixels outside individual glyph quads, including line gaps, must remain unchanged"); outside += 1; }
+        }
+        assert!(tinted > 100 && outside > 100, "Insufficient independent pixel samples at {:?}: tinted {tinted}, outside {outside}, quads {}", before.dimensions(), quads.len()); assert!(dark > 0, "Independent baseline bitmap must contain glyph ink below {ink_threshold} under highlight quads");
+    }
+    #[test]
+    fn text_highlights_multiline_unicode_all_rotations_crops_pixels_reopen_and_print_isolation() {
+        let _print_lock = print_test_lock(); let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")); let service = PdfService::start(root.join("resources/pdfium/bin/pdfium.dll")); let folder = tempfile::tempdir().unwrap();
+        for original in [0, 90, 180, 270] { for edited in 0..4 {
+            let bytes = crate::text_geometry::tests::fixture(original, [1.0, 0.0, 0.0, 1.0, 100.0, 372.0], "HiddenAbove\n\nFirst café\nSecond line\n\n\n\n\n\nHiddenBelow"); let mut pdf = lopdf::Document::load_mem(&bytes).unwrap(); let page = pdf.get_pages()[&1];
+            pdf.get_dictionary_mut(page).unwrap().set("MediaBox", vec![20.into(), 30.into(), 420.into(), 430.into()]); let parent = pdf.get_dictionary(page).unwrap().get(b"Parent").unwrap().as_reference().unwrap();
+            for key in [b"MediaBox".as_slice(), b"CropBox", b"Rotate", b"Resources"] { let value = pdf.get_dictionary_mut(page).unwrap().remove(key).unwrap(); pdf.get_dictionary_mut(parent).unwrap().set(key, value); }
+            let path = folder.path().join(format!("text-highlight-{original}-{edited}.pdf")); pdf.save(&path).unwrap(); let source = std::fs::read(&path).unwrap(); let mut info = call(&service, |reply| Request::Open(path.clone(), reply)).unwrap();
+            for _ in 0..edited { info = call(&service, |reply| Request::Edit(info.id, PageEdit::Rotate { pages: vec![0], clockwise: true }, reply)).unwrap(); }
+            let before = comments_png(&service, info.id, 0, 600); let text = call(&service, |reply| Request::Text(info.id, 0, info.revision, reply)).unwrap();
+            let geometry = call(&service, |reply| Request::TextGeometry(info.id, 0, info.revision, reply)).unwrap(); assert_eq!(geometry.status, "ok"); let logical = geometry.characters.iter().map(|value| value.text.as_str()).collect::<String>(); assert!(logical.contains("First café") && logical.contains("Second line")); assert!(!logical.contains("HiddenAbove") && !logical.contains("HiddenBelow"));
+            let start = geometry.characters.iter().position(|value| value.bounds.is_some()).unwrap(); let end = geometry.characters.iter().rposition(|value| value.bounds.is_some()).unwrap() + 1;
+            let selected = &geometry.characters[start..end]; assert!(selected.iter().any(|value| value.bounds.is_none())); let expected = selected.iter().filter_map(|value| value.bounds.as_ref()).collect::<Vec<_>>();
+            let ink = before.enumerate_pixels().filter(|(_, _, pixel)| pixel.0.iter().all(|value| *value < 40)).map(|(x, y, _)| (x as f64, y as f64)).collect::<Vec<_>>(); assert!(!ink.is_empty());
+            assert!(ink.iter().all(|(x, y)| expected.iter().any(|rect| *x >= rect.x as f64 * before.width() as f64 - 2.0 && *x <= (rect.x + rect.width) as f64 * before.width() as f64 + 2.0 && *y >= rect.y as f64 * before.height() as f64 - 2.0 && *y <= (rect.y + rect.height) as f64 * before.height() as f64 + 2.0)), "Independent baseline ink must be inside selected mapped glyphs at {original}+{edited}");
+            let old = print_snapshot(&service, info.id, info.revision); let old_pixels = service.print_render_blocking(old.token, 0, 600, 600).unwrap(); let body = "  Text description é 漢字 😀\n ";
+            info = call(&service, |reply| Request::Comment(info.id, info.revision, CommentMutation::CreateTextHighlight(0, start, end, Some(body.into())), reply)).unwrap();
+            let list = call(&service, |reply| Request::Annotations(info.id, info.revision, reply)).unwrap(); let annotation = &list.annotations[0]; let id = annotation.id.clone(); let quads = annotation.quads.as_ref().unwrap(); assert_eq!(quads.len(), expected.len()); assert_eq!(annotation.contents.as_deref(), Some(body));
+            for (actual, expected) in quads.iter().zip(expected) { for (actual, expected) in [(actual.x, expected.x as f64), (actual.y, expected.y as f64), (actual.width, expected.width as f64), (actual.height, expected.height as f64)] { assert!((actual - expected).abs() < 0.000003); } }
+            let after = comments_png(&service, info.id, 0, 600); text_highlights_assert_pixels(&before, &after, quads, 40); assert_eq!(after, comments_png(&service, info.id, 0, 600));
+            assert_eq!(call(&service, |reply| Request::Text(info.id, 0, info.revision, reply)).unwrap(), text); assert_eq!(serde_json::to_value(call(&service, |reply| Request::TextGeometry(info.id, 0, info.revision, reply)).unwrap().characters).unwrap(), serde_json::to_value(&geometry.characters).unwrap());
+            let snapshot = print_snapshot(&service, info.id, info.revision); let printed = service.print_render_blocking(snapshot.token, 0, 600, 600).unwrap(); text_highlights_assert_pixels(&comments_print_rgb(&old_pixels), &comments_print_rgb(&printed), quads, 40); assert_eq!(service.print_render_blocking(old.token, 0, 600, 600).unwrap().bgra, old_pixels.bgra);
+            let copy = folder.path().join(format!("text-highlight-copy-{original}-{edited}.pdf")); info = call(&service, |reply| Request::Save(info.id, None, copy.clone(), reply)).unwrap().document; let reopened = call(&service, |reply| Request::Open(copy.clone(), reply)).unwrap(); assert_eq!(comments_png(&service, reopened.id, 0, 600), after);
+            assert_eq!(serde_json::to_value(call(&service, |reply| Request::Annotations(reopened.id, 0, reply)).unwrap().annotations).unwrap(), serde_json::to_value(&list.annotations).unwrap()); let saved = lopdf::Document::load(&copy).unwrap(); assert_eq!(crate::comments::read(&saved).unwrap()[0][0].id, id);
+            info = call(&service, |reply| Request::Comment(info.id, info.revision, CommentMutation::DeleteHighlight(id), reply)).unwrap(); assert_eq!(comments_png(&service, info.id, 0, 600), before); info = call(&service, |reply| Request::Edit(info.id, PageEdit::Undo, reply)).unwrap(); assert_eq!(comments_png(&service, info.id, 0, 600), after);
+            info = call(&service, |reply| Request::Crop(info.id, 0, info.revision, CropRect { x: 0.99, y: 0.0, width: 0.01, height: 1.0 }, reply)).unwrap(); let hidden = call(&service, |reply| Request::Annotations(info.id, info.revision, reply)).unwrap(); assert!(hidden.annotations[0].rect.is_none() && hidden.annotations[0].quads.as_ref().unwrap().is_empty());
+            assert!(!comments_png(&service, info.id, 0, 6).pixels().any(|pixel| pixel[0] > 240 && pixel[1] > 240 && (180..205).contains(&pixel[2])));
+            for id in [info.id, reopened.id] { call(&service, |reply| Request::Close(id, reply)).unwrap(); } assert_eq!(service.print_render_blocking(snapshot.token, 0, 600, 600).unwrap().bgra, printed.bgra); assert_eq!(std::fs::read(path).unwrap(), source);
+        } }
+    }
+    #[test]
+    fn text_highlights_overlapping_glyphs_use_one_fill_at_all_cardinal_glyph_angles() {
+        use lopdf::{content::{Content, Operation}, Object};
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")); let service = PdfService::start(root.join("resources/pdfium/bin/pdfium.dll")); let folder = tempfile::tempdir().unwrap();
+        for (angle, matrix) in [(0, [1.0, 0.0, 0.0, 1.0, 100.0, 200.0]), (90, [0.0, 1.0, -1.0, 0.0, 250.0, 100.0]), (180, [-1.0, 0.0, 0.0, -1.0, 250.0, 250.0]), (270, [0.0, -1.0, 1.0, 0.0, 100.0, 250.0])] {
+            let mut pdf = lopdf::Document::load_mem(&crate::text_geometry::tests::fixture(90, matrix, "MMM")).unwrap(); let page = pdf.get_pages()[&1]; let content = pdf.get_dictionary(page).unwrap().get(b"Contents").unwrap().as_reference().unwrap();
+            let mut operations = Content::decode(&pdf.get_page_content(page)).unwrap().operations; operations.insert(2, Operation::new("Tc", vec![Object::Real(-12.0)])); pdf.get_object_mut(content).unwrap().as_stream_mut().unwrap().set_plain_content(Content { operations }.encode().unwrap());
+            let path = folder.path().join(format!("overlapping-glyphs-{angle}.pdf")); pdf.save(&path).unwrap(); let source = std::fs::read(&path).unwrap(); let mut info = call(&service, |reply| Request::Open(path.clone(), reply)).unwrap(); info = call(&service, |reply| Request::Edit(info.id, PageEdit::Rotate { pages: vec![0], clockwise: true }, reply)).unwrap();
+            let geometry = call(&service, |reply| Request::TextGeometry(info.id, 0, info.revision, reply)).unwrap(); assert_eq!(geometry.status, "ok", "{:?}", geometry.reason); assert_eq!(geometry.characters.len(), 3); assert!(geometry.characters.iter().all(|value| value.text == "M"));
+            let before = comments_png(&service, info.id, 0, 600); info = call(&service, |reply| Request::Comment(info.id, info.revision, CommentMutation::CreateTextHighlight(0, 0, 3, None), reply)).unwrap(); let list = call(&service, |reply| Request::Annotations(info.id, info.revision, reply)).unwrap(); let quads = list.annotations[0].quads.as_ref().unwrap();
+            let (a, b) = (&quads[0], &quads[1]); let overlap = (a.x.max(b.x), a.y.max(b.y), (a.x + a.width).min(b.x + b.width), (a.y + a.height).min(b.y + b.height)); assert!(overlap.2 > overlap.0 + 0.01 && overlap.3 > overlap.1 + 0.01, "Fixture must independently create substantial overlapping glyph bounds");
+            let after = comments_png(&service, info.id, 0, 600); text_highlights_assert_pixels(&before, &after, quads, 40);
+            assert!(after.enumerate_pixels().any(|(x, y, pixel)| x as f64 > overlap.0 * after.width() as f64 + 2.0 && (x as f64) < overlap.2 * after.width() as f64 - 2.0 && y as f64 > overlap.1 * after.height() as f64 + 2.0 && (y as f64) < overlap.3 * after.height() as f64 - 2.0 && before.get_pixel(x, y).0.iter().all(|value| *value > 240) && (pixel[2] as i16 - 191).abs() <= 2), "Overlap must contain white background tinted exactly once, not just solid black ink");
+            let copy = folder.path().join(format!("overlap-copy-{angle}.pdf")); call(&service, |reply| Request::Save(info.id, None, copy.clone(), reply)).unwrap(); let reopened = call(&service, |reply| Request::Open(copy, reply)).unwrap(); assert_eq!(comments_png(&service, reopened.id, 0, 600), after);
+            info = call(&service, |reply| Request::Comment(info.id, info.revision, CommentMutation::DeleteHighlight(list.annotations[0].id.clone()), reply)).unwrap(); assert_eq!(comments_png(&service, info.id, 0, 600), before); for id in [info.id, reopened.id] { call(&service, |reply| Request::Close(id, reply)).unwrap(); } assert_eq!(std::fs::read(path).unwrap(), source);
+        }
+    }
+    #[test]
+    fn text_highlights_astral_mapping_is_whole_or_explicitly_unsupported() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")); let service = PdfService::start(root.join("resources/pdfium/bin/pdfium.dll")); let folder = tempfile::tempdir().unwrap();
+        let mut pdf = lopdf::Document::load_mem(&crate::text_geometry::tests::fixture(0, [1.0, 0.0, 0.0, 1.0, 100.0, 200.0], "A")).unwrap(); let page = pdf.get_pages()[&1];
+        let font = pdf.get_dictionary(page).unwrap().get(b"Resources").unwrap().as_dict().unwrap().get(b"Font").unwrap().as_dict().unwrap().get(b"F1").unwrap().as_reference().unwrap();
+        let cmap = pdf.add_object(lopdf::Stream::new(lopdf::dictionary! {}, b"/CIDInit /ProcSet findresource begin 12 dict begin begincmap /CIDSystemInfo << /Registry (Adobe) /Ordering (UCS) /Supplement 0 >> def /CMapName /Test def /CMapType 2 def 1 begincodespacerange <00> <FF> endcodespacerange 1 beginbfchar <41> <D83DDE00> endbfchar endcmap CMapName currentdict /CMap defineresource pop end end".to_vec())); pdf.get_dictionary_mut(font).unwrap().set("ToUnicode", cmap);
+        let path = folder.path().join("astral-mapping.pdf"); pdf.save(&path).unwrap(); let source = std::fs::read(&path).unwrap(); let mut info = call(&service, |reply| Request::Open(path.clone(), reply)).unwrap(); let before = comments_png(&service, info.id, 0, 600); let geometry = call(&service, |reply| Request::TextGeometry(info.id, 0, 0, reply)).unwrap();
+        if geometry.status == "ok" { assert_eq!(geometry.characters.len(), 1); assert_eq!(geometry.characters[0].text, "😀"); assert_eq!(geometry.characters[0].text.encode_utf16().count(), 2); info = call(&service, |reply| Request::Comment(info.id, 0, CommentMutation::CreateTextHighlight(0, 0, 1, None), reply)).unwrap(); let annotations = call(&service, |reply| Request::Annotations(info.id, info.revision, reply)).unwrap(); text_highlights_assert_pixels(&before, &comments_png(&service, info.id, 0, 600), annotations.annotations[0].quads.as_ref().unwrap(), 40); eprintln!("Astral PDFium mapping: supported as one geometry character"); }
+        else { assert_eq!(geometry.status, "unsupported"); assert!(geometry.characters.is_empty() && geometry.reason.as_ref().unwrap().contains("character mapping")); assert!(call(&service, |reply| Request::Comment(info.id, 0, CommentMutation::CreateTextHighlight(0, 0, 1, None), reply)).is_err()); assert_eq!(comments_png(&service, info.id, 0, 600), before); assert!(call(&service, |reply| Request::Annotations(info.id, 0, reply)).unwrap().annotations.is_empty()); eprintln!("Astral PDFium mapping: explicitly unsupported; no partial geometry or mutation"); }
+        call(&service, |reply| Request::Close(info.id, reply)).unwrap(); assert_eq!(std::fs::read(path).unwrap(), source);
+    }
+    #[test]
+    fn text_highlights_mixed_corpus_structural_copies_reopen_and_source_preservation() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")); let service = PdfService::start(root.join("resources/pdfium/bin/pdfium.dll")); let folder = tempfile::tempdir().unwrap();
+        for (fixture, count) in [("resources/welcome.pdf", 6usize), ("../test-corpus/synthetic-scan-98.pdf", 98), ("../test-corpus/synthetic-text-1500.pdf", 1500)] {
+            let path = root.join(fixture); let source = std::fs::read(&path).unwrap(); let mut info = call(&service, |reply| Request::Open(path.clone(), reply)).unwrap(); let before = comments_png(&service, info.id, 0, 1200); let geometry = call(&service, |reply| Request::TextGeometry(info.id, 0, 0, reply)).unwrap(); assert_eq!(geometry.status, "ok");
+            let pattern = "Sample document".chars().map(|value| value.to_string()).collect::<Vec<_>>(); let start = geometry.characters.windows(pattern.len()).position(|window| window.iter().zip(&pattern).all(|(a, b)| &a.text == b)).expect("Generated corpus has an independently known embedded footer, including the scan; this is not OCR"); let end = start + pattern.len();
+            info = call(&service, |reply| Request::Comment(info.id, 0, CommentMutation::CreateTextHighlight(0, start, end, Some("  Footer description é 漢字 😀\n ".into())), reply)).unwrap(); let annotations = call(&service, |reply| Request::Annotations(info.id, info.revision, reply)).unwrap(); let text_id = annotations.annotations[0].id.clone(); text_highlights_assert_pixels(&before, &comments_png(&service, info.id, 0, 1200), annotations.annotations[0].quads.as_ref().unwrap(), 160);
+            info = call(&service, |reply| Request::Comment(info.id, info.revision, CommentMutation::CreateHighlight(0, CropRect { x: 0.02, y: 0.02, width: 0.05, height: 0.05 }, None), reply)).unwrap();
+            info = call(&service, |reply| Request::Comment(info.id, info.revision, CommentMutation::Create((count - 1) as u16, CropRect { x: 0.02, y: 0.02, width: 0.05, height: 0.05 }, "Legacy-compatible note é 😀".into()), reply)).unwrap();
+            info = call(&service, |reply| Request::Crop(info.id, 0, info.revision, CropRect { x: 0.0, y: 0.0, width: 0.95, height: 0.99 }, reply)).unwrap(); info = call(&service, |reply| Request::Edit(info.id, PageEdit::Rotate { pages: vec![0], clockwise: true }, reply)).unwrap(); info = call(&service, |reply| Request::Edit(info.id, PageEdit::Move { from: 0, to: count - 1 }, reply)).unwrap(); info = call(&service, |reply| Request::Edit(info.id, PageEdit::Delete { pages: vec![1] }, reply)).unwrap();
+            let expected = call(&service, |reply| Request::Annotations(info.id, info.revision, reply)).unwrap(); assert_eq!(expected.annotations.len(), 3); assert_eq!(expected.annotations.iter().find(|value| value.id == text_id).unwrap().page, count - 2); let pixels = comments_png(&service, info.id, (count - 2) as u16, 600);
+            let copy = folder.path().join(format!("text-mixed-corpus-{count}.pdf")); info = call(&service, |reply| Request::Save(info.id, None, copy.clone(), reply)).unwrap().document; assert!(!info.dirty); let reopened = call(&service, |reply| Request::Open(copy, reply)).unwrap(); assert_eq!(reopened.pages.len(), count - 1); assert_eq!(serde_json::to_value(call(&service, |reply| Request::Annotations(reopened.id, 0, reply)).unwrap().annotations).unwrap(), serde_json::to_value(&expected.annotations).unwrap()); assert_eq!(comments_png(&service, reopened.id, (count - 2) as u16, 600), pixels);
+            let extracted = folder.path().join(format!("text-extracted-{count}.pdf")); call(&service, |reply| Request::Save(info.id, Some(vec![0, count - 2]), extracted.clone(), reply)).unwrap(); let extracted = call(&service, |reply| Request::Open(extracted, reply)).unwrap(); let annotations = call(&service, |reply| Request::Annotations(extracted.id, 0, reply)).unwrap(); assert_eq!(annotations.annotations.len(), 2); assert!(annotations.annotations.iter().any(|value| value.id == text_id && value.page == 1)); assert_eq!(comments_png(&service, extracted.id, 1, 600), pixels);
+            let split = call(&service, |reply| Request::Split(info.id, info.revision, count.div_ceil(3), folder.path().join(format!("text-split-{count}")), reply)).unwrap(); let mut ids = Vec::new(); for file in split.files { let part = call(&service, |reply| Request::Open(file.path, reply)).unwrap(); ids.extend(call(&service, |reply| Request::Annotations(part.id, 0, reply)).unwrap().annotations.into_iter().map(|value| value.id)); call(&service, |reply| Request::Close(part.id, reply)).unwrap(); } assert_eq!(ids.len(), 3); assert!(ids.contains(&text_id)); assert!(!call(&service, |reply| Request::Edit(info.id, PageEdit::Move { from: 0, to: 0 }, reply)).unwrap().dirty);
+            let donor = call(&service, |reply| Request::Open(root.join("resources/welcome.pdf"), reply)).unwrap(); for result in [call(&service, |reply| Request::CheckCombine(combine_source(&info), combine_source(&donor), reply)), call(&service, |reply| Request::CheckInsertion(combine_source(&info), combine_source(&donor), 0, reply)), call(&service, |reply| Request::CheckReplacement(combine_source(&info), combine_source(&donor), 0, 1, reply))] { assert!(result.unwrap_err().contains("Annots")); }
+            info = call(&service, |reply| Request::Edit(info.id, PageEdit::Delete { pages: vec![count - 2] }, reply)).unwrap(); assert!(!call(&service, |reply| Request::Annotations(info.id, info.revision, reply)).unwrap().annotations.iter().any(|value| value.id == text_id)); info = call(&service, |reply| Request::Edit(info.id, PageEdit::Undo, reply)).unwrap(); assert_eq!(comments_png(&service, info.id, (count - 2) as u16, 600), pixels);
+            for id in [info.id, reopened.id, extracted.id, donor.id] { call(&service, |reply| Request::Close(id, reply)).unwrap(); } assert_eq!(std::fs::read(path).unwrap(), source);
+        }
+    }
+    #[test]
+    fn text_highlights_caps_invalid_stale_closed_preclosed_unsupported_and_truncation_are_atomic() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")); let service = PdfService::start(root.join("resources/pdfium/bin/pdfium.dll")); let folder = tempfile::tempdir().unwrap();
+        let mut pdf = lopdf::Document::load_mem(&crate::text_geometry::tests::fixture(90, [1.0, 0.0, 0.0, 1.0, 100.0, 200.0], &"M".repeat(257))).unwrap(); let page = pdf.get_pages()[&1]; for key in ["MediaBox", "CropBox"] { pdf.get_dictionary_mut(page).unwrap().set(key, vec![0.into(), 0.into(), 10_000.into(), 400.into()]); }
+        let path = folder.path().join("quad-cap.pdf"); pdf.save(&path).unwrap(); let source = std::fs::read(&path).unwrap(); let mut info = call(&service, |reply| Request::Open(path.clone(), reply)).unwrap(); let before = comments_png(&service, info.id, 0, 200); let geometry = call(&service, |reply| Request::TextGeometry(info.id, 0, 0, reply)).unwrap(); assert_eq!(geometry.characters.len(), 257);
+        for (page, start, end, contents) in [(0, 0, 257, None), (1, 0, 1, None), (0, 2, 1, None), (0, 0, 0, None), (0, 0, 258, None), (0, usize::MAX, usize::MAX, None), (0, 0, 1, Some("\0".into())), (0, 0, 1, Some("x".repeat(8193)))] {
+            assert!(call(&service, |reply| Request::Comment(info.id, 0, CommentMutation::CreateTextHighlight(page, start, end, contents), reply)).is_err()); assert!(call(&service, |reply| Request::Annotations(info.id, 0, reply)).unwrap().annotations.is_empty()); assert_eq!(comments_png(&service, info.id, 0, 200), before);
+        }
+        let (reply, canceled) = oneshot::channel(); drop(canceled); service.sender.send(Request::Comment(info.id, 0, CommentMutation::CreateTextHighlight(0, 0, 1, None), reply)).unwrap(); assert!(call(&service, |reply| Request::Annotations(info.id, 0, reply)).unwrap().annotations.is_empty());
+        info = call(&service, |reply| Request::Comment(info.id, 0, CommentMutation::CreateTextHighlight(0, 0, 256, None), reply)).unwrap(); assert_eq!(call(&service, |reply| Request::Annotations(info.id, info.revision, reply)).unwrap().annotations[0].quads.as_ref().unwrap().len(), 256);
+        for _ in 0..15 { info = call(&service, |reply| Request::Comment(info.id, info.revision, CommentMutation::CreateTextHighlight(0, 0, 256, None), reply)).unwrap(); }
+        let complete = call(&service, |reply| Request::Annotations(info.id, info.revision, reply)).unwrap(); assert_eq!(complete.annotations.iter().map(|value| value.quads.as_ref().unwrap().len()).sum::<usize>(), 4096, "The accepted query must never silently truncate geometry"); let accepted = comments_png(&service, info.id, 0, 200);
+        assert!(call(&service, |reply| Request::Comment(info.id, info.revision, CommentMutation::CreateTextHighlight(0, 0, 1, None), reply)).err().unwrap().contains("4,096")); assert_eq!(call(&service, |reply| Request::Annotations(info.id, info.revision, reply)).unwrap().annotations.len(), 16); assert_eq!(comments_png(&service, info.id, 0, 200), accepted);
+        assert!(call(&service, |reply| Request::Comment(info.id, 0, CommentMutation::CreateTextHighlight(0, 0, 1, None), reply)).is_err()); assert_eq!(comments_png(&service, info.id, 0, 200), accepted); call(&service, |reply| Request::Close(info.id, reply)).unwrap(); assert!(call(&service, |reply| Request::Comment(info.id, info.revision, CommentMutation::CreateTextHighlight(0, 0, 1, None), reply)).is_err()); assert_eq!(std::fs::read(path).unwrap(), source);
+        for (label, matrix, text) in [("skewed", [1.0, 0.0, 0.2, 1.0, 100.0, 200.0], "MMMM".to_owned()), ("truncated", [1.0, 0.0, 0.0, 1.0, 100.0, 200.0], "M".repeat(20_001)), ("whitespace", [1.0, 0.0, 0.0, 1.0, 100.0, 200.0], "First café\nSecond line".to_owned())] {
+            let rotation = if label == "whitespace" { 0 } else { 90 }; let path = folder.path().join(format!("range-{label}.pdf")); std::fs::write(&path, crate::text_geometry::tests::fixture(rotation, matrix, &text)).unwrap(); let source = std::fs::read(&path).unwrap(); let info = call(&service, |reply| Request::Open(path.clone(), reply)).unwrap(); let before = comments_png(&service, info.id, 0, 300); let geometry = call(&service, |reply| Request::TextGeometry(info.id, 0, 0, reply)).unwrap();
+            let start = if label == "whitespace" { geometry.characters.iter().position(|value| value.bounds.is_none()).unwrap() } else { 0 }; assert!(call(&service, |reply| Request::Comment(info.id, 0, CommentMutation::CreateTextHighlight(0, start, start + 1, None), reply)).is_err()); if label == "skewed" { assert_eq!(geometry.status, "unsupported"); } if label == "truncated" { assert!(geometry.truncated && geometry.characters.is_empty()); }
+            assert_eq!(comments_png(&service, info.id, 0, 300), before); assert!(call(&service, |reply| Request::Annotations(info.id, 0, reply)).unwrap().annotations.is_empty()); assert!(!call(&service, |reply| Request::Edit(info.id, PageEdit::Move { from: 0, to: 0 }, reply)).unwrap().can_undo); call(&service, |reply| Request::Close(info.id, reply)).unwrap(); assert_eq!(std::fs::read(path).unwrap(), source);
+        }
+    }
     #[test]
     fn highlights_all_rotations_inherited_crop_multiply_pixels_unicode_reopen_and_print_isolation() {
         let _print_lock = print_test_lock(); let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")); let service = PdfService::start(root.join("resources/pdfium/bin/pdfium.dll")); let folder = tempfile::tempdir().unwrap();
@@ -1048,6 +1177,7 @@ mod tests {
             let list = call(&service, |reply| Request::Comments(info.id, 0, reply)).unwrap(); assert_eq!(list.status, "unsupported"); assert!(list.reason.is_some()); assert!(list.notes.is_empty());
             assert!(call(&service, |reply| Request::Comment(info.id, 0, CommentMutation::Create(0, CropRect { x: 0.1, y: 0.1, width: 0.1, height: 0.1 }, "Blocked".into()), reply)).is_err());
             assert_eq!(call(&service, |reply| Request::Annotations(info.id, 0, reply)).unwrap().status, "unsupported"); assert!(call(&service, |reply| Request::Comment(info.id, 0, CommentMutation::CreateHighlight(0, CropRect { x: 0.1, y: 0.1, width: 0.1, height: 0.1 }, None), reply)).is_err());
+            assert!(call(&service, |reply| Request::Comment(info.id, 0, CommentMutation::CreateTextHighlight(0, 0, 1, None), reply)).is_err());
             call(&service, |reply| Request::Close(info.id, reply)).unwrap(); assert_eq!(std::fs::read(path).unwrap(), source);
         }
     }
@@ -2478,6 +2608,7 @@ mod tests {
             let comments = call(&service, |reply| Request::Comments(info.id, 0, reply)).unwrap(); assert_eq!(comments.status, "unsupported"); assert!(comments.notes.is_empty());
             assert!(call(&service, |reply| Request::Comment(info.id, 0, CommentMutation::Create(0, CropRect { x: 0.1, y: 0.1, width: 0.1, height: 0.1 }, "Blocked encrypted note".into()), reply)).is_err(), "Encrypted v{version}-{kind} must not create notes");
             assert_eq!(call(&service, |reply| Request::Annotations(info.id, 0, reply)).unwrap().status, "unsupported"); assert!(call(&service, |reply| Request::Comment(info.id, 0, CommentMutation::CreateHighlight(0, CropRect { x: 0.1, y: 0.1, width: 0.1, height: 0.1 }, None), reply)).is_err(), "Encrypted v{version}-{kind} must not create highlights");
+            assert!(call(&service, |reply| Request::Comment(info.id, 0, CommentMutation::CreateTextHighlight(0, 0, 1, None), reply)).is_err(), "Encrypted v{version}-{kind} must not create text highlights");
             for page in 0..info.pages.len() {
                 let (tx, rx) = oneshot::channel(); service.sender.send(Request::Render(info.id, page as u16, 100, tx)).unwrap(); assert!(!rx.blocking_recv().unwrap().unwrap().is_empty(), "v{version}-{kind} page {page}");
             }

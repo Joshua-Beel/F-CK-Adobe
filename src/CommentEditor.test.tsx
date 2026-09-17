@@ -29,12 +29,12 @@ describe('CommentEditor', () => {
   it('allows an empty area-highlight description and preserves nonblank Unicode text', async () => {
     const save = vi.fn().mockResolvedValue(undefined), close = vi.fn();
     let ui!: ReactTestRenderer;
-    await act(async () => { ui = create(<CommentEditor draft={{ kind: 'create', type: 'highlight', page: 0, rect: { x: .1, y: .2, width: .3, height: .4 } }} busy={false} save={save} close={close} />); });
-    expect(ui.root.findByProps({ 'aria-label': 'Area highlight description' }).props.value).toBe('');
+    await act(async () => { ui = create(<CommentEditor draft={{ kind: 'create', type: 'area-highlight', page: 0, rect: { x: .1, y: .2, width: .3, height: .4 } }} busy={false} save={save} close={close} />); });
+    expect(ui.root.findByProps({ 'aria-label': 'Highlight description' }).props.value).toBe('');
     await act(async () => ui.root.findAllByType('button').find(button => button.children.join('') === 'Save area highlight')!.props.onClick());
     expect(save).toHaveBeenCalledWith('');
-    await act(async () => { ui = create(<CommentEditor draft={{ kind: 'create', type: 'highlight', page: 0, rect: { x: .1, y: .2, width: .3, height: .4 } }} busy={false} save={save} close={close} />); });
-    act(() => ui.root.findByProps({ 'aria-label': 'Area highlight description' }).props.onChange({ target: { value: '  🙂  ' } }));
+    await act(async () => { ui = create(<CommentEditor draft={{ kind: 'create', type: 'area-highlight', page: 0, rect: { x: .1, y: .2, width: .3, height: .4 } }} busy={false} save={save} close={close} />); });
+    act(() => ui.root.findByProps({ 'aria-label': 'Highlight description' }).props.onChange({ target: { value: '  🙂  ' } }));
     await act(async () => ui.root.findAllByType('button').find(button => button.children.join('') === 'Save area highlight')!.props.onClick());
     expect(save).toHaveBeenLastCalledWith('  🙂  ');
   });
@@ -43,7 +43,16 @@ describe('CommentEditor', () => {
     const save = vi.fn().mockResolvedValue(undefined), close = vi.fn();
     let ui!: ReactTestRenderer;
     await act(async () => { ui = create(<CommentEditor draft={{ kind: 'edit', annotation: { id: 'h1', kind: 'highlight', page: 0, rect: null, contents: '\uFEFF' } }} busy={false} save={save} close={close} />); });
-    await act(async () => ui.root.findAllByType('button').find(button => button.children.join('') === 'Save area highlight')!.props.onClick());
+    await act(async () => ui.root.findAllByType('button').find(button => button.children.join('') === 'Save highlight')!.props.onClick());
     expect(save).toHaveBeenCalledWith('\uFEFF');
+  });
+
+  it('uses the same optional body editor for a selected-text highlight', async () => {
+    const save = vi.fn().mockResolvedValue(undefined), close = vi.fn();
+    let ui!: ReactTestRenderer;
+    await act(async () => { ui = create(<CommentEditor draft={{ kind: 'create-text-highlight', page: 2, start: 4, end: 9 }} busy={false} save={save} close={close} />); });
+    expect(ui.root.findByType('h2').children.join('')).toBe('New text highlight on page 3');
+    await act(async () => ui.root.findAllByType('button').find(button => button.children.join('') === 'Save text highlight')!.props.onClick());
+    expect(save).toHaveBeenCalledWith('');
   });
 });

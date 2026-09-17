@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { Undo2, Redo2 } from 'lucide-react';
 import { ArrowDownToLine, ArrowUpRight, Bookmark, ChevronDown, ChevronLeft, ChevronRight, ChevronsUpDown, CircleHelp, Combine, File, FileCheck2, FileImage, FileOutput, FilePenLine, FilePlus2, Files, FolderOpen, Hand, Highlighter, Home, LayoutGrid, List, Maximize, Menu, MessageSquare, Minus, MoreHorizontal, MousePointer2, PanelLeftClose, Pencil, Plus, Printer, RotateCw, Save, ScanLine, Search, ShieldCheck, Signature, SlidersHorizontal, Star, Sun, Type, X, ZoomIn, ZoomOut, type LucideIcon } from 'lucide-react';
-import { closeDocument, native, openDocument, reopenDocument, editPages, saveCopy, splitDocument, cropPage, combineDocuments, insertPagesCopy, replacePagesCopy, documentAnnotations, createComment, updateComment, deleteComment, createHighlight, updateHighlight, deleteHighlight, type Annotation, type CommentRect, type DocumentAnnotations, type OpenResult, type SplitOutput, type SavedCopy } from './bridge';
+import { closeDocument, native, openDocument, reopenDocument, editPages, saveCopy, splitDocument, cropPage, combineDocuments, insertPagesCopy, replacePagesCopy, documentAnnotations, createComment, updateComment, deleteComment, createHighlight, createTextHighlight, updateHighlight, deleteHighlight, type Annotation, type CommentRect, type DocumentAnnotations, type OpenResult, type SplitOutput, type SavedCopy } from './bridge';
 import { clampPage, toolGroups, type DocumentInfo, type PageEdit } from './model';
 import Viewer from './Viewer';
 import Organizer from './Organizer';
@@ -20,13 +20,14 @@ import InsertPagesDialog from './InsertPagesDialog';
 import ReplacePagesDialog from './ReplacePagesDialog';
 import CommentsPanel from './CommentsPanel';
 import CommentEditor, { type AnnotationDraft } from './CommentEditor';
+import type { TextHighlightSelection, TextHighlightSelectionSource } from './textHighlightSelection';
 import { readPreferences, savePreferences } from './preferences';
 import { readRecentFiles, saveRecentFiles, rememberFile } from './recentFiles';
 import s from './Workspace.module.css';
 
 const icons: Record<string, LucideIcon> = { 'Create a PDF': FilePlus2, 'Combine files': Combine, 'Organize pages': LayoutGrid, 'Edit a PDF': FilePenLine, 'Export a PDF': FileOutput, 'Scan & OCR': ScanLine, 'Fill & sign': Signature, 'Protect a PDF': ShieldCheck, 'Comment': MessageSquare, 'Compress a PDF': ArrowDownToLine };
-function IconButton({ icon: Icon, label, onClick, disabled = false, active = false }: { icon: LucideIcon; label: string; onClick?: () => void; disabled?: boolean; active?: boolean }) {
-  return <button className={`${s.iconButton} ${active ? s.activeIcon : ''}`} aria-label={label} title={disabled && !onClick ? `${label} — not implemented yet` : label} onClick={onClick} disabled={disabled}><Icon size={19} strokeWidth={1.7} /></button>;
+function IconButton({ icon: Icon, label, onClick, onPointerDown, disabled = false, active = false }: { icon: LucideIcon; label: string; onClick?: () => void; onPointerDown?: () => void; disabled?: boolean; active?: boolean }) {
+  return <button className={`${s.iconButton} ${active ? s.activeIcon : ''}`} aria-label={label} title={disabled && !onClick ? `${label} — not implemented yet` : label} onPointerDown={onPointerDown} onClick={onClick} disabled={disabled}><Icon size={19} strokeWidth={1.7} /></button>;
 }
 type AnnotationsLoad = { request: string; annotations: DocumentAnnotations | null; error: string };
 
@@ -71,6 +72,9 @@ export default function App() {
   const [highlightMode, setHighlightMode] = useState(false);
   const [annotationsLoad, setAnnotationsLoad] = useState<AnnotationsLoad>({ request: '', annotations: null, error: '' });
   const [commentEditor, setCommentEditor] = useState<AnnotationDraft | null>(null);
+  const [textHighlightSelection, setTextHighlightSelection] = useState<TextHighlightSelection | null>(null);
+  const retainedTextHighlightSelection = useRef<TextHighlightSelection | null>(null);
+  const pointerTextHighlightSelection = useRef<TextHighlightSelection | null>(null);
   const [pendingClose, setPendingClose] = useState<number | 'window' | null>(null);
   const closingDocument = useRef<number | null>(null);
   useEffect(() => {
@@ -94,7 +98,8 @@ export default function App() {
   const closeSearch = useCallback(() => { setSearchOpen(false); setActiveSearch(null); }, []);
   useEffect(() => { setActiveSearch(null); }, [active, doc?.revision, organizing, searchOpen]);
   useEffect(() => { setCommentMode(false); setHighlightMode(false); setCommentsOpen(false); setCommentEditor(null); }, [active]);
-  const annotationsNeeded = commentMode || highlightMode || commentsOpen || commentEditor !== null;
+  useEffect(() => { retainedTextHighlightSelection.current = null; pointerTextHighlightSelection.current = null; setTextHighlightSelection(null); }, [active, doc?.revision, hand, commentMode, highlightMode]);
+  const annotationsNeeded = commentMode || highlightMode || commentsOpen || commentEditor !== null || textHighlightSelection !== null;
   const annotationsRequest = doc ? `${doc.id}:${doc.revision}` : '';
   useEffect(() => {
     if (!doc || !annotationsNeeded) { setAnnotationsLoad({ request: '', annotations: null, error: '' }); return; }
@@ -189,13 +194,33 @@ export default function App() {
     try { updateDocument(await operation(current)); }
     finally { setBusy(false); }
   };
+  const receiveTextHighlightSelection = useCallback((selection: TextHighlightSelection | null, source: TextHighlightSelectionSource) => {
+    if (!selection || !doc || busy || hand || commentMode || highlightMode || selection.id !== doc.id || selection.revision !== doc.revision || selection.page < 0 || selection.page >= doc.pages.length || selection.start < 0 || selection.end <= selection.start) {
+      setTextHighlightSelection(current => current?.id === source.id && current.page === source.page && current.revision === source.revision ? null : current);
+      if (retainedTextHighlightSelection.current?.id === source.id && retainedTextHighlightSelection.current.page === source.page && retainedTextHighlightSelection.current.revision === source.revision) retainedTextHighlightSelection.current = null;
+      return;
+    }
+    pointerTextHighlightSelection.current = null;
+    retainedTextHighlightSelection.current = selection;
+    setTextHighlightSelection(selection);
+  }, [busy, commentMode, doc, hand, highlightMode]);
+  const captureTextHighlightSelection = () => { pointerTextHighlightSelection.current = retainedTextHighlightSelection.current; };
+  const beginTextHighlight = () => {
+    const selection = pointerTextHighlightSelection.current || retainedTextHighlightSelection.current;
+    pointerTextHighlightSelection.current = null;
+    if (!doc || busy || hand || commentMode || highlightMode || annotations?.status !== 'supported' || !selection || selection.id !== doc.id || selection.revision !== doc.revision || selection.page < 0 || selection.page >= doc.pages.length || !Number.isSafeInteger(selection.start) || !Number.isSafeInteger(selection.end) || selection.start < 0 || selection.end <= selection.start) return;
+    retainedTextHighlightSelection.current = null;
+    setTextHighlightSelection(null);
+    setCommentsOpen(true);
+    setCommentEditor({ kind: 'create-text-highlight', page: selection.page, start: selection.start, end: selection.end });
+  };
   const beginComment = (commentPage: number, rect: CommentRect) => {
     if (!doc || busy || annotations?.status !== 'supported') return;
     setHighlightMode(false); setCommentsOpen(true); setCommentEditor({ kind: 'create', type: 'note', page: commentPage, rect });
   };
   const beginHighlight = (highlightPage: number, rect: CommentRect) => {
     if (!doc || busy || annotations?.status !== 'supported') return;
-    setCommentMode(false); setCommentsOpen(true); setCommentEditor({ kind: 'create', type: 'highlight', page: highlightPage, rect });
+    setCommentMode(false); setCommentsOpen(true); setCommentEditor({ kind: 'create', type: 'area-highlight', page: highlightPage, rect });
   };
   const selectAnnotation = (annotation: Annotation) => {
     if (!doc || busy) return;
@@ -352,8 +377,9 @@ export default function App() {
     {combineOpen && <CombineDialog documents={documents} activeId={active} busy={busy} combine={combine} close={() => setCombineOpen(false)} />}
     {insertOpen && <InsertPagesDialog documents={documents} activeId={active} busy={busy} insert={insert} close={() => setInsertOpen(false)} />}
     {replaceOpen && <ReplacePagesDialog documents={documents} activeId={active} initialRange={replaceRange} busy={busy} replace={replace} close={() => setReplaceOpen(false)} />}
-    {commentEditor && doc && <CommentEditor key={`${doc.id}:${doc.revision}:${commentEditor.kind === 'edit' ? commentEditor.annotation.id : 'new'}`} draft={commentEditor} busy={busy} save={contents => commentEditor.kind === 'create'
-      ? commentEditor.type === 'note' ? mutateAnnotation(current => createComment(current.id, current.revision, commentEditor.page, commentEditor.rect, contents || '')) : mutateAnnotation(current => createHighlight(current.id, current.revision, commentEditor.page, commentEditor.rect, contents))
+    {commentEditor && doc && <CommentEditor key={`${doc.id}:${doc.revision}:${commentEditor.kind === 'edit' ? commentEditor.annotation.id : 'new'}`} draft={commentEditor} busy={busy} save={contents => commentEditor.kind === 'create-text-highlight'
+      ? mutateAnnotation(current => createTextHighlight(current.id, current.revision, commentEditor.page, commentEditor.start, commentEditor.end, contents))
+      : commentEditor.kind === 'create' ? commentEditor.type === 'note' ? mutateAnnotation(current => createComment(current.id, current.revision, commentEditor.page, commentEditor.rect, contents || '')) : mutateAnnotation(current => createHighlight(current.id, current.revision, commentEditor.page, commentEditor.rect, contents))
       : commentEditor.annotation.kind === 'note' ? mutateAnnotation(current => updateComment(current.id, current.revision, commentEditor.annotation.id, contents || '')) : mutateAnnotation(current => updateHighlight(current.id, current.revision, commentEditor.annotation.id, contents))}
       remove={commentEditor.kind === 'edit' ? () => commentEditor.annotation.kind === 'note' ? mutateAnnotation(current => deleteComment(current.id, current.revision, commentEditor.annotation.id)) : mutateAnnotation(current => deleteHighlight(current.id, current.revision, commentEditor.annotation.id)) : undefined} close={() => setCommentEditor(null)} />}
     <div className={s.globalbar}>
@@ -374,7 +400,7 @@ export default function App() {
         </section>
       </> : view === 'tools' ? <section className={s.toolsCatalog}><div className={s.catalogHeading}><div><p className={s.eyebrow}>THE COMPLETE WORKSPACE</p><h1>All tools</h1><p>Combine Files and Organize Pages are ready. Other advanced tools are planned for later milestones.</p></div><label className={s.search}><Search size={16} /><input aria-label="Search tools" placeholder="Find a tool" value={query} onChange={e => setQuery(e.target.value)} /></label></div>{toolGroups.map(group => <section key={group.name}><h2>{group.name}</h2><div className={s.catalogGrid}>{group.tools.filter(name => name.toLowerCase().includes(query.toLowerCase())).map((name, i) => <div className={s.catalogCard} key={name}>{toolRow(name, i)}<span className={s.planned}>{name === 'Organize pages' || name === 'Combine files' ? 'Available' : 'Not available yet'}</span></div>)}</div></section>)}</section> : doc ? <>
         {toolsOpen && <aside className={s.toolsPanel}><div className={s.panelHeading}><h2>All tools</h2><IconButton icon={PanelLeftClose} label="Collapse all tools" onClick={() => setToolsOpen(false)} /></div>{['Export a PDF', 'Edit a PDF', 'Create a PDF', 'Combine files', 'Organize pages', 'Comment', 'Fill & sign', 'Scan & OCR', 'Protect a PDF', 'Compress a PDF'].map(toolRow)}<button className={s.textButton} onClick={() => setView('tools')}>View all tools <ChevronRight size={15} /></button><div className={s.panelNote}>Combine Files and Organize Pages are available. More tools are in development.</div></aside>}
-        {organizing ? <Organizer key={doc.id} document={doc} currentPage={page} busy={busy} edit={edit} save={save} split={split} crop={crop} insert={launchInsert} replace={launchReplace} close={() => setOrganizing(false)} /> : <div className={s.documentArea}><Viewer key={`${doc.id}-${doc.revision}`} document={doc} zoom={zoom} fit={fit} target={target} onPage={trackPage} hand={hand} search={activeSearch} annotations={annotations?.status === 'supported' ? annotations.annotations : []} commentMode={commentMode} highlightMode={highlightMode} annotationAvailable={annotations?.status === 'supported'} annotationInteractive={commentMode && !hand && !highlightMode} onCommentCreate={beginComment} onHighlightCreate={beginHighlight} onAnnotationSelect={selectAnnotation} /><div className={s.quickToolbar}><IconButton icon={MousePointer2} label="Select text on page" active={!hand && !commentMode && !highlightMode} onClick={() => { setHand(false); setCommentMode(false); setHighlightMode(false); }} /><IconButton icon={Hand} label="Pan document" active={hand} onClick={() => { setHand(true); setCommentMode(false); setHighlightMode(false); }} /><IconButton icon={Type} label="Read and copy page text" onClick={() => setPageTextOpen(true)} /><span className={s.horizontalDivider} /><IconButton icon={MessageSquare} label="Add comment" active={commentMode} disabled={busy} onClick={launchCommentMode} /><IconButton icon={Highlighter} label="Add area highlight" active={highlightMode} disabled={busy} onClick={launchHighlightMode} /><IconButton icon={Pencil} label="Draw" disabled /><IconButton icon={Type} label="Fill in text" disabled /><IconButton icon={Signature} label="Add signature" disabled /><span className={s.horizontalDivider} /><IconButton icon={MoreHorizontal} label="Customize quick tools" disabled /></div></div>}
+        {organizing ? <Organizer key={doc.id} document={doc} currentPage={page} busy={busy} edit={edit} save={save} split={split} crop={crop} insert={launchInsert} replace={launchReplace} close={() => setOrganizing(false)} /> : <div className={s.documentArea}><Viewer key={`${doc.id}-${doc.revision}`} document={doc} zoom={zoom} fit={fit} target={target} onPage={trackPage} hand={hand} search={activeSearch} annotations={annotations?.status === 'supported' ? annotations.annotations : []} commentMode={commentMode} highlightMode={highlightMode} annotationAvailable={annotations?.status === 'supported'} annotationInteractive={commentMode && !hand && !highlightMode} onCommentCreate={beginComment} onHighlightCreate={beginHighlight} onAnnotationSelect={selectAnnotation} onTextSelection={receiveTextHighlightSelection} /><div className={s.quickToolbar}><IconButton icon={MousePointer2} label="Select text on page" active={!hand && !commentMode && !highlightMode} onClick={() => { setHand(false); setCommentMode(false); setHighlightMode(false); }} /><IconButton icon={Highlighter} label="Highlight selected text" disabled={busy || !textHighlightSelection || annotations?.status !== 'supported'} onPointerDown={captureTextHighlightSelection} onClick={beginTextHighlight} /><IconButton icon={Hand} label="Pan document" active={hand} onClick={() => { setHand(true); setCommentMode(false); setHighlightMode(false); }} /><IconButton icon={Type} label="Read and copy page text" onClick={() => setPageTextOpen(true)} /><span className={s.horizontalDivider} /><IconButton icon={MessageSquare} label="Add comment" active={commentMode} disabled={busy} onClick={launchCommentMode} /><IconButton icon={Highlighter} label="Add area highlight" active={highlightMode} disabled={busy} onClick={launchHighlightMode} /><IconButton icon={Pencil} label="Draw" disabled /><IconButton icon={Type} label="Fill in text" disabled /><IconButton icon={Signature} label="Add signature" disabled /><span className={s.horizontalDivider} /><IconButton icon={MoreHorizontal} label="Customize quick tools" disabled /></div></div>}
         {!organizing && commentsOpen && doc && <CommentsPanel key={`${doc.id}-${doc.revision}`} document={doc} page={page} annotations={annotations} error={annotationsLoad.request === annotationsRequest ? annotationsLoad.error : ''} selectedId={commentEditor?.kind === 'edit' ? commentEditor.annotation.id : null} onAddComment={addCommentOnCurrentPage} onAddHighlight={addHighlightOnCurrentPage} onSelect={selectAnnotation} close={() => setCommentsOpen(false)} />}
         {!organizing && bookmarksOpen && <BookmarksPanel key={`${doc.id}-${doc.revision}`} document={doc} go={go} close={() => setBookmarksOpen(false)} />}
         {!organizing && searchOpen && !bookmarksOpen && <SearchPanel key={`${doc.id}-${doc.revision}`} document={doc} go={go} close={closeSearch} onHighlights={receiveSearch} />}

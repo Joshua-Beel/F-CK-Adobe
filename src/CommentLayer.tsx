@@ -4,6 +4,12 @@ import s from './CommentLayer.module.css';
 
 const clamp = (value: number, lower: number, upper: number) => Math.max(lower, Math.min(upper, value));
 const positioned = (rect: CommentRect) => ({ left: `${rect.x * 100}%`, top: `${rect.y * 100}%`, width: `${rect.width * 100}%`, height: `${rect.height * 100}%` });
+const MAX_PAGE_HIT_RECTS = 512;
+
+function hitRects(annotation: Annotation) {
+  const rects = annotation.kind === 'highlight' && annotation.quads !== undefined && annotation.quads !== null ? annotation.quads : annotation.rect ? [annotation.rect] : [];
+  return rects.filter(rect => [rect.x, rect.y, rect.width, rect.height].every(Number.isFinite) && rect.width > 0 && rect.height > 0);
+}
 
 export function commentRectAtPoint(x: number, y: number, pageWidth: number, pageHeight: number): CommentRect | null {
   if (![x, y, pageWidth, pageHeight].every(Number.isFinite) || pageWidth < 1 || pageHeight < 1) return null;
@@ -63,8 +69,10 @@ export default function CommentLayer({ page, pageWidth, pageHeight, annotations,
     if (rect) onHighlightCreate(page, rect);
   };
   const placing = creatingComment || creatingHighlight;
+  const targets = interactive && !creatingHighlight ? annotations.flatMap(annotation => hitRects(annotation).map((rect, index) => ({ annotation, rect, index }))) : [];
+  const tooManyTargets = targets.length > MAX_PAGE_HIT_RECTS;
   return <div className={`${s.layer} ${placing ? s.creating : ''}`} data-testid="comment-layer" onPointerDown={down} onPointerMove={move} onPointerUp={up} onPointerCancel={cancel} onLostPointerCapture={cancel}>
     {draft && <span className={s.draft} aria-hidden="true" style={positioned(draft)} />}
-    {interactive && !creatingHighlight && annotations.filter(annotation => annotation.rect).map(annotation => <button key={annotation.id} type="button" className={s.note} aria-label={`Edit ${annotation.kind === 'note' ? 'comment' : 'area highlight'} on page ${page + 1}`} title={annotation.kind === 'note' ? 'Edit comment' : 'Edit area highlight'} style={positioned(annotation.rect!)} onPointerDown={event => event.stopPropagation()} onClick={event => { event.stopPropagation(); onSelect(annotation); }} />)}
+    {tooManyTargets ? <p className={s.targetFallback} role="status">Use Comments to edit annotations on this page.</p> : targets.map(({ annotation, rect, index }) => <button key={`${annotation.id}:${index}`} type="button" className={s.note} aria-label={`Edit ${annotation.kind === 'note' ? 'comment' : 'highlight'} on page ${page + 1}`} title={annotation.kind === 'note' ? 'Edit comment' : 'Edit highlight'} style={positioned(rect)} onPointerDown={event => event.stopPropagation()} onClick={event => { event.stopPropagation(); onSelect(annotation); }} />)}
   </div>;
 }

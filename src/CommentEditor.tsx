@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import type { Annotation, CommentRect } from './bridge';
 import s from './CommentEditor.module.css';
 
-export type AnnotationDraft = { kind: 'create'; type: 'note' | 'highlight'; page: number; rect: CommentRect } | { kind: 'edit'; annotation: Annotation };
+export type AnnotationDraft = { kind: 'create'; type: 'note' | 'area-highlight'; page: number; rect: CommentRect } | { kind: 'create-text-highlight'; page: number; start: number; end: number } | { kind: 'edit'; annotation: Annotation };
 const MAX_COMMENT_BYTES = 8 * 1024;
 
 export function validateCommentContents(contents: string): string | null {
@@ -20,7 +20,7 @@ function validateOptionalContents(contents: string): string | null {
 
 export default function CommentEditor({ draft, busy, save, remove, close }: { draft: AnnotationDraft; busy: boolean; save: (contents: string | null) => Promise<void>; remove?: () => Promise<void>; close: () => void }) {
   const dialog = useRef<HTMLDialogElement>(null);
-  const type = draft.kind === 'edit' ? draft.annotation.kind : draft.type;
+  const type = draft.kind === 'edit' ? draft.annotation.kind : draft.kind === 'create-text-highlight' ? 'text-highlight' : draft.type;
   const required = type === 'note';
   const [contents, setContents] = useState(draft.kind === 'edit' ? draft.annotation.contents || '' : '');
   const [error, setError] = useState('');
@@ -45,10 +45,10 @@ export default function CommentEditor({ draft, busy, save, remove, close }: { dr
     finally { inFlight.current = false; setSubmitting(false); }
   };
   const page = draft.kind === 'edit' ? draft.annotation.page : draft.page;
-  const noun = type === 'note' ? 'Comment' : 'Area highlight';
+  const noun = type === 'note' ? 'Comment' : type === 'text-highlight' ? 'Text highlight' : type === 'area-highlight' ? 'Area highlight' : 'Highlight';
   return <dialog ref={dialog} className={s.dialog} aria-labelledby="comment-title" onCancel={event => { event.preventDefault(); if (!working) close(); }}>
     <h2 id="comment-title">{draft.kind === 'edit' ? `${noun} on page ${page + 1}` : `New ${noun.toLowerCase()} on page ${page + 1}`}</h2>
-    <label>{required ? 'Comment' : 'Description (optional)'}<textarea aria-label={required ? 'Comment text' : 'Area highlight description'} autoFocus value={contents} disabled={working} maxLength={MAX_COMMENT_BYTES} onChange={event => { setContents(event.target.value); setError(''); }} /></label>
+    <label>{required ? 'Comment' : 'Description (optional)'}<textarea aria-label={required ? 'Comment text' : 'Highlight description'} autoFocus value={contents} disabled={working} maxLength={MAX_COMMENT_BYTES} onChange={event => { setContents(event.target.value); setError(''); }} /></label>
     <p>{new TextEncoder().encode(contents).byteLength.toLocaleString()} of {MAX_COMMENT_BYTES.toLocaleString()} bytes</p>
     {error && <p role="alert">{error}</p>}
     {working && <p role="status">Saving comment…</p>}

@@ -1,6 +1,7 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { pageTextGeometry, type PageTextGeometry } from './bridge';
 import { matchedCharacterIndexes, type SearchHighlightQuery } from './searchHighlights';
+import { textHighlightFromBrowserSelection, type TextHighlightSelection, type TextHighlightSelectionSource } from './textHighlightSelection';
 import styles from './TextLayer.module.css';
 
 const MAX_GLYPHS = 20_000;
@@ -26,7 +27,7 @@ function targetBox(bounds: Bounds, pageWidth: number, pageHeight: number) {
   return { left: bounds.x * pageWidth, top: bounds.y * pageHeight, width: targetWidth, height: targetHeight };
 }
 
-function Glyph({ text, bounds, angle, pageWidth, pageHeight }: { text: string; bounds: Bounds; angle: number; pageWidth: number; pageHeight: number }) {
+function Glyph({ index, text, bounds, angle, pageWidth, pageHeight }: { index: number; text: string; bounds: Bounds; angle: number; pageWidth: number; pageHeight: number }) {
   const element = useRef<HTMLSpanElement>(null);
   const target = targetBox(bounds, pageWidth, pageHeight);
   const signature = `${angle}:${pageWidth}:${pageHeight}:${bounds.x}:${bounds.y}:${bounds.width}:${bounds.height}:${text}`;
@@ -51,7 +52,7 @@ function Glyph({ text, bounds, angle, pageWidth, pageHeight }: { text: string; b
     }
   }, [angle, layout, signature, target.height, target.left, target.top, target.width, text]);
   const style = layout?.signature === signature ? { left: `${layout.left}px`, top: `${layout.top}px`, fontSize: '1px', transform: `${angle ? `rotate(${angle}deg) ` : ''}scale(${layout.scaleX}, ${layout.scaleY})` } : { left: '0px', top: '0px', fontSize: '1px' };
-  return <span ref={element} className={styles.glyph} data-angle={angle} style={style}>{text}</span>;
+  return <span ref={element} className={styles.glyph} data-angle={angle} data-geometry-index={index} style={style}>{text}</span>;
 }
 
 function SearchHighlights({ geometry, indexes, pageWidth, pageHeight }: { geometry: PageTextGeometry; indexes: Set<number>; pageWidth: number; pageHeight: number }) {
@@ -60,9 +61,11 @@ function SearchHighlights({ geometry, indexes, pageWidth, pageHeight }: { geomet
   </div>;
 }
 
-export default function TextLayer({ id, page, revision, imageReady, enabled, pageWidth, pageHeight, search }: { id: number; page: number; revision: number; imageReady: boolean; enabled: boolean; pageWidth: number; pageHeight: number; search?: SearchHighlightQuery }) {
+export default function TextLayer({ id, page, revision, imageReady, enabled, pageWidth, pageHeight, search, onTextSelection }: { id: number; page: number; revision: number; imageReady: boolean; enabled: boolean; pageWidth: number; pageHeight: number; search?: SearchHighlightQuery; onTextSelection?: (selection: TextHighlightSelection | null, source: TextHighlightSelectionSource) => void }) {
   const request = `${id}:${page}:${revision}`;
   const [state, setState] = useState<State>({ request: '', kind: 'loading' });
+  const layer = useRef<HTMLDivElement>(null);
+  const sentSelection = useRef(false);
   const needsGeometry = enabled || Boolean(search);
   useEffect(() => {
     if (!needsGeometry || !imageReady) return;
@@ -76,6 +79,23 @@ export default function TextLayer({ id, page, revision, imageReady, enabled, pag
     return () => { disposed = true; };
   }, [id, imageReady, needsGeometry, page, request, revision]);
 
+  useEffect(() => {
+    const element = layer.current;
+    if (!enabled || !onTextSelection || !element || state.request !== request || state.kind !== 'ready') return;
+    const context = { id, page, revision };
+    const changed = () => {
+      const selection = textHighlightFromBrowserSelection(document.getSelection(), element, context);
+      if (selection) { sentSelection.current = true; onTextSelection(selection, context); }
+      else if (sentSelection.current) { sentSelection.current = false; onTextSelection(null, context); }
+    };
+    document.addEventListener('selectionchange', changed);
+    changed();
+    return () => {
+      document.removeEventListener('selectionchange', changed);
+      if (sentSelection.current) { sentSelection.current = false; onTextSelection(null, context); }
+    };
+  }, [enabled, id, onTextSelection, page, request, revision, state]);
+
   if (!needsGeometry || !imageReady || state.request !== request || state.kind === 'loading') return null;
   if (state.kind === 'fallback') return <div className={styles.fallback} role="status">{search ? 'On-page search highlights are unavailable.' : 'On-page text selection is unavailable.'} {state.message} Use Read and copy page text instead.</div>;
   const highlightIndexes = search ? matchedCharacterIndexes(state.geometry.characters, search) : null;
@@ -84,10 +104,10 @@ export default function TextLayer({ id, page, revision, imageReady, enabled, pag
     {search && (hasPositionedHighlight
       ? <SearchHighlights geometry={state.geometry} indexes={highlightIndexes!} pageWidth={pageWidth} pageHeight={pageHeight} />
       : <div className={styles.fallback} role="status">On-page search highlights are unavailable for this match. Use Find results or Read and copy page text instead.</div>)}
-    {enabled && <div className={styles.layer} aria-hidden="true" data-testid="text-layer">
+    {enabled && <div ref={layer} className={styles.layer} aria-hidden="true" data-testid="text-layer" data-text-layer={request}>
       {state.geometry.characters.map((character, index) => character.bounds
-        ? <Glyph key={index} text={character.text} bounds={character.bounds} angle={character.angle} pageWidth={pageWidth} pageHeight={pageHeight} />
-        : <span className={styles.unpositioned} key={index}>{character.text}</span>)}
+        ? <Glyph key={index} index={index} text={character.text} bounds={character.bounds} angle={character.angle} pageWidth={pageWidth} pageHeight={pageHeight} />
+        : <span className={styles.unpositioned} data-geometry-index={index} key={index}>{character.text}</span>)}
     </div>}
   </>;
 }

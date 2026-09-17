@@ -31,6 +31,7 @@ describe('on-page text layer', () => {
     const glyphs = layer.findAllByType('span');
     expect(glyphs).toHaveLength(3);
     expect(glyphs[0].children).toEqual(['<script>']);
+    expect(glyphs.map(glyph => glyph.props['data-geometry-index'])).toEqual([0, 1, 2]);
     expect(ui.root.findAllByType('script')).toHaveLength(0);
     expect(glyphs[0].props.style).toMatchObject({ left: '0px', top: '0px', fontSize: '1px' });
     expect(glyphs[2].children).toEqual(['copy']);

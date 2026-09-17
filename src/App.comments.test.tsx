@@ -2,11 +2,11 @@ import { act, create, type ReactTestRenderer } from 'react-test-renderer';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import App from './App';
 import Viewer from './Viewer';
-import { closeDocument, createComment, createHighlight, documentAnnotations, openDocument, saveCopy } from './bridge';
+import { closeDocument, createComment, createHighlight, createTextHighlight, documentAnnotations, openDocument, saveCopy } from './bridge';
 import type { DocumentInfo } from './model';
 
-vi.mock('./bridge', () => ({ native: false, openDocument: vi.fn(), reopenDocument: vi.fn(), closeDocument: vi.fn(), editPages: vi.fn(), saveCopy: vi.fn(), documentAnnotations: vi.fn(), createComment: vi.fn(), updateComment: vi.fn(), deleteComment: vi.fn(), createHighlight: vi.fn(), updateHighlight: vi.fn(), deleteHighlight: vi.fn() }));
-vi.mock('./Viewer', () => ({ default: (props: { commentMode: boolean; highlightMode: boolean; annotationInteractive: boolean; hand: boolean; onCommentCreate: (page: number, rect: { x: number; y: number; width: number; height: number }) => void; onHighlightCreate: (page: number, rect: { x: number; y: number; width: number; height: number }) => void }) => <div data-comment-mode={String(props.commentMode)} data-highlight-mode={String(props.highlightMode)} data-annotation-interactive={String(props.annotationInteractive)} data-hand={String(props.hand)}><button onClick={() => props.onCommentCreate(0, { x: .1, y: .2, width: .03, height: .03 })}>Place comment</button><button onClick={() => props.onHighlightCreate(0, { x: .1, y: .2, width: .03, height: .03 })}>Place highlight</button></div> }));
+vi.mock('./bridge', () => ({ native: false, openDocument: vi.fn(), reopenDocument: vi.fn(), closeDocument: vi.fn(), editPages: vi.fn(), saveCopy: vi.fn(), documentAnnotations: vi.fn(), createComment: vi.fn(), updateComment: vi.fn(), deleteComment: vi.fn(), createHighlight: vi.fn(), createTextHighlight: vi.fn(), updateHighlight: vi.fn(), deleteHighlight: vi.fn() }));
+vi.mock('./Viewer', () => ({ default: (props: { commentMode: boolean; highlightMode: boolean; annotationInteractive: boolean; hand: boolean; onCommentCreate: (page: number, rect: { x: number; y: number; width: number; height: number }) => void; onHighlightCreate: (page: number, rect: { x: number; y: number; width: number; height: number }) => void; onTextSelection: (selection: { id: number; page: number; revision: number; start: number; end: number } | null, source: { id: number; page: number; revision: number }) => void }) => <div data-comment-mode={String(props.commentMode)} data-highlight-mode={String(props.highlightMode)} data-annotation-interactive={String(props.annotationInteractive)} data-hand={String(props.hand)}><button onClick={() => props.onCommentCreate(0, { x: .1, y: .2, width: .03, height: .03 })}>Place comment</button><button onClick={() => props.onHighlightCreate(0, { x: .1, y: .2, width: .03, height: .03 })}>Place highlight</button><button onClick={() => props.onTextSelection({ id: 1, page: 0, revision: 0, start: 1, end: 4 }, { id: 1, page: 0, revision: 0 })}>Select text range</button><button onClick={() => props.onTextSelection({ id: 1, page: 0, revision: 0, start: 4, end: 6 }, { id: 1, page: 0, revision: 0 })}>Select next text range</button><button onClick={() => props.onTextSelection(null, { id: 1, page: 1, revision: 0 })}>Clear other layer range</button><button onClick={() => props.onTextSelection({ id: 2, page: 0, revision: 0, start: 1, end: 4 }, { id: 2, page: 0, revision: 0 })}>Select stale text range</button></div> }));
 
 const document = (revision = 0): DocumentInfo => ({ id: 1, name: 'notes.pdf', path: 'C:/notes.pdf', pages: [{ width: 612, height: 792 }], revision, dirty: revision > 0, can_undo: revision > 0, can_redo: false });
 const annotations = (documentId = 1, revision = 0, items: { id: string; kind: 'note' | 'highlight'; page: number; rect: { x: number; y: number; width: number; height: number } | null; contents: string | null }[] = []) => ({ documentId, revision, status: 'supported' as const, reason: null, annotations: items });
@@ -108,10 +108,72 @@ it('creates an area highlight using the current revision and an optional body', 
   expect(ui.root.findByType(Viewer).props.highlightMode).toBe(true);
   expect(ui.root.findByType(Viewer).props.commentMode).toBe(false);
   await act(async () => ui.root.findAllByType('button').find(item => item.children.includes('Place highlight'))!.props.onClick());
-  expect(ui.root.findByProps({ 'aria-label': 'Area highlight description' }).props.value).toBe('');
+  expect(ui.root.findByProps({ 'aria-label': 'Highlight description' }).props.value).toBe('');
   await act(async () => ui.root.findAllByType('button').find(item => item.children.join('') === 'Save area highlight')!.props.onClick());
   expect(createHighlight).toHaveBeenCalledWith(1, 0, 0, { x: .1, y: .2, width: .03, height: .03 }, '');
   expect(ui.root.findByType(Viewer).props.document).toMatchObject({ id: 1, revision: 1, dirty: true });
+  act(() => ui.unmount());
+});
+
+it('creates a text highlight using the exact selected geometry range, without inferred contents', async () => {
+  vi.mocked(documentAnnotations).mockResolvedValue(annotations());
+  vi.mocked(createTextHighlight).mockResolvedValue(document(1));
+  let ui!: ReactTestRenderer; act(() => { ui = create(<App />); });
+  await open(ui);
+  act(() => button(ui, 'Select text on page').props.onClick());
+  await act(async () => ui.root.findAllByType('button').find(item => item.children.includes('Select text range'))!.props.onClick());
+  await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+  const action = button(ui, 'Highlight selected text');
+  expect(action.props.disabled).toBe(false);
+  act(() => action.props.onPointerDown());
+  act(() => action.props.onClick());
+  expect(ui.root.findByType(Viewer).props.commentMode).toBe(false);
+  expect(ui.root.findByType(Viewer).props.highlightMode).toBe(false);
+  expect(ui.root.findAllByType('h2').some(item => item.children.join('') === 'New text highlight on page 1')).toBe(true);
+  await act(async () => ui.root.findAllByType('button').find(item => item.children.join('') === 'Save text highlight')!.props.onClick());
+  expect(createTextHighlight).toHaveBeenCalledWith(1, 0, 0, 1, 4, '');
+  expect(ui.root.findByType(Viewer).props.document).toMatchObject({ id: 1, revision: 1, dirty: true });
+  act(() => ui.unmount());
+});
+
+it('rejects stale text selection callbacks and clears the action outside Select mode', async () => {
+  vi.mocked(documentAnnotations).mockResolvedValue(annotations());
+  let ui!: ReactTestRenderer; act(() => { ui = create(<App />); });
+  await open(ui);
+  act(() => button(ui, 'Select text on page').props.onClick());
+  await act(async () => ui.root.findAllByType('button').find(item => item.children.includes('Select stale text range'))!.props.onClick());
+  expect(button(ui, 'Highlight selected text').props.disabled).toBe(true);
+  await act(async () => ui.root.findAllByType('button').find(item => item.children.includes('Select text range'))!.props.onClick());
+  await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+  expect(button(ui, 'Highlight selected text').props.disabled).toBe(false);
+  act(() => button(ui, 'Pan document').props.onClick());
+  expect(button(ui, 'Highlight selected text').props.disabled).toBe(true);
+  act(() => ui.unmount());
+});
+
+it('keeps a new page selection when another text layer clears in the same selection update', async () => {
+  vi.mocked(documentAnnotations).mockResolvedValue(annotations());
+  let ui!: ReactTestRenderer; act(() => { ui = create(<App />); });
+  await open(ui);
+  act(() => button(ui, 'Select text on page').props.onClick());
+  await act(async () => ui.root.findAllByType('button').find(item => item.children.includes('Select text range'))!.props.onClick());
+  await act(async () => ui.root.findAllByType('button').find(item => item.children.includes('Clear other layer range'))!.props.onClick());
+  expect(button(ui, 'Highlight selected text').props.disabled).toBe(false);
+  act(() => ui.unmount());
+});
+
+it('does not reuse a canceled pointer capture when keyboard activation follows a newer selection', async () => {
+  vi.mocked(documentAnnotations).mockResolvedValue(annotations());
+  vi.mocked(createTextHighlight).mockResolvedValue(document(1));
+  let ui!: ReactTestRenderer; act(() => { ui = create(<App />); });
+  await open(ui);
+  act(() => button(ui, 'Select text on page').props.onClick());
+  await act(async () => ui.root.findAllByType('button').find(item => item.children.includes('Select text range'))!.props.onClick());
+  act(() => button(ui, 'Highlight selected text').props.onPointerDown());
+  await act(async () => ui.root.findAllByType('button').find(item => item.children.includes('Select next text range'))!.props.onClick());
+  await act(async () => button(ui, 'Highlight selected text').props.onClick());
+  await act(async () => ui.root.findAllByType('button').find(item => item.children.join('') === 'Save text highlight')!.props.onClick());
+  expect(createTextHighlight).toHaveBeenCalledWith(1, 0, 0, 4, 6, '');
   act(() => ui.unmount());
 });
 
