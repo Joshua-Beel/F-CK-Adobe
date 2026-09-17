@@ -1,10 +1,15 @@
-## 0.2.5 (draft candidate)
+## 0.2.6 (draft candidate)
 
 - Adds on-page embedded-text selection and literal match highlights where supported geometry is available, plus Page text fallbacks for unsupported or capped pages.
 - Adds fixed-size splitting, current-page crop, Combine Files, Insert Pages, and Replace Pages. Structural copy operations use current edits, preserve the stated source metadata, and create a new output without changing either source tab.
 - Adds source-availability archives for five exact MPL-2.0 crates and current dependency notices to the bundled resources.
 
 Native desktop verification of selection/clipboard behavior, split and structural-copy save dialogs, crop interaction, printing, installation, and upgrade/relaunch remains open.
+
+## 0.2.5 (tagged; no draft artifacts)
+
+- The release workflow stopped during npm tests because the clean runner had not fetched the locked Cargo registry required by the offline dependency-notice checks.
+- No native test, signing, installer, asset upload, or GitHub draft-release step ran for this tag.
 
 ## 0.2.4
 

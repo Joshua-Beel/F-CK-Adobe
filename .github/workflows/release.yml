@@ -36,6 +36,8 @@ jobs:
       - run: npm run fixtures
       - run: ./scripts/setup-pdfium.ps1
         shell: pwsh
+      - name: Fetch locked Windows Cargo registry for offline notice checks
+        run: cargo fetch --locked --target x86_64-pc-windows-msvc --manifest-path src-tauri/Cargo.toml
       - run: npm test
       - run: cargo test --locked --manifest-path src-tauri/Cargo.toml
       - uses: actions/setup-dotnet@v4
