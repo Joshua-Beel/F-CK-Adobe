@@ -252,7 +252,8 @@ impl PdfService {
                             let document = documents.get(&id).ok_or("Document is closed")?;
                             let source = document.pages().get(spec.source as i32).map_err(|e| e.to_string())?;
                             let text = source.text().map_err(|e| e.to_string())?;
-                            Ok(text.all())
+                            let visible = source.boundaries().bounding().map_err(|e| e.to_string())?.bounds;
+                            Ok(text.inside_rect(visible))
                         })();
                         let _ = reply.send(result);
                     }
@@ -394,6 +395,41 @@ fn current_info(session: &EditSession, original: &DocumentInfo) -> DocumentInfo 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn page_text_and_geometry_keep_visible_words_and_exclude_crop_hidden_words_at_every_rotation() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let service = PdfService::start(root.join("resources/pdfium/bin/pdfium.dll"));
+        let folder = tempfile::tempdir().unwrap();
+        let visible = ["VisibleHeader", "VisibleBody", "VisibleMiddle", "VisibleLower", "VisibleBottom"];
+        let hidden = ["HiddenAbove", "HiddenBelow"];
+        for original_rotation in [0, 90, 180, 270] {
+            let path = folder.path().join(format!("cropped-text-{original_rotation}.pdf"));
+            let bytes = crate::text_geometry::tests::fixture(original_rotation, [1.0, 0.0, 0.0, 1.0, 100.0, 372.0], "HiddenAbove\n\nVisibleHeader\nVisibleBody\nVisibleMiddle\nVisibleLower\nVisibleBottom\n\n\n\nHiddenBelow");
+            std::fs::write(&path, &bytes).unwrap();
+            let (tx, rx) = oneshot::channel(); service.sender.send(Request::Open(path.clone(), tx)).unwrap(); let info = rx.blocking_recv().unwrap().unwrap();
+            for edited_rotation in 0..4 {
+                let revision = edited_rotation as u64;
+                let (tx, rx) = oneshot::channel(); service.sender.send(Request::TextGeometry(info.id, 0, revision, tx)).unwrap(); let geometry = rx.blocking_recv().unwrap().unwrap();
+                assert_eq!(geometry.status, "ok", "{:?}", geometry.reason);
+                let geometry_text = geometry.characters.iter().map(|character| character.text.as_str()).collect::<String>();
+                for word in visible { assert!(geometry_text.contains(word), "Geometry lost {word}: original {original_rotation}, edited {edited_rotation}"); }
+                for word in hidden { assert!(!geometry_text.contains(word), "Geometry copied hidden {word}: original {original_rotation}, edited {edited_rotation}"); }
+                let (tx, rx) = oneshot::channel(); service.sender.send(Request::Text(info.id, 0, revision, tx)).unwrap(); let text = rx.blocking_recv().unwrap().unwrap();
+                for word in visible { assert!(text.contains(word), "Page text lost {word}: original {original_rotation}, edited {edited_rotation}"); }
+                for word in hidden { assert!(!text.contains(word), "Page text copied hidden {word}: original {original_rotation}, edited {edited_rotation}"); }
+                let (tx, rx) = oneshot::channel(); service.sender.send(Request::Render(info.id, 0, 260, tx)).unwrap(); let preview = image::load_from_memory(&rx.blocking_recv().unwrap().unwrap()).unwrap();
+                let turns = (original_rotation / 90 + edited_rotation) % 4;
+                assert_eq!(preview.width() < preview.height(), turns % 2 == 1, "Text inspection changed page rotation");
+                assert_eq!(std::fs::read(&path).unwrap(), bytes);
+                if edited_rotation < 3 {
+                    let (tx, rx) = oneshot::channel(); service.sender.send(Request::Edit(info.id, PageEdit::Rotate { pages: vec![0], clockwise: true }, tx)).unwrap(); rx.blocking_recv().unwrap().unwrap();
+                    let (tx, rx) = oneshot::channel(); service.sender.send(Request::Text(info.id, 0, revision, tx)).unwrap(); assert!(rx.blocking_recv().unwrap().is_err());
+                }
+            }
+            let (tx, rx) = oneshot::channel(); service.sender.send(Request::Close(info.id, tx)).unwrap(); rx.blocking_recv().unwrap().unwrap();
+            let (tx, rx) = oneshot::channel(); service.sender.send(Request::Text(info.id, 0, 3, tx)).unwrap(); assert!(rx.blocking_recv().unwrap().is_err());
+        }
+    }
     #[test]
     fn split_validates_every_fixture_page_and_preserves_source_revision_and_undo() {
         let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
