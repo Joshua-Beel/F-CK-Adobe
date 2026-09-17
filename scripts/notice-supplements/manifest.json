@@ -1,0 +1,173 @@
+{
+  "schema": 1,
+  "provenance": "Published crate .cargo_vcs_info.json commits; official upstream license files. selectors references Mozilla MPL 2.0 in its exact-version source header.",
+  "packages": {
+    "cargo:alloc-stdlib@0.2.4": {
+      "crateCommit": "ae42d22078b98549e987d2f03d12df7b984fde47",
+      "evidence": "https://github.com/dropbox/rust-alloc-no-stdlib/tree/ae42d22078b98549e987d2f03d12df7b984fde47",
+      "files": [
+        {
+          "file": "rust-alloc-no-stdlib-ae42d22078b9-LICENSE",
+          "url": "https://raw.githubusercontent.com/dropbox/rust-alloc-no-stdlib/ae42d22078b98549e987d2f03d12df7b984fde47/LICENSE",
+          "sha256": "c0c56f26d9c051cac4d200c34c84e7ae9aaa853e01a982a1df08b09931e518ae"
+        }
+      ]
+    },
+    "cargo:defmt-parser@1.0.0": {
+      "crateCommit": "4a8cdb44891ed57b8ff5a023b6bec7137c48708f",
+      "evidence": "https://github.com/knurling-rs/defmt/tree/4a8cdb44891ed57b8ff5a023b6bec7137c48708f",
+      "files": [
+        {
+          "file": "defmt-4a8cdb44891e-LICENSE-MIT",
+          "url": "https://raw.githubusercontent.com/knurling-rs/defmt/4a8cdb44891ed57b8ff5a023b6bec7137c48708f/LICENSE-MIT",
+          "sha256": "2710a622a896bba67356913d4d0492cab5465f61b2ecce6d880aeb483834fb50"
+        },
+        {
+          "file": "defmt-4a8cdb44891e-LICENSE-APACHE",
+          "url": "https://raw.githubusercontent.com/knurling-rs/defmt/4a8cdb44891ed57b8ff5a023b6bec7137c48708f/LICENSE-APACHE",
+          "sha256": "8173d5c29b4f956d532781d2b86e4e30f83e6b7878dce18c919451d6ba707c90"
+        }
+      ]
+    },
+    "cargo:selectors@0.36.1": {
+      "crateCommit": "635e1a19d02960588a00e189bd4bd5bdb150ec3d",
+      "evidence": "https://raw.githubusercontent.com/servo/stylo/635e1a19d02960588a00e189bd4bd5bdb150ec3d/selectors/lib.rs",
+      "files": [
+        {
+          "file": "stylo-635e1a19d029-MPL-2.0.txt",
+          "url": "https://www.mozilla.org/media/MPL/2.0/index.txt",
+          "sha256": "3f3d9e0024b1921b067d6f7f88deb4a60cbe7a78e76c64e3f1d7fc3b779b9d04"
+        }
+      ]
+    },
+    "cargo:tauri-plugin@2.6.3": {
+      "crateCommit": "6f6ab1207bb3923c2721fbc67d2fdb1c8deb0c7a",
+      "evidence": "https://github.com/tauri-apps/tauri/tree/6f6ab1207bb3923c2721fbc67d2fdb1c8deb0c7a",
+      "files": [
+        {
+          "file": "tauri-6f6ab1207bb3-LICENSE_MIT",
+          "url": "https://raw.githubusercontent.com/tauri-apps/tauri/6f6ab1207bb3923c2721fbc67d2fdb1c8deb0c7a/LICENSE_MIT",
+          "sha256": "9dd42ea92cff2ede5cd477cbfcce051b2d0115c0ac7f368ee88cb545055dff1d"
+        },
+        {
+          "file": "tauri-6f6ab1207bb3-LICENSE_APACHE-2.0",
+          "url": "https://raw.githubusercontent.com/tauri-apps/tauri/6f6ab1207bb3923c2721fbc67d2fdb1c8deb0c7a/LICENSE_APACHE-2.0",
+          "sha256": "0d542e0c8804e39aa7f37eb00da5a762149dc682d7829451287e11b938e94594"
+        }
+      ]
+    },
+    "cargo:unic-char-property@0.9.0": {
+      "crateCommit": "5878605364af97a3358368a6eaef02104af2e016",
+      "evidence": "https://github.com/open-i18n/rust-unic/tree/5878605364af97a3358368a6eaef02104af2e016",
+      "files": [
+        {
+          "file": "rust-unic-5878605364af-LICENSE-MIT",
+          "url": "https://raw.githubusercontent.com/open-i18n/rust-unic/5878605364af97a3358368a6eaef02104af2e016/LICENSE-MIT",
+          "sha256": "23f18e03dc49df91622fe2a76176497404e46ced8a715d9d2b67a7446571cca3"
+        },
+        {
+          "file": "rust-unic-5878605364af-LICENSE-APACHE",
+          "url": "https://raw.githubusercontent.com/open-i18n/rust-unic/5878605364af97a3358368a6eaef02104af2e016/LICENSE-APACHE",
+          "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2"
+        }
+      ]
+    },
+    "cargo:unic-char-range@0.9.0": {
+      "crateCommit": "5878605364af97a3358368a6eaef02104af2e016",
+      "evidence": "https://github.com/open-i18n/rust-unic/tree/5878605364af97a3358368a6eaef02104af2e016",
+      "files": [
+        {
+          "file": "rust-unic-5878605364af-LICENSE-MIT",
+          "url": "https://raw.githubusercontent.com/open-i18n/rust-unic/5878605364af97a3358368a6eaef02104af2e016/LICENSE-MIT",
+          "sha256": "23f18e03dc49df91622fe2a76176497404e46ced8a715d9d2b67a7446571cca3"
+        },
+        {
+          "file": "rust-unic-5878605364af-LICENSE-APACHE",
+          "url": "https://raw.githubusercontent.com/open-i18n/rust-unic/5878605364af97a3358368a6eaef02104af2e016/LICENSE-APACHE",
+          "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2"
+        }
+      ]
+    },
+    "cargo:unic-common@0.9.0": {
+      "crateCommit": "5878605364af97a3358368a6eaef02104af2e016",
+      "evidence": "https://github.com/open-i18n/rust-unic/tree/5878605364af97a3358368a6eaef02104af2e016",
+      "files": [
+        {
+          "file": "rust-unic-5878605364af-LICENSE-MIT",
+          "url": "https://raw.githubusercontent.com/open-i18n/rust-unic/5878605364af97a3358368a6eaef02104af2e016/LICENSE-MIT",
+          "sha256": "23f18e03dc49df91622fe2a76176497404e46ced8a715d9d2b67a7446571cca3"
+        },
+        {
+          "file": "rust-unic-5878605364af-LICENSE-APACHE",
+          "url": "https://raw.githubusercontent.com/open-i18n/rust-unic/5878605364af97a3358368a6eaef02104af2e016/LICENSE-APACHE",
+          "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2"
+        }
+      ]
+    },
+    "cargo:unic-ucd-version@0.9.0": {
+      "crateCommit": "5878605364af97a3358368a6eaef02104af2e016",
+      "evidence": "https://github.com/open-i18n/rust-unic/tree/5878605364af97a3358368a6eaef02104af2e016",
+      "files": [
+        {
+          "file": "rust-unic-5878605364af-LICENSE-MIT",
+          "url": "https://raw.githubusercontent.com/open-i18n/rust-unic/5878605364af97a3358368a6eaef02104af2e016/LICENSE-MIT",
+          "sha256": "23f18e03dc49df91622fe2a76176497404e46ced8a715d9d2b67a7446571cca3"
+        },
+        {
+          "file": "rust-unic-5878605364af-LICENSE-APACHE",
+          "url": "https://raw.githubusercontent.com/open-i18n/rust-unic/5878605364af97a3358368a6eaef02104af2e016/LICENSE-APACHE",
+          "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2"
+        }
+      ]
+    },
+    "cargo:unic-ucd-ident@0.9.0": {
+      "crateCommit": "8a6ce83063d90b91ae2ce59eddb803edd393fca9",
+      "evidence": "https://github.com/open-i18n/rust-unic/tree/8a6ce83063d90b91ae2ce59eddb803edd393fca9",
+      "files": [
+        {
+          "file": "rust-unic-8a6ce83063d9-LICENSE-MIT",
+          "url": "https://raw.githubusercontent.com/open-i18n/rust-unic/8a6ce83063d90b91ae2ce59eddb803edd393fca9/LICENSE-MIT",
+          "sha256": "23f18e03dc49df91622fe2a76176497404e46ced8a715d9d2b67a7446571cca3"
+        },
+        {
+          "file": "rust-unic-8a6ce83063d9-LICENSE-APACHE",
+          "url": "https://raw.githubusercontent.com/open-i18n/rust-unic/8a6ce83063d90b91ae2ce59eddb803edd393fca9/LICENSE-APACHE",
+          "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2"
+        }
+      ]
+    },
+    "cargo:webview2-com@0.38.2": {
+      "crateCommit": "b74dc5e2b394044bea5191052868ce7a106c202c",
+      "evidence": "https://github.com/wravery/webview2-rs/tree/b74dc5e2b394044bea5191052868ce7a106c202c",
+      "files": [
+        {
+          "file": "webview2-rs-b74dc5e2b394-LICENSE",
+          "url": "https://raw.githubusercontent.com/wravery/webview2-rs/b74dc5e2b394044bea5191052868ce7a106c202c/LICENSE",
+          "sha256": "0dcf41516e608bbcb6cdc5229feb7b86fe4a643b85e7df251133c93408fdac73"
+        }
+      ]
+    },
+    "cargo:webview2-com-sys@0.38.2": {
+      "crateCommit": "b74dc5e2b394044bea5191052868ce7a106c202c",
+      "evidence": "https://github.com/wravery/webview2-rs/tree/b74dc5e2b394044bea5191052868ce7a106c202c",
+      "files": [
+        {
+          "file": "webview2-rs-b74dc5e2b394-LICENSE",
+          "url": "https://raw.githubusercontent.com/wravery/webview2-rs/b74dc5e2b394044bea5191052868ce7a106c202c/LICENSE",
+          "sha256": "0dcf41516e608bbcb6cdc5229feb7b86fe4a643b85e7df251133c93408fdac73"
+        }
+      ]
+    },
+    "cargo:webview2-com-macros@0.8.1": {
+      "crateCommit": "dffa41a8a46d3f5565eefbff2de57d38d399f158",
+      "evidence": "https://github.com/wravery/webview2-rs/tree/dffa41a8a46d3f5565eefbff2de57d38d399f158",
+      "files": [
+        {
+          "file": "webview2-rs-dffa41a8a46d-LICENSE",
+          "url": "https://raw.githubusercontent.com/wravery/webview2-rs/dffa41a8a46d3f5565eefbff2de57d38d399f158/LICENSE",
+          "sha256": "0dcf41516e608bbcb6cdc5229feb7b86fe4a643b85e7df251133c93408fdac73"
+        }
+      ]
+    }
+  }
+}

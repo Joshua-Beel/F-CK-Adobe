@@ -1,15 +1,17 @@
 # Printing implementation notes
 
-Printing is not implemented. The toolbar control remains disabled.
+Native Windows printing is implemented in the source build through the toolbar and Ctrl+P. It is not included in the 0.2.4 draft. Actual Windows dialog interaction, physical output and printer-driver cancellation remain unverified.
 
 The installed Wry WebView2 print method executes `window.print()`. In this app that prints the React workspace and its visible virtualized pages, so it cannot serve as document printing.
 
-The next implementation should use a native Windows print dialog and PDFium raster output, fitting each page to the printable area. Raster output reuses the public renderer but will not preserve vector fidelity. A separate native spool thread must own the printer handles and dialog; printer/network calls must not block the UI or PDF worker.
+The implementation uses a native Windows print dialog and PDFium raster output, fitting each page to the printable area. Raster output reuses the public renderer but does not preserve vector fidelity. A dedicated native spool thread owns printer handles and the dialog; printer/network calls do not run on the UI or PDF worker.
 
-1. Use [PrintDlgExW](https://learn.microsoft.com/en-us/windows/win32/api/commdlg/ns-commdlg-printdlgexw) for printer, range, paper, copies and cancellation. Start output only for its Print result, never Apply or Cancel.
-2. Snapshot the current page plan and validate its revision. Keep the underlying document alive for the job. The snapshot must preserve rotation, order and deletion and must not change the document's saved/dirty state.
-3. Render one page at a time through the existing PDF worker, using print quality, annotations, a white background, explicit BGRA and a bounded pixel allocation. Pass bytes directly to the spool thread, not through React.
-4. Use [GDI printing](https://learn.microsoft.com/en-us/windows/win32/printdocs/gdi-print-api-functions) with deterministic handle cleanup. Cancellation must reach the spooler without waiting behind rendering, aborting failed or canceled jobs. Already printed paper cannot be recalled.
-5. Check encrypted-document print permissions explicitly. Reject unknown permission states until support is verified.
+1. [PrintDlgExW](https://learn.microsoft.com/en-us/windows/win32/api/commdlg/ns-commdlg-printdlgexw) supplies printer, range, paper, copies and cancellation. Output starts only for its Print result, never Apply or Cancel.
+2. A snapshot preserves the current page plan after validating its revision and pins the underlying document until cleanup. Later edits or closure cannot change the job. Printing does not mark the document saved.
+3. The PDF worker renders one page at a time with print quality, annotations/forms, white background and packed BGRA. Output is limited to 4,096 pixels on either axis and 16 million pixels per page, targeting 300 dpi when that fits. Bytes go directly to the spool thread.
+4. [GDI printing](https://learn.microsoft.com/en-us/windows/win32/printdocs/gdi-print-api-functions) handles spooling with abort and handle cleanup. The cancellation flag is independent of the PDF queue. Submitted pages may still print after cancellation. The UI reports submission, not physical completion.
+5. All encrypted or unknown-security files are rejected for printing in this build.
 
-Before enabling the control, test snapshot stability, edited-page order/rotation, all/current/disjoint ranges, mixed page sizes, bitmap orientation/colors/stride, allocation limits, cancellation, printer errors and unchanged dirty state through a fake spool sink. Then inspect Microsoft Print to PDF output and exercise at least one real printer. Desktop automation is currently unreliable, so those native acceptance checks remain blocked.
+Automated coverage includes snapshot stability through edits/closure, order/rotation, all/current/disjoint page selection, BGRA color channels and white background, allocation limits, asymmetric printer DPI, early cancellation, resource-reservation lifetime, UI retry and late cancellation replies. GDI spooling itself is not mocked end to end. Pending cancellation IDs are bounded to 64 and expire after five minutes if no job reserves them.
+
+Still required: inspect Microsoft Print to PDF output, exercise a physical printer, verify mixed-size/orientation output, and induce actual printer/driver errors and cancellation. Desktop automation is currently unreliable, so these native acceptance checks remain blocked.

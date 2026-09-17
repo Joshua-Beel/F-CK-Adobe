@@ -12,6 +12,9 @@ import SearchPanel from './SearchPanel';
 import BookmarksPanel from './BookmarksPanel';
 import PageText from './PageText';
 import PasswordDialog from './PasswordDialog';
+import PrintDialog from './PrintDialog';
+import DocumentProperties from './DocumentProperties';
+import DependencyNotices from './DependencyNotices';
 import { readPreferences, savePreferences } from './preferences';
 import { readRecentFiles, saveRecentFiles, rememberFile } from './recentFiles';
 import s from './Workspace.module.css';
@@ -33,6 +36,9 @@ export default function App() {
   const [searchOpen, setSearchOpen] = useState(false);
   const [bookmarksOpen, setBookmarksOpen] = useState(false);
   const [pageTextOpen, setPageTextOpen] = useState(false);
+  const [printOpen, setPrintOpen] = useState(false);
+  const [propertiesOpen, setPropertiesOpen] = useState(false);
+  const [noticesOpen, setNoticesOpen] = useState(false);
   const [passwordRequest, setPasswordRequest] = useState<{ challenge: Extract<OpenResult, { status: 'password_required' }>; organize: boolean } | null>(null);
   useEffect(() => { if (searchOpen) setBookmarksOpen(false); }, [searchOpen]);
   const [menu, setMenu] = useState(false);
@@ -50,25 +56,26 @@ export default function App() {
   const [recentFiles, setRecentFiles] = useState(readRecentFiles);
   const [organizing, setOrganizing] = useState(false);
   const [pendingClose, setPendingClose] = useState<number | 'window' | null>(null);
+  const closingDocument = useRef<number | null>(null);
   useEffect(() => {
     if (!savePreferences({ dark, zoom, fit, hand, toolsOpen, nav })) setNotice('Your reading preferences could not be saved. They will last for this session only.');
   }, [dark, zoom, fit, hand, toolsOpen, nav]);
   useEffect(() => {
     if (!saveRecentFiles(recentFiles)) setNotice('Recent files and stars could not be saved. They will last for this session only.');
   }, [recentFiles]);
-  const latest = useRef({ documents, busy });
-  latest.current = { documents, busy };
+  const latest = useRef({ documents, busy, active });
+  latest.current = { documents, busy, active };
   useEffect(() => {
     if (!native) return;
     const unlisten = getCurrentWindow().onCloseRequested(event => {
-      if (latest.current.busy) { event.preventDefault(); setNotice('Wait for the current operation to finish before closing.'); }
+      if (latest.current.busy || closingDocument.current !== null) { event.preventDefault(); setNotice('Wait for the current operation to finish before closing.'); }
       else if (latest.current.documents.some(document => document.dirty)) { event.preventDefault(); setPendingClose('window'); }
     });
     return () => { void unlisten.then(stop => stop()); };
   }, []);
   const doc = documents.find(d => d.id === active);
   const activate = (id: number) => {
-    if (busy) return;
+    if (busy || closingDocument.current !== null) return;
     const document = documents.find(item => item.id === id);
     if (!document) return;
     const next = clampPage(readingPages.current.get(id) ?? 0, document.pages.length);
@@ -84,14 +91,14 @@ export default function App() {
     else if (result?.status === 'password_required') setPasswordRequest({ challenge: result, organize });
   };
   const open = useCallback(async (example = false, organize = false) => {
-    if (busy) return;
+    if (busy || closingDocument.current !== null) return;
     setBusy(true); setError(''); setMenu(false);
     try {
       acceptOpen(await openDocument(example), organize);
     } catch (e) { setError(String(e)); } finally { setBusy(false); }
   }, [busy]);
   const reopen = async (path: string) => {
-    if (busy) return;
+    if (busy || closingDocument.current !== null) return;
     const existing = documents.find(document => document.path === path);
     if (existing) { activate(existing.id); return; }
     setBusy(true); setError('');
@@ -101,36 +108,43 @@ export default function App() {
     finally { setBusy(false); }
   };
   const close = async (id: number, discard = false) => {
-    if (busy) return;
+    if (busy || closingDocument.current !== null) return;
     if (!discard && documents.find(document => document.id === id)?.dirty) { setPendingClose(id); return; }
-    try { await closeDocument(id); readingPages.current.delete(id); setDocuments(list => list.filter(d => d.id !== id)); if (active === id) { setActive(null); setView('home'); } } catch (e) { setError(String(e)); }
+    closingDocument.current = id; setBusy(true); setError('');
+    try {
+      await closeDocument(id); readingPages.current.delete(id); setDocuments(list => list.filter(d => d.id !== id));
+      if (latest.current.active === id) { setActive(null); setView('home'); }
+    } catch (e) { setError(String(e)); }
+    finally { closingDocument.current = null; setBusy(false); }
   };
   const updateDocument = (info: DocumentInfo) => {
     setDocuments(list => list.map(document => document.id === info.id ? info : document));
     const next = clampPage(page, info.pages.length); readingPages.current.set(info.id, next); setPage(next); setTarget(value => ({ page: next, token: value.token + 1 }));
   };
   const edit = async (action: PageEdit): Promise<boolean> => {
-    if (!doc || busy) return false;
+    if (!doc || busy || closingDocument.current !== null) return false;
     setBusy(true); setError(''); setNotice('');
     try { updateDocument(await editPages(doc.id, action)); return true; }
     catch (e) { setError(String(e)); return false; } finally { setBusy(false); }
   };
   const save = async (pages?: number[]) => {
-    if (!doc || busy) return;
+    if (!doc || busy || closingDocument.current !== null) return;
     setBusy(true); setError(''); setNotice('');
     try {
       const result = await saveCopy(doc.id, pages);
       if (result) { updateDocument(result.document); setNotice(`Saved ${pages ? 'selected pages' : 'a copy'} to ${result.path}`); }
     } catch (e) { setError(String(e)); } finally { setBusy(false); }
   };
-  const launchOrganizer = () => { if (busy) return; if (doc) { setOrganizing(true); setView('document'); } else void open(false, true); };
+  const launchOrganizer = () => { if (busy || closingDocument.current !== null) return; if (doc) { setOrganizing(true); setView('document'); } else void open(false, true); };
   const go = (value: number) => { if (doc) { const next = clampPage(value, doc.pages.length); trackPage(next); setTarget(v => ({ page: next, token: v.token + 1 })); } };
   useEffect(() => {
     const listener = (event: KeyboardEvent) => {
-      if (updatesOpen || pageTextOpen || passwordRequest || pendingClose !== null) return;
+      if (updatesOpen || pageTextOpen || printOpen || propertiesOpen || noticesOpen || passwordRequest || pendingClose !== null) return;
       if ((event.target as HTMLElement | null)?.closest?.('dialog')) return;
       if (event.ctrlKey && event.key.toLowerCase() === 'o') { event.preventDefault(); void open(); }
       if (event.ctrlKey && event.key.toLowerCase() === 'f' && doc) { event.preventDefault(); setView('document'); setOrganizing(false); setSearchOpen(true); return; }
+      if (event.ctrlKey && event.key.toLowerCase() === 'p' && doc) { event.preventDefault(); if (!busy) setPrintOpen(true); return; }
+      if (event.ctrlKey && event.key.toLowerCase() === 'd' && doc) { event.preventDefault(); if (!busy) setPropertiesOpen(true); return; }
       if (event.key === 'Escape' && searchOpen) { setSearchOpen(false); return; }
       if ((event.target as HTMLElement).matches('input,select,textarea')) return;
       if (event.key === 'F4') { event.preventDefault(); event.shiftKey ? setToolsOpen(v => !v) : setNav(v => !v); }
@@ -165,13 +179,25 @@ export default function App() {
       <button className={s.createButton} disabled title="Create a PDF — not implemented yet"><Plus size={17} /> Create</button>
       <span className={s.windowTitle}>PDF Workstation</span>
     </header>
-    {menu && <div className={s.menuPopover}><button onClick={() => void open()}>Open… <kbd>Ctrl+O</kbd></button><button onClick={() => void open(true)}>Open sample PDF</button><button disabled={!doc || busy} onClick={() => { setMenu(false); void save(); }}>Save a copy… <kbd>Ctrl+S</kbd></button><button onClick={() => { setMenu(false); launchOrganizer(); }}>Organize pages</button><hr /><button onClick={() => { setDark(v => !v); setMenu(false); }}>Switch to {dark ? 'light' : 'dark'} theme</button><button disabled={busy} onClick={() => { setMenu(false); setUpdatesOpen(true); }}>Check for updates…</button><button onClick={() => { setNotice('PDF viewing, embedded-text search, and Organize Pages are available. Rotate, reorder, delete, extract, undo/redo, and save a new copy. Text editing, OCR, forms, and signatures are not implemented yet.'); setMenu(false); }}>About this build</button></div>}
+    {menu && <div className={s.menuPopover}>
+      <button onClick={() => void open()}>Open… <kbd>Ctrl+O</kbd></button><button onClick={() => void open(true)}>Open sample PDF</button>
+      <button disabled={!doc || busy} onClick={() => { setMenu(false); void save(); }}>Save a copy… <kbd>Ctrl+S</kbd></button>
+      <button onClick={() => { setMenu(false); launchOrganizer(); }}>Organize pages</button>
+      <button disabled={!doc || busy} onClick={() => { setMenu(false); setPropertiesOpen(true); }}>Document properties… <kbd>Ctrl+D</kbd></button><hr />
+      <button onClick={() => { setDark(v => !v); setMenu(false); }}>Switch to {dark ? 'light' : 'dark'} theme</button>
+      <button disabled={busy} onClick={() => { setMenu(false); setUpdatesOpen(true); }}>Check for updates…</button>
+      <button disabled={busy} onClick={() => { setMenu(false); setNoticesOpen(true); }}>Third-party notices…</button>
+      <button onClick={() => { setNotice('PDF viewing, embedded-text search, and Organize Pages are available. Rotate, reorder, delete, extract, undo/redo, and save a new copy. Text editing, OCR, forms, and signatures are not implemented yet.'); setMenu(false); }}>About this build</button>
+    </div>}
     {updatesOpen && <Updates dirty={documents.some(document => document.dirty)} busy={busy} setBusy={setBusy} close={() => setUpdatesOpen(false)} />}
     {pageTextOpen && doc && <PageText key={`${doc.id}-${doc.revision}-${page}`} document={doc} page={page} close={() => setPageTextOpen(false)} />}
     {passwordRequest && <PasswordDialog key={passwordRequest.challenge.request_id} challenge={passwordRequest.challenge} onOpened={info => { opened(info, passwordRequest.organize); setPasswordRequest(null); }} onClose={() => setPasswordRequest(null)} />}
+    {printOpen && doc && <PrintDialog document={doc} page={page} setBusy={setBusy} close={() => setPrintOpen(false)} />}
+    {propertiesOpen && doc && <DocumentProperties key={`${doc.id}-${doc.revision}`} document={doc} close={() => setPropertiesOpen(false)} />}
+    {noticesOpen && <DependencyNotices close={() => setNoticesOpen(false)} />}
     <div className={s.globalbar}>
       <nav className={s.primaryNav}><button className={toolsOpen && view !== 'home' ? s.selectedNav : ''} onClick={() => view === 'document' ? setToolsOpen(v => !v) : setView('tools')}>All tools</button><button disabled>Edit</button><button disabled>Convert</button><button disabled>E-sign</button></nav>
-      <div className={s.globalActions}><IconButton icon={Search} label="Find text" disabled={!doc || busy} active={searchOpen} onClick={() => { setView('document'); setOrganizing(false); setSearchOpen(v => !v); }} /><span className={s.divider} /><IconButton icon={Undo2} label="Undo" disabled={busy || !doc?.can_undo} onClick={() => void edit({ kind: 'undo' })} /><IconButton icon={Redo2} label="Redo" disabled={busy || !doc?.can_redo} onClick={() => void edit({ kind: 'redo' })} /><IconButton icon={Save} label="Save a copy" disabled={busy || !doc} onClick={() => void save()} /><IconButton icon={Printer} label="Print" disabled /><IconButton icon={Sun} label="Toggle theme" onClick={() => setDark(v => !v)} /><IconButton icon={CircleHelp} label="Build information" onClick={() => setNotice('Organize Pages and document search are available. Other tools marked unavailable are planned for later milestones. Save a Copy writes a new file and preserves your original.')} /><button className={s.openButton} onClick={() => void open()} disabled={busy}><FolderOpen size={16} /> {busy ? 'Working…' : 'Open a file'}</button></div>
+      <div className={s.globalActions}><IconButton icon={Search} label="Find text" disabled={!doc || busy} active={searchOpen} onClick={() => { setView('document'); setOrganizing(false); setSearchOpen(v => !v); }} /><span className={s.divider} /><IconButton icon={Undo2} label="Undo" disabled={busy || !doc?.can_undo} onClick={() => void edit({ kind: 'undo' })} /><IconButton icon={Redo2} label="Redo" disabled={busy || !doc?.can_redo} onClick={() => void edit({ kind: 'redo' })} /><IconButton icon={Save} label="Save a copy" disabled={busy || !doc} onClick={() => void save()} /><IconButton icon={Printer} label="Print" disabled={busy || !doc} onClick={() => setPrintOpen(true)} /><IconButton icon={Sun} label="Toggle theme" onClick={() => setDark(v => !v)} /><IconButton icon={CircleHelp} label="Build information" onClick={() => setNotice('Organize Pages and document search are available. Other tools marked unavailable are planned for later milestones. Save a Copy writes a new file and preserves your original.')} /><button className={s.openButton} onClick={() => void open()} disabled={busy}><FolderOpen size={16} /> {busy ? 'Working…' : 'Open a file'}</button></div>
     </div>
     {(error || notice) && <div className={`${s.banner} ${error ? s.error : ''}`} role={error ? 'alert' : 'status'}><span>{error || notice}</span><IconButton icon={X} label="Dismiss message" onClick={() => { setError(''); setNotice(''); }} /></div>}
     <main className={s.main}>

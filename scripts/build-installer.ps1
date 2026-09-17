@@ -15,6 +15,10 @@ if (-not $env:TAURI_SIGNING_PRIVATE_KEY) {
     $env:TAURI_SIGNING_PRIVATE_KEY = $signingFile
 }
 if (-not (Test-Path 'src-tauri/resources/pdfium/bin/pdfium.dll')) { & "$PSScriptRoot/setup-pdfium.ps1" }
+cargo fetch --locked --target x86_64-pc-windows-msvc --manifest-path src-tauri/Cargo.toml
+if ($LASTEXITCODE -ne 0) { throw 'Could not fetch locked dependencies for notice verification.' }
+node scripts/dependency-notices.mjs --check
+if ($LASTEXITCODE -ne 0) { throw 'Dependency notices are missing or stale. Regenerate and review them before building an installer.' }
 if ($AzureSigning) {
     npm.cmd run tauri -- build --ci --bundles nsis --config src-tauri/tauri.azure.conf.json
 } else {

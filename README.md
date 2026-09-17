@@ -16,11 +16,13 @@ Version 0.2.0 has a signed update package, but no Windows publisher signature. T
 
 - **Reading:** open PDFs in tabs, scroll through pages, pan, jump to a page, zoom from 10% to 400%, or fit the page to the window width. The source build restores each open tab's last page when switching documents; this position lasts for the session.
 - **Passwords (source build):** enter a PDF's opening password, retry it, or cancel. Passwords are not saved. Encrypted PDFs remain read-only, including files with an empty opening password.
+- **Document properties (source build):** Ctrl+D shows embedded description metadata, original file size, current page sizes, reported permissions and signature count. Unknown values stay unknown; signatures are not validated.
+- **Printing (source build, awaiting native verification):** Ctrl+P opens a Windows printer dialog for all pages, the current page, or ranges. The app sends page images with current edits, fitted to the printable area. Encrypted files are blocked. Physical output and driver cancellation still need testing.
 - **Page text (source build):** open the current page's embedded text, select any portion or all of it, and copy with Ctrl+C. Reading order depends on the PDF; scanned images still need OCR.
 - **Bookmarks (source build):** browse up to 1,000 embedded bookmarks with nested indentation and jump to supported internal page destinations. Unsupported actions stay disabled; destination zoom/position and bookmark editing are not implemented.
 - **Search (source build):** Ctrl+F searches embedded PDF text, with optional case matching, selectable excerpts with highlighted matches, and next/previous matching-page navigation. Search follows page edits; scans need OCR first. Results show one excerpt per matching page, up to 500 pages.
 - **Organizing pages:** select thumbnails or enter a page range, rotate pages, move a page earlier or later, delete pages, and extract a selection into a new PDF. The source build can also move a selected page directly to a numbered position.
-- **Saving:** undo and redo page edits, then use **Save a Copy**. Your original stays untouched, and the app asks before closing a document with unsaved edits.
+- **Saving:** undo and redo page edits, then use **Save a Copy**. Your original stays untouched, and the app asks before closing a document with unsaved edits. The source build limits undo/redo snapshots to 32 MiB per document, dropping the oldest history when needed.
 - **Workspace:** light and dark themes and an All tools panel. The source build remembers theme, zoom, fit width, pan mode, panel visibility, and up to 50 recent file locations with stars across launches. Clear file history removes this list without deleting PDFs. Unsaved edits are not restored after restart.
 
 Your PDFs stay on your computer. There's no document upload service or telemetry.
@@ -32,6 +34,8 @@ Your PDFs stay on your computer. There's no document upload service or telemetry
 | Open a PDF | Ctrl+O |
 | Save a copy | Ctrl+S |
 | Find text | Ctrl+F |
+| Print (source build) | Ctrl+P |
+| Document properties (source build) | Ctrl+D |
 | Undo / redo | Ctrl+Z / Ctrl+Shift+Z or Ctrl+Y |
 | Close a tab / switch tabs | Ctrl+W / Ctrl+Tab |
 | Actual size / fit width | Ctrl+1 / Ctrl+2 |
@@ -42,11 +46,11 @@ Your PDFs stay on your computer. There's no document upload service or telemetry
 
 ## What's still missing
 
-Text and image editing, text selection directly on PDF pages, printing, OCR, signatures, and redaction aren't ready yet. Search excerpts can be selected and copied, but matches aren't highlighted on the page yet. Unavailable tools are disabled in the interface.
+Text and image editing, text selection directly on PDF pages, OCR, signatures, and redaction aren't ready yet. Search excerpts can be selected and copied, but matches aren't highlighted on the page yet. Native printing still needs end-to-end output verification. Unavailable tools are disabled in the interface.
 
 Saving currently means writing a new copy. You can't overwrite an existing file or save changes back to the original. Some page operations are also blocked on signed PDFs, forms, tagged documents, or files with bookmarks and annotations. The [Organize Pages guide](docs/tools/organize-pages.md) explains those limits.
 
-Next up are the remaining reading basics: text selection on pages, search highlighting, and printing. There's also more testing to do with real documents. The generated 98-page scan and 1,500-page text file are useful test cases, but they don't tell us how every large PDF will behave. The full list is in [Known gaps](docs/gaps.md).
+Next up are the remaining reading basics: text selection on pages, search highlighting, and native printing verification. There's also more testing to do with real documents. The generated 98-page scan and 1,500-page text file are useful test cases, but they don't tell us how every large PDF will behave. The full list is in [Known gaps](docs/gaps.md).
 
 ## Run from source
 
@@ -88,6 +92,8 @@ For more background, see the [architecture notes](docs/decisions.md), [PDFium do
 
 ## Recent changes
 
+- Added Document properties, including metadata, current page dimensions and reported permissions. Unknown signature counts stay unknown instead of displaying a library error as 65,535 signatures. Fixed a close-tab race that could leave a blank workspace, and blocked edits/export on malformed PDFs that reference the same page object twice. Added a reproducible 367-package dependency-notice collection, an app menu entry and an installer freshness check. All 59 frontend/release tests, 32 native tests, the production build and the standalone Windows debug build pass. Both copied notice resources match their source SHA-256 hashes. MPL source availability, the project's own license and new installer verification remain open; see the [inventory](docs/license-inventory.md).
+- Added native Windows printing in the source build: printer/range selection, bounded page-image rendering from a stable edited-document snapshot, cancellation and cleanup on failures. Printing never clears unsaved edits and rejects encrypted files. Review fixed early/late cancellation races and a page-limit mismatch. Undo/redo snapshots now have a combined 32 MiB budget per document. All 49 frontend/release tests, 27 native tests and the production build pass. The [dependency inventory](docs/license-inventory.md) records license evidence and remaining packaging work. Native printer output, driver behavior and installer upgrade remain unverified; see [printing notes](docs/printing-plan.md). These changes are newer than the 0.2.4 draft.
 - Tab switching now restores each document's last viewed page and clamps it after page edits shorten the document. Expanded native password tests to six RC4-128, AES-128 and AES-256 fixtures with protected and empty passwords, checking every rendered page, retries, cancellation, edit/export rejection and original-byte preservation. All 45 frontend/release tests, 14 native tests and the production build pass. Native interaction remains unverified. Printing remains disabled; [implementation notes](docs/printing-plan.md) describe the native path needed before enabling it.
 - Parallel password and review work added opening-password prompts with retry/cancel, transient passwords, and cleanup after canceled opens. Encrypted files remain read-only, including empty-password files that lopdf automatically decrypts. Fixed silently truncated malformed PDFs, blocked edits/export when PDF engines disagree on the source page count, limited opening to the IPC-supported 65,536 pages, and disabled background shortcuts inside confirmation dialogs. Added interrupted-update/retry tests. All 43 frontend/release tests, 14 native tests and the production build pass. Native password interaction and the installer upgrade remain unverified. See [review findings](docs/review-findings.md) for remaining risks; these source changes are newer than the 0.2.4 draft.
 - Recent files and stars now persist locally, capped at 50 entries. Clicking a saved entry reopens it or activates its existing tab; missing files show an error. Clear file history removes saved locations without deleting PDFs. Tests cover invalid storage, duplicate entries, app remounts, reopening and missing files. All 33 frontend/release tests, 11 native tests and the production build pass. Native restart verification remains pending; this feature is newer than the 0.2.4 draft.

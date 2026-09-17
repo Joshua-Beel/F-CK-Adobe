@@ -20,15 +20,21 @@ pub enum OpenResult {
     Opened { document: DocumentInfo },
     PasswordRequired { request_id: u64, name: String, incorrect: bool },
 }
+pub struct PrintSnapshotInfo { pub token: u64, pub pages: usize, pub name: String }
+pub struct PrintBitmap { pub width: u32, pub height: u32, pub bgra: Vec<u8> }
 type Reply<T> = oneshot::Sender<Result<T, String>>;
 enum Request {
     Open(PathBuf, Reply<DocumentInfo>),
     BeginOpen(PathBuf, Reply<OpenResult>),
     Unlock(u64, String, Reply<OpenResult>),
     CancelPassword(u64, Reply<()>),
+    BeginPrint(u64, u64, Reply<PrintSnapshotInfo>),
+    PrintRender(u64, usize, u32, u32, Reply<PrintBitmap>),
+    EndPrint(u64, Reply<()>),
     Render(u64, u16, i32, Reply<Vec<u8>>),
     Text(u64, u16, u64, Reply<String>),
     Bookmarks(u64, u64, Reply<BookmarkList>),
+    Properties(u64, u64, Reply<crate::document_properties::DocumentProperties>),
     Close(u64, Reply<()>),
     Edit(u64, PageEdit, Reply<DocumentInfo>),
     Save(u64, Option<Vec<usize>>, PathBuf, Reply<SavedCopy>),
@@ -67,6 +73,8 @@ impl PdfService {
             let mut next_id = 1;
             let mut pending = HashMap::<u64, PathBuf>::new();
             let mut next_request = 1;
+            let mut print_snapshots = HashMap::<u64, (std::rc::Rc<PdfDocument<'_>>, Vec<crate::editor::PageSpec>)>::new();
+            let mut next_print = 1;
             while let Ok(request) = receiver.recv() {
                 let request = match request {
                     Request::BeginOpen(path, reply) => {
@@ -79,6 +87,43 @@ impl PdfService {
                     other => other,
                 };
                 match request {
+                    Request::BeginPrint(id, revision, reply) => {
+                        if reply.is_closed() { continue; }
+                        let result = (|| {
+                            if print_snapshots.len() >= 4 { return Err("Wait for another print job to finish.".into()); }
+                            let (session, info) = sessions.get(&id).ok_or("Document is closed")?;
+                            if session.revision != revision { return Err("Document changed. Start printing again.".into()); }
+                            let document: &std::rc::Rc<PdfDocument<'_>> = documents.get(&id).ok_or("Document is closed")?;
+                            if !matches!(document.permissions().security_handler_revision(), Ok(PdfSecurityHandlerRevision::Unprotected)) { return Err("Printing encrypted or restricted PDFs is not supported in this build.".into()); }
+                            let token = next_print; next_print += 1;
+                            print_snapshots.insert(token, (document.clone(), session.plan.clone()));
+                            Ok(PrintSnapshotInfo { token, pages: session.plan.len(), name: info.name.clone() })
+                        })();
+                        if let Err(Ok(snapshot)) = reply.send(result) { print_snapshots.remove(&snapshot.token); }
+                    }
+                    Request::EndPrint(token, reply) => { print_snapshots.remove(&token); let _ = reply.send(Ok(())); }
+                    Request::PrintRender(token, index, max_width, max_height, reply) => {
+                        if reply.is_closed() { continue; }
+                        let result = (|| {
+                            let (document, plan) = print_snapshots.get(&token).ok_or("Print job has ended")?;
+                            let spec = plan.get(index).ok_or("Print page is out of range")?;
+                            let mut page = document.pages().get(spec.source as i32).map_err(|error| error.to_string())?;
+                            let original = page.rotation().map_err(|error| error.to_string())?;
+                            let original_turns = match original { PdfPageRenderRotation::Degrees90 => 1, PdfPageRenderRotation::Degrees180 => 2, PdfPageRenderRotation::Degrees270 => 3, _ => 0 };
+                            let rotation = match (original_turns + spec.turns) % 4 { 1 => PdfPageRenderRotation::Degrees90, 2 => PdfPageRenderRotation::Degrees180, 3 => PdfPageRenderRotation::Degrees270, _ => PdfPageRenderRotation::None };
+                            page.set_rotation(rotation);
+                            let result = (|| {
+                                let (width, height) = print_dimensions(page.width().value, page.height().value, max_width, max_height)?;
+                                let bitmap = page.render_with_config(&PdfRenderConfig::new().set_fixed_size(width as i32, height as i32).set_format(PdfBitmapFormat::BGRA).set_reverse_byte_order(false).clear_before_rendering(true).set_clear_color(PdfColor::WHITE).render_annotations(true).render_form_data(true).use_print_quality(true)).map_err(|error| error.to_string())?;
+                                let bgra = bitmap.as_raw_bytes();
+                                if bitmap.width() != width as i32 || bitmap.height() != height as i32 || bgra.len() != width as usize * height as usize * 4 { return Err("Unexpected print bitmap layout.".into()); }
+                                Ok(PrintBitmap { width, height, bgra })
+                            })();
+                            page.set_rotation(original);
+                            result
+                        })();
+                        let _ = reply.send(result);
+                    }
                     Request::BeginOpen(_, _) => unreachable!(),
                     Request::CancelPassword(id, reply) => { pending.remove(&id); let _ = reply.send(Ok(())); }
                     Request::Unlock(request_id, password, reply) => {
@@ -97,7 +142,7 @@ impl PdfService {
                             let id = next_id; next_id += 1;
                             let info = DocumentInfo { id, name: path.file_name().unwrap_or_default().to_string_lossy().into_owned(), path: path.to_string_lossy().into_owned(), pages, revision: 0, dirty: false, can_undo: false, can_redo: false };
                             sessions.insert(id, (EditSession::new(bytes, info.pages.len()), info.clone()));
-                            documents.insert(id, document);
+                            documents.insert(id, std::rc::Rc::new(document));
                             Ok(OpenResult::Opened { document: info })
                         })();
                         if !matches!(&result, Ok(OpenResult::PasswordRequired { .. })) { pending.remove(&request_id); }
@@ -115,7 +160,7 @@ impl PdfService {
                             let id = next_id; next_id += 1;
                             let info = DocumentInfo { id, name: path.file_name().unwrap_or_default().to_string_lossy().into_owned(), path: path.to_string_lossy().into_owned(), pages, revision: 0, dirty: false, can_undo: false, can_redo: false };
                             sessions.insert(id, (EditSession::new(bytes, info.pages.len()), info.clone()));
-                            documents.insert(id, document); Ok(info)
+                            documents.insert(id, std::rc::Rc::new(document)); Ok(info)
                         })();
                         let _ = reply.send(result);
                     },
@@ -147,6 +192,17 @@ impl PdfService {
                         };
                         let _ = reply.send(result);
                     },
+                    Request::Properties(id, revision, reply) => {
+                        if reply.is_closed() { continue; }
+                        let result = (|| {
+                            let (session, original) = sessions.get(&id).ok_or("Document is closed")?;
+                            if session.revision != revision { return Err("Document changed. Reopen document properties.".into()); }
+                            let document = documents.get(&id).ok_or("Document is closed")?;
+                            let dimensions = current_info(session, original).pages.iter().map(|page| (page.width, page.height)).collect::<Vec<_>>();
+                            crate::document_properties::inspect(document, session.source.len(), &dimensions)
+                        })();
+                        let _ = reply.send(result);
+                    }
                     Request::Bookmarks(id, revision, reply) => {
                         let result = (|| {
                             let (session, _) = sessions.get(&id).ok_or("Document is closed")?;
@@ -216,6 +272,15 @@ impl PdfService {
     pub async fn begin_open(&self, path: PathBuf) -> Result<OpenResult, String> {
         let (tx, rx) = oneshot::channel(); self.sender.send(Request::BeginOpen(path, tx)).map_err(|e| e.to_string())?; rx.await.map_err(|e| e.to_string())?
     }
+    pub async fn begin_print(&self, id: u64, revision: u64) -> Result<PrintSnapshotInfo, String> {
+        let (tx, rx) = oneshot::channel(); self.sender.send(Request::BeginPrint(id, revision, tx)).map_err(|error| error.to_string())?; rx.await.map_err(|error| error.to_string())?
+    }
+    pub async fn end_print(&self, token: u64) -> Result<(), String> {
+        let (tx, rx) = oneshot::channel(); self.sender.send(Request::EndPrint(token, tx)).map_err(|error| error.to_string())?; rx.await.map_err(|error| error.to_string())?
+    }
+    pub fn print_render_blocking(&self, token: u64, page: usize, max_width: u32, max_height: u32) -> Result<PrintBitmap, String> {
+        let (tx, rx) = oneshot::channel(); self.sender.send(Request::PrintRender(token, page, max_width, max_height, tx)).map_err(|error| error.to_string())?; rx.blocking_recv().map_err(|error| error.to_string())?
+    }
     pub async fn unlock(&self, id: u64, password: String) -> Result<OpenResult, String> {
         let (tx, rx) = oneshot::channel(); self.sender.send(Request::Unlock(id, password, tx)).map_err(|e| e.to_string())?; rx.await.map_err(|e| e.to_string())?
     }
@@ -234,12 +299,25 @@ impl PdfService {
     pub async fn bookmarks(&self, id: u64, revision: u64) -> Result<BookmarkList, String> {
         let (tx, rx) = oneshot::channel(); self.sender.send(Request::Bookmarks(id, revision, tx)).map_err(|e| e.to_string())?; rx.await.map_err(|e| e.to_string())?
     }
+    pub async fn properties(&self, id: u64, revision: u64) -> Result<crate::document_properties::DocumentProperties, String> {
+        let (tx, rx) = oneshot::channel(); self.sender.send(Request::Properties(id, revision, tx)).map_err(|e| e.to_string())?; rx.await.map_err(|e| e.to_string())?
+    }
     pub async fn edit(&self, id: u64, edit: PageEdit) -> Result<DocumentInfo, String> {
         let (tx, rx) = oneshot::channel(); self.sender.send(Request::Edit(id, edit, tx)).map_err(|e| e.to_string())?; rx.await.map_err(|e| e.to_string())?
     }
     pub async fn save(&self, id: u64, pages: Option<Vec<usize>>, path: PathBuf) -> Result<SavedCopy, String> {
         let (tx, rx) = oneshot::channel(); self.sender.send(Request::Save(id, pages, path, tx)).map_err(|e| e.to_string())?; rx.await.map_err(|e| e.to_string())?
     }
+}
+
+fn print_dimensions(width: f32, height: f32, max_width: u32, max_height: u32) -> Result<(u32, u32), String> {
+    if max_width == 0 || max_height == 0 || !width.is_finite() || !height.is_finite() || width <= 0.0 || height <= 0.0 { return Err("Invalid print dimensions.".into()); }
+    let limit_width = max_width.min(4096) as f64;
+    let limit_height = max_height.min(4096) as f64;
+    let scale = (limit_width / width as f64).min(limit_height / height as f64).min((16_000_000.0 / (width as f64 * height as f64)).sqrt());
+    let output_width = (width as f64 * scale).floor().max(1.0) as u32;
+    let output_height = (height as f64 * scale).floor().max(1.0) as u32;
+    Ok((output_width, output_height))
 }
 
 fn page_sizes(document: &PdfDocument<'_>) -> Result<Vec<PageSize>, String> {
@@ -266,6 +344,100 @@ fn current_info(session: &EditSession, original: &DocumentInfo) -> DocumentInfo 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn properties_follow_current_pages_without_modifying_source_metadata() {
+        use lopdf::{dictionary, Object};
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let folder = tempfile::tempdir().unwrap();
+        let service = PdfService::start(root.join("resources/pdfium/bin/pdfium.dll"));
+        let mut pdf = lopdf::Document::load(root.join("resources/welcome.pdf")).unwrap();
+        let metadata = pdf.add_object(dictionary! { "Title" => Object::string_literal("<script>plain PDF title</script>"), "Author" => Object::string_literal("Fixture author") });
+        pdf.trailer.set("Info", metadata);
+        let path = folder.path().join("properties.pdf"); pdf.save(&path).unwrap();
+        let bytes = std::fs::read(&path).unwrap();
+        let (tx, rx) = oneshot::channel(); service.sender.send(Request::Open(path.clone(), tx)).unwrap(); let info = rx.blocking_recv().unwrap().unwrap();
+        let (tx, rx) = oneshot::channel(); service.sender.send(Request::Properties(info.id, 0, tx)).unwrap(); let original = rx.blocking_recv().unwrap().unwrap();
+        assert_eq!(original.page_count, 6); assert_eq!(original.source_size_bytes, bytes.len());
+        assert_eq!(original.security.encrypted, Some(false)); assert_eq!(original.signature_validation, "not_performed");
+        assert_eq!(original.metadata.iter().find(|entry| entry.name == "title").unwrap().value, "<script>plain PDF title</script>");
+        for edit in [PageEdit::Rotate { pages: vec![0], clockwise: true }, PageEdit::Delete { pages: vec![1] }] {
+            let (tx, rx) = oneshot::channel(); service.sender.send(Request::Edit(info.id, edit, tx)).unwrap(); rx.blocking_recv().unwrap().unwrap();
+        }
+        let (tx, rx) = oneshot::channel(); service.sender.send(Request::Properties(info.id, 0, tx)).unwrap(); assert!(rx.blocking_recv().unwrap().is_err());
+        let (tx, rx) = oneshot::channel(); service.sender.send(Request::Properties(info.id, 2, tx)).unwrap(); let edited = rx.blocking_recv().unwrap().unwrap();
+        assert_eq!(edited.page_count, 5); assert_eq!(edited.source_size_bytes, bytes.len());
+        assert_eq!(edited.page_dimensions.iter().map(|size| size.count).sum::<usize>(), 5);
+        assert_eq!(edited.page_dimensions[0].width_points, info.pages[0].height);
+        assert_eq!(edited.page_dimensions[0].height_points, info.pages[0].width);
+        assert_eq!(std::fs::read(&path).unwrap(), bytes);
+        let (tx, rx) = oneshot::channel(); service.sender.send(Request::Close(info.id, tx)).unwrap(); rx.blocking_recv().unwrap().unwrap();
+        let (tx, rx) = oneshot::channel(); service.sender.send(Request::Properties(info.id, 2, tx)).unwrap(); assert!(rx.blocking_recv().unwrap().is_err());
+    }
+    #[test]
+    fn print_dimensions_bound_pixels_and_preserve_aspect() {
+        for (width, height) in [(612.0, 792.0), (792.0, 612.0), (1.0, 1.0), (1.0, 1_000_000.0), (1_000_000.0, 1.0)] {
+            for (max_width, max_height) in [(300, 400), (1, 1), (u32::MAX, u32::MAX)] {
+                let (output_width, output_height) = print_dimensions(width, height, max_width, max_height).unwrap();
+                assert!(output_width > 0 && output_height > 0);
+                assert!(output_width <= max_width.min(4096) && output_height <= max_height.min(4096));
+                assert!(output_width as u64 * output_height as u64 <= 16_000_000);
+            }
+        }
+        assert_eq!(print_dimensions(600.0, 800.0, 300, 300).unwrap(), (225, 300));
+        assert_eq!(print_dimensions(800.0, 600.0, 300, 300).unwrap(), (300, 225));
+        for (width, height, max_width, max_height) in [(0.0, 1.0, 10, 10), (f32::NAN, 1.0, 10, 10), (1.0, f32::INFINITY, 10, 10), (1.0, 1.0, 0, 10)] { assert!(print_dimensions(width, height, max_width, max_height).is_err()); }
+    }
+    #[test]
+    fn print_bitmap_is_bgra_with_opaque_white_background() {
+        use lopdf::{dictionary, Object, Stream};
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let folder = tempfile::tempdir().unwrap();
+        let mut pdf = lopdf::Document::with_version("1.7");
+        let pages = pdf.new_object_id();
+        let content = pdf.add_object(Stream::new(dictionary! {}, b"1 0 0 rg 50 50 100 100 re f".to_vec()));
+        let page = pdf.add_object(dictionary! { "Type" => "Page", "Parent" => pages, "MediaBox" => vec![0.into(), 0.into(), 200.into(), 200.into()], "Contents" => content });
+        pdf.objects.insert(pages, dictionary! { "Type" => "Pages", "Kids" => vec![Object::Reference(page)], "Count" => 1 }.into());
+        let catalog = pdf.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages }); pdf.trailer.set("Root", catalog);
+        let path = folder.path().join("print-colors.pdf"); pdf.save(&path).unwrap();
+        let service = PdfService::start(root.join("resources/pdfium/bin/pdfium.dll"));
+        let (tx, rx) = oneshot::channel(); service.sender.send(Request::Open(path, tx)).unwrap(); let info = rx.blocking_recv().unwrap().unwrap();
+        let (tx, rx) = oneshot::channel(); service.sender.send(Request::BeginPrint(info.id, 0, tx)).unwrap(); let snapshot = rx.blocking_recv().unwrap().unwrap();
+        let bitmap = service.print_render_blocking(snapshot.token, 0, 100, 100).unwrap();
+        assert_eq!(&bitmap.bgra[..4], &[255, 255, 255, 255]);
+        let center = (50 * bitmap.width as usize + 50) * 4; assert_eq!(&bitmap.bgra[center..center + 4], &[0, 0, 255, 255]);
+        let (tx, rx) = oneshot::channel(); service.sender.send(Request::EndPrint(snapshot.token, tx)).unwrap(); rx.blocking_recv().unwrap().unwrap();
+        let (tx, rx) = oneshot::channel(); service.sender.send(Request::Close(info.id, tx)).unwrap(); rx.blocking_recv().unwrap().unwrap();
+    }
+    #[test]
+    fn print_snapshot_survives_edits_and_close_but_not_release() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let service = PdfService::start(root.join("resources/pdfium/bin/pdfium.dll"));
+        let (tx, rx) = oneshot::channel(); service.sender.send(Request::Open(root.join("resources/welcome.pdf"), tx)).unwrap();
+        let info = rx.blocking_recv().unwrap().unwrap();
+        let (tx, rx) = oneshot::channel(); service.sender.send(Request::BeginPrint(info.id, 0, tx)).unwrap();
+        let before = rx.blocking_recv().unwrap().unwrap(); assert_eq!(before.pages, 6);
+        let original_first = service.print_render_blocking(before.token, 0, 300, 400).unwrap();
+        let original_second = service.print_render_blocking(before.token, 1, 300, 400).unwrap();
+        assert_eq!(original_first.bgra.len(), original_first.width as usize * original_first.height as usize * 4);
+        assert!(original_first.bgra.chunks_exact(4).all(|pixel| pixel[3] == 255));
+        assert!(original_first.bgra.chunks_exact(4).any(|pixel| pixel == [255, 255, 255, 255]));
+        assert!(service.print_render_blocking(before.token, 6, 300, 400).is_err());
+        assert!(service.print_render_blocking(before.token, 0, 0, 400).is_err());
+        for edit in [PageEdit::Rotate { pages: vec![0], clockwise: true }, PageEdit::Move { from: 0, to: 2 }] {
+            let (tx, rx) = oneshot::channel(); service.sender.send(Request::Edit(info.id, edit, tx)).unwrap(); rx.blocking_recv().unwrap().unwrap();
+        }
+        let (tx, rx) = oneshot::channel(); service.sender.send(Request::BeginPrint(info.id, 0, tx)).unwrap(); assert!(rx.blocking_recv().unwrap().is_err());
+        let (tx, rx) = oneshot::channel(); service.sender.send(Request::BeginPrint(info.id, 2, tx)).unwrap(); let after = rx.blocking_recv().unwrap().unwrap();
+        let reordered = service.print_render_blocking(after.token, 0, 300, 400).unwrap(); assert_eq!(reordered.bgra, original_second.bgra);
+        let rotated = service.print_render_blocking(after.token, 2, 300, 400).unwrap(); assert!(rotated.width > rotated.height);
+        let (tx, rx) = oneshot::channel(); service.sender.send(Request::Close(info.id, tx)).unwrap(); rx.blocking_recv().unwrap().unwrap();
+        let pinned = service.print_render_blocking(before.token, 0, 300, 400).unwrap(); assert_eq!(pinned.bgra, original_first.bgra);
+        let pinned_rotated = service.print_render_blocking(after.token, 2, 300, 400).unwrap(); assert_eq!(pinned_rotated.bgra, rotated.bgra);
+        for token in [before.token, after.token] {
+            let (tx, rx) = oneshot::channel(); service.sender.send(Request::EndPrint(token, tx)).unwrap(); rx.blocking_recv().unwrap().unwrap();
+            assert!(service.print_render_blocking(token, 0, 300, 400).is_err());
+        }
+    }
     #[test]
     fn encrypted_open_retries_cancels_and_keeps_edits_blocked() {
         use lopdf::encryption::crypt_filters::{Aes128CryptFilter, Aes256CryptFilter, CryptFilter};
@@ -316,6 +488,10 @@ mod tests {
                 opened
             };
             assert_eq!(info.pages.len(), 6);
+            let (tx, rx) = oneshot::channel(); service.sender.send(Request::Properties(info.id, 0, tx)).unwrap(); let properties = rx.blocking_recv().unwrap().unwrap();
+            assert_ne!(properties.security.encrypted, Some(false), "Encrypted v{version}-{kind} must never be reported unencrypted");
+            assert_eq!(properties.page_count, 6); assert_eq!(properties.source_size_bytes, source.len());
+            let (tx, rx) = oneshot::channel(); service.sender.send(Request::BeginPrint(info.id, 0, tx)).unwrap(); assert!(rx.blocking_recv().unwrap().is_err(), "Encrypted v{version}-{kind} must not print");
             for page in 0..info.pages.len() {
                 let (tx, rx) = oneshot::channel(); service.sender.send(Request::Render(info.id, page as u16, 100, tx)).unwrap(); assert!(!rx.blocking_recv().unwrap().unwrap().is_empty(), "v{version}-{kind} page {page}");
             }

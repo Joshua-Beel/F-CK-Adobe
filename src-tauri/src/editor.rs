@@ -1,6 +1,12 @@
 use lopdf::{dictionary, Document, Object, ObjectId};
 use serde::Deserialize;
-use std::{collections::HashSet, io::Write, path::Path};
+use std::{collections::{HashSet, VecDeque}, io::Write, path::Path};
+
+const HISTORY_BUDGET: usize = 32 * 1024 * 1024;
+
+fn snapshot_bytes(snapshot: &Vec<PageSpec>) -> usize {
+    std::mem::size_of::<Vec<PageSpec>>() + snapshot.capacity() * std::mem::size_of::<PageSpec>()
+}
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct PageSpec {
@@ -22,8 +28,10 @@ pub struct EditSession {
     pub source: Vec<u8>,
     source_page_count: usize,
     pub plan: Vec<PageSpec>,
-    undo: Vec<Vec<PageSpec>>,
-    redo: Vec<Vec<PageSpec>>,
+    undo: VecDeque<Vec<PageSpec>>,
+    redo: VecDeque<Vec<PageSpec>>,
+    history_bytes: usize,
+    history_budget: usize,
     saved: Vec<PageSpec>,
     pub revision: u64,
 }
@@ -31,17 +39,27 @@ pub struct EditSession {
 impl EditSession {
     pub fn new(source: Vec<u8>, count: usize) -> Self {
         let plan: Vec<_> = (0..count).map(|source| PageSpec { source, turns: 0 }).collect();
-        Self { source, source_page_count: count, saved: plan.clone(), plan, undo: Vec::new(), redo: Vec::new(), revision: 0 }
+        Self { source, source_page_count: count, saved: plan.clone(), plan, undo: VecDeque::new(), redo: VecDeque::new(), history_bytes: 0, history_budget: HISTORY_BUDGET, revision: 0 }
     }
     pub fn dirty(&self) -> bool { self.plan != self.saved }
     pub fn can_undo(&self) -> bool { !self.undo.is_empty() }
     pub fn can_redo(&self) -> bool { !self.redo.is_empty() }
     pub fn mark_saved(&mut self) { self.saved = self.plan.clone(); }
+    fn trim_history(&mut self) {
+        while self.history_bytes > self.history_budget {
+            let snapshot = self.undo.pop_front().or_else(|| self.redo.pop_front()).expect("History byte count matches stored snapshots");
+            self.history_bytes -= snapshot_bytes(&snapshot);
+        }
+    }
     fn load_source(&self) -> Result<Document, String> {
         let document = Document::load_mem(&self.source).map_err(|e| e.to_string())?;
         if document.is_encrypted() || document.encryption_state.is_some() { return Err("Encrypted PDFs cannot be edited in this build.".into()); }
-        if document.get_pages().len() != self.source_page_count {
+        let pages = document.get_pages();
+        if pages.len() != self.source_page_count {
             return Err("The PDF engines disagree about the source page count. Editing and export are blocked to preserve the document.".into());
+        }
+        if pages.values().collect::<HashSet<_>>().len() != pages.len() {
+            return Err("The PDF repeats a page object in its page tree. Editing and export are blocked to avoid changing other pages.".into());
         }
         Ok(document)
     }
@@ -49,12 +67,18 @@ impl EditSession {
     pub fn apply(&mut self, edit: PageEdit) -> Result<(), String> {
         match edit {
             PageEdit::Undo => {
-                let previous = self.undo.pop().ok_or("Nothing to undo")?;
-                self.redo.push(std::mem::replace(&mut self.plan, previous));
+                let previous = self.undo.pop_back().ok_or("Nothing to undo")?;
+                self.history_bytes -= snapshot_bytes(&previous);
+                let current = std::mem::replace(&mut self.plan, previous);
+                self.history_bytes += snapshot_bytes(&current);
+                self.redo.push_back(current);
             }
             PageEdit::Redo => {
-                let next = self.redo.pop().ok_or("Nothing to redo")?;
-                self.undo.push(std::mem::replace(&mut self.plan, next));
+                let next = self.redo.pop_back().ok_or("Nothing to redo")?;
+                self.history_bytes -= snapshot_bytes(&next);
+                let current = std::mem::replace(&mut self.plan, next);
+                self.history_bytes += snapshot_bytes(&current);
+                self.undo.push_back(current);
             }
             edit => {
                 let mut next = self.plan.clone();
@@ -79,10 +103,13 @@ impl EditSession {
                     _ => unreachable!(),
                 }
                 if next == self.plan { return Ok(()); }
-                self.undo.push(std::mem::replace(&mut self.plan, next));
-                self.redo.clear();
+                let previous = std::mem::replace(&mut self.plan, next);
+                self.history_bytes += snapshot_bytes(&previous);
+                self.undo.push_back(previous);
+                self.history_bytes -= self.redo.drain(..).map(|snapshot| snapshot_bytes(&snapshot)).sum::<usize>();
             }
         }
+        self.trim_history();
         self.revision += 1;
         Ok(())
     }
@@ -178,6 +205,132 @@ pub fn write_new_file(path: &Path, bytes: &[u8]) -> Result<(), String> {
 mod tests {
     use super::*;
     fn sample() -> Vec<u8> { std::fs::read(Path::new(env!("CARGO_MANIFEST_DIR")).join("resources/welcome.pdf")).unwrap() }
+    fn assert_history_budget(session: &EditSession) {
+        let allocated = session.undo.iter().chain(session.redo.iter()).map(snapshot_bytes).sum::<usize>();
+        assert_eq!(session.history_bytes, allocated);
+        assert!(allocated <= session.history_budget);
+    }
+    #[test]
+    fn shared_page_objects_reject_rotation_and_export_without_mutation() {
+        let mut document = Document::load_mem(&sample()).unwrap();
+        let pages = document.get_pages();
+        let root = document.catalog().unwrap().get(b"Pages").unwrap().as_reference().unwrap();
+        let mut kids: Vec<_> = pages.values().copied().map(Object::Reference).collect();
+        kids[1] = kids[0].clone();
+        document.get_object_mut(root).unwrap().as_dict_mut().unwrap().set("Kids", kids);
+        let mut source = Vec::new(); document.save_to(&mut source).unwrap();
+        assert_eq!(Document::load_mem(&source).unwrap().get_pages().len(), 6);
+        let mut session = EditSession::new(source.clone(), 6);
+        let original_plan = session.plan.clone();
+        let error = session.apply(PageEdit::Rotate { pages: vec![0], clockwise: true }).unwrap_err();
+        assert!(error.contains("repeats a page object"));
+        assert!(session.export(None).unwrap_err().contains("repeats a page object"));
+        assert!(session.export(Some(&[0])).is_err());
+        assert_eq!(session.source, source);
+        assert_eq!(session.plan, original_plan);
+        assert_eq!(session.saved, original_plan);
+        assert_eq!(session.revision, 0);
+        assert!(!session.can_undo());
+        assert!(!session.can_redo());
+        assert!(!session.dirty());
+        let mut ordinary = EditSession::new(sample(), 6);
+        ordinary.apply(PageEdit::Rotate { pages: vec![0], clockwise: true }).unwrap();
+        assert!(ordinary.export(None).is_ok());
+        assert_eq!(ordinary.plan[0].turns, 1);
+        assert_eq!(ordinary.plan[1].turns, 0);
+    }
+    #[test]
+    fn history_evicts_oldest_snapshots_and_preserves_current_source_and_saved_state() {
+        let source = sample();
+        let mut session = EditSession::new(source.clone(), 6);
+        session.history_budget = snapshot_bytes(&session.plan) * 3;
+        let saved = session.saved.clone();
+        let mut states = vec![session.plan.clone()];
+        for _ in 0..17 {
+            session.apply(PageEdit::Rotate { pages: vec![0], clockwise: true }).unwrap();
+            states.push(session.plan.clone());
+            assert_history_budget(&session);
+        }
+        assert_eq!(session.undo.len(), 3);
+        assert_eq!(session.plan, states[17]);
+        assert_eq!(session.source, source);
+        assert_eq!(session.saved, saved);
+        for index in (14..17).rev() {
+            session.apply(PageEdit::Undo).unwrap();
+            assert_eq!(session.plan, states[index]);
+            assert_history_budget(&session);
+        }
+        assert!(!session.can_undo());
+        assert!(session.apply(PageEdit::Undo).is_err());
+        for state in states.iter().take(18).skip(15) {
+            session.apply(PageEdit::Redo).unwrap();
+            assert_eq!(&session.plan, state);
+            assert_history_budget(&session);
+        }
+        assert!(!session.can_redo());
+        assert_eq!(session.source, source);
+        assert_eq!(session.saved, saved);
+    }
+    #[test]
+    fn bounded_history_branches_clear_redo_and_keep_saved_baseline() {
+        let mut session = EditSession::new(sample(), 6);
+        session.history_budget = snapshot_bytes(&session.plan) * 2;
+        session.apply(PageEdit::Rotate { pages: vec![0], clockwise: true }).unwrap();
+        session.mark_saved();
+        let saved = session.plan.clone();
+        session.apply(PageEdit::Delete { pages: vec![1, 2, 3] }).unwrap();
+        session.apply(PageEdit::Undo).unwrap();
+        assert!(!session.dirty());
+        assert!(session.can_redo());
+        assert_history_budget(&session);
+        session.apply(PageEdit::Rotate { pages: vec![1], clockwise: true }).unwrap();
+        assert!(!session.can_redo());
+        assert!(session.dirty());
+        assert_eq!(session.saved, saved);
+        assert_history_budget(&session);
+        session.apply(PageEdit::Undo).unwrap();
+        assert_eq!(session.plan, saved);
+        assert!(!session.dirty());
+        assert_history_budget(&session);
+    }
+    #[test]
+    fn oversized_snapshot_is_dropped_without_rejecting_or_reverting_edit() {
+        let source = sample();
+        let mut session = EditSession::new(source.clone(), 6);
+        session.history_budget = snapshot_bytes(&session.plan) - 1;
+        session.apply(PageEdit::Rotate { pages: vec![0], clockwise: true }).unwrap();
+        assert_eq!(session.plan[0].turns, 1);
+        assert!(session.dirty());
+        assert!(!session.can_undo());
+        assert!(!session.can_redo());
+        assert_eq!(session.source, source);
+        assert_eq!(session.saved[0].turns, 0);
+        assert_history_budget(&session);
+    }
+    #[test]
+    fn history_accounts_for_reserved_capacity_and_both_stacks() {
+        let mut session = EditSession::new(sample(), 6);
+        let mut roomy = Vec::with_capacity(100);
+        roomy.push(PageSpec { source: 0, turns: 0 });
+        let roomy_bytes = snapshot_bytes(&roomy);
+        assert!(roomy_bytes > std::mem::size_of::<PageSpec>() * roomy.len());
+        let small = session.plan.clone();
+        session.history_budget = snapshot_bytes(&small);
+        session.undo.push_back(roomy);
+        session.redo.push_back(small);
+        session.history_bytes = roomy_bytes + session.history_budget;
+        let current = session.plan.clone();
+        session.trim_history();
+        assert!(!session.can_undo());
+        assert!(session.can_redo());
+        assert_eq!(session.plan, current);
+        assert_history_budget(&session);
+        session.history_budget = 0;
+        session.trim_history();
+        assert!(!session.can_redo());
+        assert_eq!(session.plan, current);
+        assert_history_budget(&session);
+    }
     #[test]
     fn undo_redo_and_branch_preserve_source() {
         let bytes = sample(); let mut session = EditSession::new(bytes.clone(), 6);

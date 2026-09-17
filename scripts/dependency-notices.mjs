@@ -1,0 +1,144 @@
+import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { spawnSync } from 'node:child_process';
+import { homedir } from 'node:os';
+import { dirname, join, relative, resolve } from 'node:path';
+import { fileURLToPath, pathToFileURL } from 'node:url';
+
+const hash = bytes => createHash('sha256').update(bytes).digest('hex');
+const slash = path => path.replaceAll('\\', '/');
+const normalizeLines = text => text.replaceAll('\r\n', '\n');
+
+export function supplementalFiles(folder, packageKey) {
+  const manifest = JSON.parse(readFileSync(join(folder, 'manifest.json'), 'utf8'));
+  const entry = manifest.packages[packageKey];
+  if (!entry) return { files: [] };
+  const files = entry.files.map(file => {
+    if (file.file.includes('/') || file.file.includes('\\') || file.file === '..') throw new Error('Supplement filename must stay in its directory.');
+    const bytes = readFileSync(join(folder, file.file));
+    if (hash(bytes) !== file.sha256) throw new Error(`Supplement hash mismatch: ${file.file}`);
+    return { path: `upstream-supplement/${file.file}`, sha256: file.sha256, provenance: { url: file.url, crateCommit: entry.crateCommit, evidence: entry.evidence }, text: bytes.toString('utf8') };
+  });
+  return { crateCommit: entry.crateCommit, files };
+}
+
+export function noticeFiles(root) {
+  const found = [];
+  function visit(folder) {
+    for (const entry of readdirSync(folder, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name, 'en'))) {
+      const path = join(folder, entry.name);
+      if (entry.isSymbolicLink()) continue;
+      if (entry.isDirectory()) {
+        if (!['.git', 'node_modules', 'target'].includes(entry.name)) visit(path);
+      } else if (/^(licen[cs]e|notice|copying|copyright|authors)([._-].*)?$/i.test(entry.name) || /(^|[\\/])licen[cs]es[\\/]/i.test(relative(root, path))) {
+        const bytes = readFileSync(path);
+        if (bytes.includes(0)) throw new Error(`Binary notice input: ${path}`);
+        found.push({ path: slash(relative(root, path)), sha256: hash(bytes), text: bytes.toString('utf8') });
+      }
+    }
+  }
+  visit(root);
+  return found.sort((a, b) => a.path.localeCompare(b.path, 'en'));
+}
+
+export function runtimeCandidates(metadata) {
+  const nodes = new Map(metadata.resolve.nodes.map(node => [node.id, node]));
+  const packages = new Map(metadata.packages.map(pkg => [pkg.id, pkg]));
+  const found = new Set(), queue = [metadata.resolve.root];
+  while (queue.length) {
+    const id = queue.shift();
+    if (found.has(id)) continue;
+    found.add(id);
+    for (const dep of nodes.get(id)?.deps ?? []) {
+      if (dep.dep_kinds.some(kind => kind.kind === null) && !packages.get(dep.pkg).targets.some(target => target.kind.includes('proc-macro'))) queue.push(dep.pkg);
+    }
+  }
+  found.delete(metadata.resolve.root);
+  return found;
+}
+
+export function collectInventory(root) {
+  const cargo = process.env.CARGO ?? join(homedir(), '.cargo', 'bin', process.platform === 'win32' ? 'cargo.exe' : 'cargo');
+  const result = spawnSync(cargo, ['metadata', '--offline', '--locked', '--filter-platform', 'x86_64-pc-windows-msvc', '--format-version', '1', '--manifest-path', 'src-tauri/Cargo.toml'], { cwd: root, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024, windowsHide: true });
+  if (result.error || result.status !== 0) throw new Error(`Offline Cargo metadata failed. First populate the cache with cargo fetch --locked --target x86_64-pc-windows-msvc --manifest-path src-tauri/Cargo.toml. ${result.error?.message ?? result.stderr}`);
+  const metadata = JSON.parse(result.stdout);
+  const candidates = runtimeCandidates(metadata);
+  const resolved = new Set(metadata.resolve.nodes.map(node => node.id));
+  const records = [];
+  for (const pkg of metadata.packages.filter(pkg => resolved.has(pkg.id) && pkg.id !== metadata.resolve.root)) {
+    const files = noticeFiles(dirname(pkg.manifest_path));
+    const supplement = supplementalFiles(join(root, 'scripts/notice-supplements'), `cargo:${pkg.name}@${pkg.version}`);
+    if (supplement.files.length) {
+      const vcs = JSON.parse(readFileSync(join(dirname(pkg.manifest_path), '.cargo_vcs_info.json'), 'utf8'));
+      if (vcs.git.sha1 !== supplement.crateCommit) throw new Error(`Supplement source commit does not match published crate: ${pkg.name}@${pkg.version}`);
+      files.push(...supplement.files);
+    }
+    if (pkg.license_file) {
+      const licensePath = resolve(dirname(pkg.manifest_path), pkg.license_file);
+      const relativeLicense = slash(relative(dirname(pkg.manifest_path), licensePath));
+      if (relativeLicense.startsWith('../')) throw new Error(`License file points outside the cached package: ${pkg.name}`);
+      if (!files.some(file => file.path === relativeLicense)) {
+        const bytes = readFileSync(licensePath);
+        if (bytes.includes(0)) throw new Error(`Binary license file: ${pkg.name}`);
+        files.push({ path: relativeLicense, sha256: hash(bytes), text: bytes.toString('utf8') });
+      }
+    }
+    records.push({ ecosystem: 'cargo', name: pkg.name, version: pkg.version, license: pkg.license ?? null, source: pkg.source, scope: candidates.has(pkg.id) ? 'runtime-candidate' : 'build-or-auxiliary', files });
+  }
+  const lock = JSON.parse(readFileSync(join(root, 'package-lock.json'), 'utf8'));
+  for (const [path, entry] of Object.entries(lock.packages)) {
+    if (!path || entry.dev) continue;
+    const folder = join(root, path);
+    const pkg = JSON.parse(readFileSync(join(folder, 'package.json'), 'utf8'));
+    if (pkg.version !== entry.version) throw new Error(`Installed npm version differs from lockfile: ${path}`);
+    const files = noticeFiles(folder);
+    if (pkg.name === '@tauri-apps/plugin-updater') {
+      const matching = records.find(record => record.name === 'tauri-plugin-updater' && record.version === pkg.version);
+      if (!matching) throw new Error('Matching updater crate license source is unavailable.');
+      for (const file of matching.files.filter(file => /LICENSE_(MIT|APACHE-2.0)$/.test(file.path))) files.push({ ...file, path: `matching-rust-crate/${file.path}` });
+    }
+    records.push({ ecosystem: 'npm', name: pkg.name, version: pkg.version, license: entry.license ?? pkg.license ?? null, source: entry.resolved ?? null, scope: 'production-lock-entry', files });
+  }
+  records.sort((a, b) => `${a.ecosystem}/${a.name}/${a.version}`.localeCompare(`${b.ecosystem}/${b.name}/${b.version}`, 'en'));
+  const issues = records.flatMap(record => {
+    const packageName = `${record.ecosystem}:${record.name}@${record.version}`;
+    const issues = [];
+    if (!record.license) issues.push({ package: packageName, issue: 'missing-license-expression' });
+    if (!record.files.length) issues.push({ package: packageName, issue: 'no-local-notice-file-found' });
+    if (record.license?.includes('MPL-2.0')) issues.push({ package: packageName, issue: 'source-availability-review-open', scope: record.scope });
+    return issues;
+  });
+  const inventory = {
+    schema: 1,
+    target: 'x86_64-pc-windows-msvc',
+    coverage: 'Conservative resolved Cargo Windows graph, including build/auxiliary packages, plus non-development npm lock entries. Runtime-candidate is not proof of linked code. PDFium notices are packaged separately. This collection does not resolve source-availability obligations or the app license.',
+    inputHashes: Object.fromEntries(['src-tauri/Cargo.lock', 'src-tauri/Cargo.toml', 'package-lock.json', 'package.json', 'scripts/notice-supplements/manifest.json'].map(path => [path, hash(normalizeLines(readFileSync(join(root, path), 'utf8')))])),
+    issues,
+    packages: records.map(({ files, ...record }) => ({ ...record, notices: files.map(({ text, ...file }) => file) })),
+  };
+  const text = ['THIRD-PARTY DEPENDENCY NOTICES', '', inventory.coverage, '', 'Unresolved collection/review items:', ...issues.map(issue => `- ${issue.package}: ${issue.issue}`), '', ...records.flatMap(record => [
+    '='.repeat(78), `${record.ecosystem}: ${record.name} ${record.version}`, `Declared license: ${record.license ?? 'UNKNOWN'}`, `Scope: ${record.scope}`, `Source: ${record.source ?? 'UNKNOWN'}`, '',
+    ...(record.files.length ? record.files.flatMap(file => [`--- ${file.path} (SHA-256 ${file.sha256}) ---`, ...(file.provenance ? [`Upstream: ${file.provenance.url}`, `Published crate commit: ${file.provenance.crateCommit}`, `Source evidence: ${file.provenance.evidence}`] : []), file.text, '']) : ['No standalone license/notice file was found in the installed package.', '']),
+  ])].join('\n');
+  return { inventory, text };
+}
+
+export function generate(root, check = false) {
+  const { inventory, text } = collectInventory(root);
+  const folder = join(root, 'src-tauri/resources/third-party-licenses');
+  const outputs = { 'inventory.json': JSON.stringify(inventory, null, 2) + '\n', 'THIRD-PARTY-NOTICES.txt': text + '\n' };
+  if (!check) mkdirSync(folder, { recursive: true });
+  for (const [name, content] of Object.entries(outputs)) {
+    const path = join(folder, name);
+    if (check) {
+      if (!existsSync(path) || normalizeLines(readFileSync(path, 'utf8')) !== normalizeLines(content)) throw new Error(`Dependency notices are missing or stale: ${name}. Run node scripts/dependency-notices.mjs.`);
+    } else writeFileSync(path, content, 'utf8');
+  }
+  console.log(`${check ? 'Verified' : 'Generated'} notices for ${inventory.packages.length} packages; ${inventory.issues.length} review items remain.`);
+  return inventory;
+}
+
+if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
+  const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
+  generate(root, process.argv.includes('--check'));
+}

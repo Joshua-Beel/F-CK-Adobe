@@ -1,6 +1,9 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 mod service;
 mod editor;
+mod printing;
+mod print_commands;
+mod document_properties;
 use service::{DocumentInfo, PdfService};
 use tauri::{Manager, State};
 
@@ -36,6 +39,15 @@ async fn page_text(service: State<'_, PdfService>, id: u64, page: u16, revision:
 async fn document_bookmarks(service: State<'_, PdfService>, id: u64, revision: u64) -> Result<service::BookmarkList, String> { service.bookmarks(id, revision).await }
 
 #[tauri::command]
+async fn document_properties(service: State<'_, PdfService>, id: u64, revision: u64) -> Result<document_properties::DocumentProperties, String> { service.properties(id, revision).await }
+
+#[tauri::command]
+async fn dependency_notices(app: tauri::AppHandle) -> Result<String, String> {
+    let path = app.path().resource_dir().map_err(|e| e.to_string())?.join("resources/third-party-licenses/THIRD-PARTY-NOTICES.txt");
+    tauri::async_runtime::spawn_blocking(move || std::fs::read_to_string(path).map_err(|e| format!("Could not read bundled notices: {e}"))).await.map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
 async fn edit_pages(service: State<'_, PdfService>, id: u64, edit: editor::PageEdit) -> Result<DocumentInfo, String> {
     service.edit(id, edit).await
 }
@@ -51,7 +63,8 @@ fn main() {
     tauri::Builder::default().plugin(tauri_plugin_updater::Builder::new().build()).setup(|app| {
         let library = app.path().resource_dir()?.join("resources/pdfium/bin/pdfium.dll");
         app.manage(PdfService::start(library));
+        app.manage(print_commands::PrintJobs::default());
         Ok(())
-    }).invoke_handler(tauri::generate_handler![open_document, reopen_document, open_example, render_page, close_document, edit_pages, save_copy, page_text, document_bookmarks, unlock_document, cancel_password_request])
+    }).invoke_handler(tauri::generate_handler![open_document, reopen_document, open_example, render_page, close_document, edit_pages, save_copy, page_text, document_bookmarks, document_properties, dependency_notices, unlock_document, cancel_password_request, print_commands::print_document, print_commands::cancel_print])
       .run(tauri::generate_context!()).expect("Desktop application failed");
 }

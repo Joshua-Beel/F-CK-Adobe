@@ -1,0 +1,32 @@
+import { act, create, type ReactTestRenderer } from 'react-test-renderer';
+import { expect, it, vi } from 'vitest';
+import { documentProperties, type DocumentPropertiesInfo } from './bridge';
+import DocumentProperties from './DocumentProperties';
+import type { DocumentInfo } from './model';
+vi.mock('./bridge', () => ({ documentProperties: vi.fn() }));
+const document: DocumentInfo = { id: 1, name: 'test.pdf', path: 'test.pdf', pages: [{ width: 612, height: 792 }], revision: 4, dirty: true, can_undo: true, can_redo: false };
+const info: DocumentPropertiesInfo = { version: null, source_size_bytes: 1234, page_count: 1, metadata: [{ name: 'title', value: '<script>PDF text</script>', truncated: true }], page_dimensions: [{ width_points: 612, height_points: 792, count: 1 }], page_dimensions_truncated: true, security: { encrypted: null, handler_revision: null, print_high_quality: null, print_low_quality_only: null, modify_contents: null, assemble_document: null, fill_existing_forms: null }, reported_signature_count: 2, signature_validation: 'not_performed' };
+it('shows metadata as text, unknown permissions and signature-validation limits', async () => {
+  vi.mocked(documentProperties).mockResolvedValue(info);
+  let ui!: ReactTestRenderer;
+  await act(async () => { ui = create(<DocumentProperties document={document} close={vi.fn()} />); });
+  expect(documentProperties).toHaveBeenCalledWith(1, 4);
+  expect(ui.root.findAllByType('script')).toHaveLength(0);
+  const text = JSON.stringify(ui.toJSON());
+  for (const value of ['<script>PDF text</script>', 'Unknown', '(truncated)', 'first 128', 'Signature validity has not been checked', 'original file']) expect(text).toContain(value);
+  act(() => ui.unmount());
+});
+it('ignores a previous document response and distinguishes failure from missing metadata', async () => {
+  let resolveOld!: (info: DocumentPropertiesInfo) => void;
+  vi.mocked(documentProperties).mockReturnValueOnce(new Promise(resolve => { resolveOld = resolve; })).mockResolvedValueOnce({ ...info, metadata: [] });
+  let ui!: ReactTestRenderer;
+  await act(async () => { ui = create(<DocumentProperties document={document} close={vi.fn()} />); });
+  await act(async () => { ui.update(<DocumentProperties document={{ ...document, id: 2 }} close={vi.fn()} />); });
+  await act(async () => { resolveOld(info); });
+  expect(JSON.stringify(ui.toJSON())).toContain('No description metadata was found');
+  expect(JSON.stringify(ui.toJSON())).not.toContain('<script>PDF text</script>');
+  vi.mocked(documentProperties).mockRejectedValueOnce(new Error('Document is closed'));
+  await act(async () => { ui.update(<DocumentProperties document={{ ...document, id: 3 }} close={vi.fn()} />); });
+  expect(ui.root.findByProps({ role: 'alert' }).children).toEqual(['Error: Document is closed']);
+  act(() => ui.unmount());
+});
