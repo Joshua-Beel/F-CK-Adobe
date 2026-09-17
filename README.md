@@ -18,7 +18,7 @@ Version 0.2.0 has a signed update package, but no Windows publisher signature. T
 - **Search (source build):** Ctrl+F searches embedded PDF text, with optional case matching, selectable excerpts, and links to matching pages. Search follows page edits; scans need OCR first. Results show one excerpt per matching page, up to 500 pages.
 - **Organizing pages:** select thumbnails or enter a page range, rotate pages, move a page earlier or later, delete pages, and extract a selection into a new PDF.
 - **Saving:** undo and redo page edits, then use **Save a Copy**. Your original stays untouched, and the app asks before closing a document with unsaved edits.
-- **Workspace:** light and dark themes, an All tools panel, and recent files and stars for the current session.
+- **Workspace:** light and dark themes and an All tools panel. The source build remembers theme, zoom, fit width, pan mode, and panel visibility across launches. Recent files and stars are still session-only.
 
 Your PDFs stay on your computer. There's no document upload service or telemetry.
 
@@ -39,7 +39,7 @@ Your PDFs stay on your computer. There's no document upload service or telemetry
 
 ## What's still missing
 
-Text and image editing, text selection directly on PDF pages, printing, OCR, signatures, and redaction aren't ready yet. Search excerpts can be selected and copied, but matches aren't highlighted on the page yet. Unavailable tools are disabled in the interface. Recent files and preferences don't survive a restart yet, and password-protected PDFs aren't supported.
+Text and image editing, text selection directly on PDF pages, printing, OCR, signatures, and redaction aren't ready yet. Search excerpts can be selected and copied, but matches aren't highlighted on the page yet. Unavailable tools are disabled in the interface. Recent files and stars don't survive a restart yet, and password-protected PDFs aren't supported.
 
 Saving currently means writing a new copy. You can't overwrite an existing file or save changes back to the original. Some page operations are also blocked on signed PDFs, forms, tagged documents, or files with bookmarks and annotations. The [Organize Pages guide](docs/tools/organize-pages.md) explains those limits.
 
@@ -85,6 +85,7 @@ For more background, see the [architecture notes](docs/decisions.md), [PDFium do
 
 ## Recent changes
 
+- The source build now saves reading preferences locally: theme, zoom, fit mode, pan mode, and panel visibility. Invalid saved values fall back to defaults, and unavailable storage shows a session-only notice. All 19 frontend/release tests and the production build pass, including an app remount test and storage failure cases. These changes are newer than the 0.2.4 draft; native restart verification is still pending.
 - The 0.2.4 release workflow passed all tests, signed the installer, verified its packaged application, and created a draft release. Downloaded assets were independently checked locally: both publisher signatures are valid and timestamped; installer SHA-256 is `cf97903897c10f0f02c31bc61f9ac9d929a9c5abdc116dc200cce01a4cd68c7a`, matching GitHub. Desktop automation still returns unreliable window captures, so installation/search UI checks and the full upgrade test remain unverified. The release stays a draft.
 - The 0.2.3 signature check found Tauri's restored unsigned build file. CI now verifies the installer, extracts its packaged application using 7-Zip, and verifies that application's timestamped publisher signature. Prepared 0.2.4 for this check. Publishing and the upgrade test are still pending.
 - Final completion requires a deep code review and adversarial tests: malformed PDFs, preservation of original files, undo/redo branches, stale search results, resource limits, crash behavior, and interrupted or invalid updates. Reproducible failures must be fixed with regression tests; unverified cases and remaining risks must be reported.

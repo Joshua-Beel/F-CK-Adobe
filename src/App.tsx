@@ -9,6 +9,7 @@ import Organizer from './Organizer';
 import ConfirmDialog from './ConfirmDialog';
 import Updates from './Updates';
 import SearchPanel from './SearchPanel';
+import { readPreferences, savePreferences } from './preferences';
 import s from './Workspace.module.css';
 
 const icons: Record<string, LucideIcon> = { 'Create a PDF': FilePlus2, 'Combine files': Combine, 'Organize pages': LayoutGrid, 'Edit a PDF': FilePenLine, 'Export a PDF': FileOutput, 'Scan & OCR': ScanLine, 'Fill & sign': Signature, 'Protect a PDF': ShieldCheck, 'Comment': MessageSquare, 'Compress a PDF': ArrowDownToLine };
@@ -17,28 +18,32 @@ function IconButton({ icon: Icon, label, onClick, disabled = false, active = fal
 }
 
 export default function App() {
+  const [preferences] = useState(readPreferences);
   const [documents, setDocuments] = useState<DocumentInfo[]>([]);
   const [active, setActive] = useState<number | null>(null);
   const [view, setView] = useState<'home' | 'tools' | 'document'>('home');
   const [section, setSection] = useState('Recent');
   const [query, setQuery] = useState('');
-  const [toolsOpen, setToolsOpen] = useState(true);
-  const [nav, setNav] = useState(false);
+  const [toolsOpen, setToolsOpen] = useState(preferences.toolsOpen);
+  const [nav, setNav] = useState(preferences.nav);
   const [searchOpen, setSearchOpen] = useState(false);
   const [menu, setMenu] = useState(false);
   const [updatesOpen, setUpdatesOpen] = useState(false);
-  const [dark, setDark] = useState(false);
+  const [dark, setDark] = useState(preferences.dark);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
-  const [zoom, setZoom] = useState(100);
-  const [fit, setFit] = useState(true);
-  const [hand, setHand] = useState(true);
+  const [zoom, setZoom] = useState(preferences.zoom);
+  const [fit, setFit] = useState(preferences.fit);
+  const [hand, setHand] = useState(preferences.hand);
   const [page, setPage] = useState(0);
   const [target, setTarget] = useState({ page: 0, token: 0 });
   const [stars, setStars] = useState<number[]>([]);
   const [organizing, setOrganizing] = useState(false);
   const [pendingClose, setPendingClose] = useState<number | 'window' | null>(null);
+  useEffect(() => {
+    if (!savePreferences({ dark, zoom, fit, hand, toolsOpen, nav })) setNotice('Your reading preferences could not be saved. They will last for this session only.');
+  }, [dark, zoom, fit, hand, toolsOpen, nav]);
   const latest = useRef({ documents, busy });
   latest.current = { documents, busy };
   useEffect(() => {
