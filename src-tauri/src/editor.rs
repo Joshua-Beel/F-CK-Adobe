@@ -101,13 +101,36 @@ impl EditSession {
                 let spec = next.get_mut(page).ok_or("Page is out of range")?;
                 let page_id = *document.get_pages().values().nth(spec.source).ok_or("Source page mapping is invalid.")?;
                 rect.validate_within(spec.crop.unwrap_or(visible_box(&document, page_id)?))?;
-                spec.notes.push(crate::comments::Note { id: crate::comments::id(self.next_note), rect, contents: contents.to_owned() });
+                spec.notes.push(crate::comments::Note { id: crate::comments::id(self.next_note), rect, contents: contents.to_owned(), kind: crate::comments::AnnotationKind::Note });
             }
             (None, Some(id), contents) => {
                 let (page, position) = next.iter().enumerate().find_map(|(page, spec)| spec.notes.iter().position(|note| note.id == id).map(|position| (page, position))).ok_or("The note no longer exists. Refresh comments.")?;
+                if next[page].notes[position].kind != crate::comments::AnnotationKind::Note { return Err("Choose the Area highlight editor for this annotation.".into()); }
                 match contents { Some(contents) => { crate::comments::validate_text(contents)?; next[page].notes[position].contents = contents.to_owned(); }, None => { next[page].notes.remove(position); } }
             }
             _ => return Err("Invalid comment operation.".into()),
+        }
+        crate::comments::validate_plan(&next)?; Ok(next)
+    }
+    pub fn proposed_highlight(&self, page: Option<(usize, CropBox)>, annotation_id: Option<&str>, contents: Option<&str>, delete: bool) -> Result<Vec<PageSpec>, String> {
+        if let Some(reason) = &self.comments_reason { return Err(reason.clone()); }
+        let document = self.load_source()?; crate::comments::read(&document)?;
+        let mut next = self.plan.clone();
+        match (page, annotation_id, delete) {
+            (Some((page, rect)), None, false) => {
+                let contents = crate::comments::highlight_contents(contents)?;
+                if self.next_note == u64::MAX { return Err("This document has exhausted its annotation IDs.".into()); }
+                let spec = next.get_mut(page).ok_or("Page is out of range")?;
+                let page_id = *document.get_pages().values().nth(spec.source).ok_or("Source page mapping is invalid.")?;
+                rect.validate_within(spec.crop.unwrap_or(visible_box(&document, page_id)?))?;
+                spec.notes.push(crate::comments::Note { id: crate::comments::highlight_id(self.next_note), rect, contents, kind: crate::comments::AnnotationKind::Highlight });
+            }
+            (None, Some(id), delete) => {
+                let (page, position) = next.iter().enumerate().find_map(|(page, spec)| spec.notes.iter().position(|note| note.id == id).map(|position| (page, position))).ok_or("The highlight no longer exists. Refresh annotations.")?;
+                if next[page].notes[position].kind != crate::comments::AnnotationKind::Highlight { return Err("Choose the Comment editor for this annotation.".into()); }
+                if delete { next[page].notes.remove(position); } else { next[page].notes[position].contents = crate::comments::highlight_contents(contents)?; }
+            }
+            _ => return Err("Invalid Area highlight operation.".into()),
         }
         crate::comments::validate_plan(&next)?; Ok(next)
     }
@@ -323,8 +346,9 @@ mod tests {
         let mut session = EditSession::new(sample(), 6);
         let bounds = CropBox { left: 40.0, bottom: 60.0, right: 70.0, top: 90.0 };
         let plan = session.proposed_comment(Some((0, bounds)), None, Some(&"x".repeat(8192))).unwrap(); session.commit_comments(plan); session.mark_saved();
+        let plan = session.proposed_highlight(Some((0, bounds)), None, Some(&"z".repeat(8192)), false).unwrap(); session.commit_comments(plan); session.mark_saved();
         let saved = session.saved.clone(); let source = session.source.clone(); let id = session.plan[0].notes[0].id.clone();
-        assert!(snapshot_bytes(&session.plan) >= 8192 + snapshot_bytes(&vec![PageSpec { source: 0, turns: 0, crop: None, notes: Vec::new() }]));
+        assert!(snapshot_bytes(&session.plan) >= 16384 + snapshot_bytes(&vec![PageSpec { source: 0, turns: 0, crop: None, notes: Vec::new() }]));
         session.history_budget = snapshot_bytes(&session.plan) * 2;
         for value in 0..6 { let plan = session.proposed_comment(None, Some(&id), Some(&format!("{value}{}", "y".repeat(8191)))).unwrap(); session.commit_comments(plan); assert_history_budget(&session); }
         assert_eq!(session.saved, saved); assert_eq!(session.source, source); assert_eq!(session.plan[0].notes[0].contents.len(), 8192);

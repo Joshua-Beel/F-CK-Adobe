@@ -2,13 +2,14 @@ import { act, create, type ReactTestRenderer } from 'react-test-renderer';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import App from './App';
 import Viewer from './Viewer';
-import { closeDocument, createComment, documentComments, openDocument, saveCopy } from './bridge';
+import { closeDocument, createComment, createHighlight, documentAnnotations, openDocument, saveCopy } from './bridge';
 import type { DocumentInfo } from './model';
 
-vi.mock('./bridge', () => ({ native: false, openDocument: vi.fn(), reopenDocument: vi.fn(), closeDocument: vi.fn(), editPages: vi.fn(), saveCopy: vi.fn(), documentComments: vi.fn(), createComment: vi.fn(), updateComment: vi.fn(), deleteComment: vi.fn() }));
-vi.mock('./Viewer', () => ({ default: (props: { commentMode: boolean; hand: boolean; onCommentCreate: (page: number, rect: { x: number; y: number; width: number; height: number }) => void }) => <div data-comment-mode={String(props.commentMode)} data-hand={String(props.hand)}><button onClick={() => props.onCommentCreate(0, { x: .1, y: .2, width: .03, height: .03 })}>Place comment</button></div> }));
+vi.mock('./bridge', () => ({ native: false, openDocument: vi.fn(), reopenDocument: vi.fn(), closeDocument: vi.fn(), editPages: vi.fn(), saveCopy: vi.fn(), documentAnnotations: vi.fn(), createComment: vi.fn(), updateComment: vi.fn(), deleteComment: vi.fn(), createHighlight: vi.fn(), updateHighlight: vi.fn(), deleteHighlight: vi.fn() }));
+vi.mock('./Viewer', () => ({ default: (props: { commentMode: boolean; highlightMode: boolean; annotationInteractive: boolean; hand: boolean; onCommentCreate: (page: number, rect: { x: number; y: number; width: number; height: number }) => void; onHighlightCreate: (page: number, rect: { x: number; y: number; width: number; height: number }) => void }) => <div data-comment-mode={String(props.commentMode)} data-highlight-mode={String(props.highlightMode)} data-annotation-interactive={String(props.annotationInteractive)} data-hand={String(props.hand)}><button onClick={() => props.onCommentCreate(0, { x: .1, y: .2, width: .03, height: .03 })}>Place comment</button><button onClick={() => props.onHighlightCreate(0, { x: .1, y: .2, width: .03, height: .03 })}>Place highlight</button></div> }));
 
 const document = (revision = 0): DocumentInfo => ({ id: 1, name: 'notes.pdf', path: 'C:/notes.pdf', pages: [{ width: 612, height: 792 }], revision, dirty: revision > 0, can_undo: revision > 0, can_redo: false });
+const annotations = (documentId = 1, revision = 0, items: { id: string; kind: 'note' | 'highlight'; page: number; rect: { x: number; y: number; width: number; height: number } | null; contents: string | null }[] = []) => ({ documentId, revision, status: 'supported' as const, reason: null, annotations: items });
 let keydown: ((event: KeyboardEvent) => void) | undefined;
 beforeEach(() => {
   vi.clearAllMocks(); const storage = new Map(); keydown = undefined;
@@ -22,7 +23,7 @@ async function open(ui: ReactTestRenderer) {
 }
 
 it('creates a note against the current revision and refreshes the active document', async () => {
-  vi.mocked(documentComments).mockResolvedValue({ documentId: 1, revision: 0, status: 'supported', reason: null, notes: [] });
+  vi.mocked(documentAnnotations).mockResolvedValue(annotations());
   vi.mocked(createComment).mockResolvedValue(document(1));
   let ui!: ReactTestRenderer; act(() => { ui = create(<App />); });
   await open(ui);
@@ -37,8 +38,8 @@ it('creates a note against the current revision and refreshes the active documen
   act(() => ui.unmount());
 });
 
-it('leaves comment mode through Pan, Select, and the H shortcut without mutating notes', async () => {
-  vi.mocked(documentComments).mockResolvedValue({ documentId: 1, revision: 0, status: 'supported', reason: null, notes: [] });
+it('keeps placement modes exclusive through Pan, Select, and the H shortcut without mutating annotations', async () => {
+  vi.mocked(documentAnnotations).mockResolvedValue(annotations());
   let ui!: ReactTestRenderer; act(() => { ui = create(<App />); });
   await open(ui);
   await act(async () => button(ui, 'Add comment').props.onClick());
@@ -49,12 +50,17 @@ it('leaves comment mode through Pan, Select, and the H shortcut without mutating
   act(() => button(ui, 'Select text on page').props.onClick());
   expect(ui.root.findByType(Viewer).props.commentMode).toBe(false);
   expect(ui.root.findByType(Viewer).props.hand).toBe(false);
+  await act(async () => button(ui, 'Add area highlight').props.onClick());
+  expect(ui.root.findByType(Viewer).props.highlightMode).toBe(true);
+  expect(ui.root.findByType(Viewer).props.commentMode).toBe(false);
+  act(() => button(ui, 'Pan document').props.onClick());
+  expect(ui.root.findByType(Viewer).props.highlightMode).toBe(false);
   expect(createComment).not.toHaveBeenCalled();
   act(() => ui.unmount());
 });
 
 it('leaves panel-launched placement mode with Escape', async () => {
-  vi.mocked(documentComments).mockResolvedValue({ documentId: 1, revision: 0, status: 'supported', reason: null, notes: [] });
+  vi.mocked(documentAnnotations).mockResolvedValue(annotations());
   let ui!: ReactTestRenderer; act(() => { ui = create(<App />); });
   await open(ui);
   await act(async () => button(ui, 'Comments').props.onClick());
@@ -65,23 +71,52 @@ it('leaves panel-launched placement mode with Escape', async () => {
   act(() => ui.unmount());
 });
 
-it('drops a stale comment query when the active tab changes', async () => {
-  let resolveFirst!: (value: { documentId: number; revision: number; status: 'supported'; reason: null; notes: { id: string; page: number; rect: null; contents: string }[] }) => void;
-  const first = new Promise<{ documentId: number; revision: number; status: 'supported'; reason: null; notes: { id: string; page: number; rect: null; contents: string }[] }>(resolve => { resolveFirst = resolve; });
-  vi.mocked(documentComments).mockImplementation((id: number) => id === 1 ? first : Promise.resolve({ documentId: 2, revision: 0, status: 'supported', reason: null, notes: [{ id: 'fresh', page: 0, rect: null, contents: 'Fresh note' }] }));
+it('keeps an open comments list from intercepting Pan or Select through area highlights', async () => {
+  vi.mocked(documentAnnotations).mockResolvedValue(annotations(1, 0, [{ id: 'h1', kind: 'highlight', page: 0, rect: { x: .05, y: .05, width: .9, height: .9 }, contents: null }]));
+  let ui!: ReactTestRenderer; act(() => { ui = create(<App />); });
+  await open(ui);
+  await act(async () => button(ui, 'Comments').props.onClick());
+  expect(ui.root.findByType(Viewer).props.annotationInteractive).toBe(false);
+  act(() => button(ui, 'Pan document').props.onClick());
+  expect(ui.root.findByType(Viewer).props.annotationInteractive).toBe(false);
+  act(() => button(ui, 'Select text on page').props.onClick());
+  expect(ui.root.findByType(Viewer).props.annotationInteractive).toBe(false);
+  act(() => ui.unmount());
+});
+
+it('drops a stale annotation query when the active tab changes', async () => {
+  let resolveFirst!: (value: ReturnType<typeof annotations>) => void;
+  const first = new Promise<ReturnType<typeof annotations>>(resolve => { resolveFirst = resolve; });
+  vi.mocked(documentAnnotations).mockImplementation((id: number) => id === 1 ? first : Promise.resolve(annotations(2, 0, [{ id: 'fresh', kind: 'note', page: 0, rect: null, contents: 'Fresh note' }])));
   vi.mocked(openDocument).mockResolvedValueOnce({ status: 'opened', document: document() }).mockResolvedValueOnce({ status: 'opened', document: { ...document(), id: 2, name: 'other.pdf', path: 'C:/other.pdf' } });
   let ui!: ReactTestRenderer; act(() => { ui = create(<App />); });
   await act(async () => ui.root.findAllByType('button').find(item => item.children.includes('Open a file'))!.props.onClick());
   await act(async () => button(ui, 'Add comment').props.onClick());
   await act(async () => ui.root.findAllByType('button').find(item => item.children.includes('Open a file'))!.props.onClick());
-  await act(async () => { resolveFirst({ documentId: 1, revision: 0, status: 'supported', reason: null, notes: [{ id: 'stale', page: 0, rect: null, contents: 'Stale note' }] }); });
+  await act(async () => { resolveFirst(annotations(1, 0, [{ id: 'stale', kind: 'note', page: 0, rect: null, contents: 'Stale note' }])); });
   expect(JSON.stringify(ui.toJSON())).not.toContain('Stale note');
   expect(ui.root.findByType(Viewer).props.commentMode).toBe(false);
   act(() => ui.unmount());
 });
 
+it('creates an area highlight using the current revision and an optional body', async () => {
+  vi.mocked(documentAnnotations).mockResolvedValue(annotations());
+  vi.mocked(createHighlight).mockResolvedValue(document(1));
+  let ui!: ReactTestRenderer; act(() => { ui = create(<App />); });
+  await open(ui);
+  await act(async () => button(ui, 'Add area highlight').props.onClick());
+  expect(ui.root.findByType(Viewer).props.highlightMode).toBe(true);
+  expect(ui.root.findByType(Viewer).props.commentMode).toBe(false);
+  await act(async () => ui.root.findAllByType('button').find(item => item.children.includes('Place highlight'))!.props.onClick());
+  expect(ui.root.findByProps({ 'aria-label': 'Area highlight description' }).props.value).toBe('');
+  await act(async () => ui.root.findAllByType('button').find(item => item.children.join('') === 'Save area highlight')!.props.onClick());
+  expect(createHighlight).toHaveBeenCalledWith(1, 0, 0, { x: .1, y: .2, width: .03, height: .03 }, '');
+  expect(ui.root.findByType(Viewer).props.document).toMatchObject({ id: 1, revision: 1, dirty: true });
+  act(() => ui.unmount());
+});
+
 it('opens a hidden note from the comments list without creating an on-page anchor', async () => {
-  vi.mocked(documentComments).mockResolvedValue({ documentId: 1, revision: 0, status: 'supported', reason: null, notes: [{ id: 'hidden', page: 0, rect: null, contents: 'Hidden note' }] });
+  vi.mocked(documentAnnotations).mockResolvedValue(annotations(1, 0, [{ id: 'hidden', kind: 'note', page: 0, rect: null, contents: 'Hidden note' }]));
   let ui!: ReactTestRenderer; act(() => { ui = create(<App />); });
   await open(ui);
   await act(async () => button(ui, 'Comments').props.onClick());
@@ -92,7 +127,7 @@ it('opens a hidden note from the comments list without creating an on-page ancho
 });
 
 it('does not route global shortcuts into the document while a comment editor is open', async () => {
-  vi.mocked(documentComments).mockResolvedValue({ documentId: 1, revision: 0, status: 'supported', reason: null, notes: [] });
+  vi.mocked(documentAnnotations).mockResolvedValue(annotations());
   let ui!: ReactTestRenderer; act(() => { ui = create(<App />); });
   await open(ui);
   await act(async () => button(ui, 'Add comment').props.onClick());
@@ -106,7 +141,7 @@ it('does not route global shortcuts into the document while a comment editor is 
 });
 
 it('keeps the active tab and applies the acknowledged revision when a note save is pending', async () => {
-  vi.mocked(documentComments).mockResolvedValue({ documentId: 1, revision: 0, status: 'supported', reason: null, notes: [] });
+  vi.mocked(documentAnnotations).mockResolvedValue(annotations());
   let resolveCreate!: (value: DocumentInfo) => void;
   vi.mocked(createComment).mockImplementation(() => new Promise(resolve => { resolveCreate = resolve; }));
   let ui!: ReactTestRenderer; act(() => { ui = create(<App />); });

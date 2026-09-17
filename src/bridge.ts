@@ -46,6 +46,12 @@ export const documentComments = (id: number, revision: number) => invoke<Documen
 export const createComment = (id: number, revision: number, page: number, rect: CommentRect, contents: string) => invoke<DocumentInfo>('create_comment', { id, revision, page, rect, contents });
 export const updateComment = (id: number, revision: number, noteId: string, contents: string) => invoke<DocumentInfo>('update_comment', { id, revision, noteId, contents });
 export const deleteComment = (id: number, revision: number, noteId: string) => invoke<DocumentInfo>('delete_comment', { id, revision, noteId });
+export type Annotation = { id: string; kind: 'note' | 'highlight'; page: number; rect: CommentRect | null; contents: string | null };
+export type DocumentAnnotations = { documentId: number; revision: number; status: 'supported' | 'unsupported'; reason: string | null; annotations: Annotation[] };
+export const documentAnnotations = (id: number, revision: number) => invoke<DocumentAnnotations>('document_annotations', { id, revision });
+export const createHighlight = (id: number, revision: number, page: number, rect: CommentRect, contents: string | null) => invoke<DocumentInfo>('create_highlight', { id, revision, page, rect, contents });
+export const updateHighlight = (id: number, revision: number, annotationId: string, contents: string | null) => invoke<DocumentInfo>('update_highlight', { id, revision, annotationId, contents });
+export const deleteHighlight = (id: number, revision: number, annotationId: string) => invoke<DocumentInfo>('delete_highlight', { id, revision, annotationId });
 export type SplitOutput = { folder: string; files: { path: string; first_page: number; last_page: number; page_count: number }[] };
 export const splitDocument = (id: number, revision: number, pagesPerFile: number) => invoke<SplitOutput | null>('split_document', { id, revision, pagesPerFile });
 export const cropPage = (id: number, page: number, revision: number, rect: { x: number; y: number; width: number; height: number }) => invoke<DocumentInfo>('crop_page', { id, page, revision, rect });

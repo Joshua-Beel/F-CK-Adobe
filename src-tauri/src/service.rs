@@ -9,7 +9,7 @@ use crate::combine::CopyOperation;
 pub struct CropRect { pub x: f64, pub y: f64, pub width: f64, pub height: f64 }
 #[derive(Clone, Copy, Deserialize)]
 pub struct CombineSource { pub id: u64, pub revision: u64 }
-enum CommentMutation { Create(u16, CropRect, String), Update(String, String), Delete(String) }
+enum CommentMutation { Create(u16, CropRect, String), Update(String, String), Delete(String), CreateHighlight(u16, CropRect, Option<String>), UpdateHighlight(String, Option<String>), DeleteHighlight(String) }
 
 #[derive(Clone, Serialize)]
 pub struct PageSize { width: f32, height: f32 }
@@ -83,6 +83,7 @@ enum Request {
     Edit(u64, PageEdit, Reply<DocumentInfo>),
     Crop(u64, u16, u64, CropRect, Reply<DocumentInfo>),
     Comments(u64, u64, Reply<crate::comments::CommentList>),
+    Annotations(u64, u64, Reply<crate::comments::AnnotationList>),
     Comment(u64, u64, CommentMutation, Reply<DocumentInfo>),
     Save(u64, Option<Vec<usize>>, PathBuf, Reply<SavedCopy>),
     Split(u64, u64, usize, PathBuf, Reply<crate::split::SplitOutput>),
@@ -406,9 +407,27 @@ impl PdfService {
                             if let Some(reason) = session.comments_reason() { result.status = "unsupported"; result.reason = Some(reason.to_owned()); return Ok(result); }
                             let document = documents.get(&id).ok_or("Document is closed")?;
                             for (index, spec) in session.plan.iter().enumerate() {
-                                for note in &spec.notes {
+                                for note in spec.notes.iter().filter(|note| note.kind == crate::comments::AnnotationKind::Note) {
                                     let rect = with_planned_page(document, spec, |page| displayed_note_rect(page, note.rect))?;
                                     result.notes.push(crate::comments::CommentInfo { id: note.id.clone(), page: index, rect, contents: note.contents.clone() });
+                                }
+                            }
+                            Ok(result)
+                        })();
+                        let _ = reply.send(result);
+                    }
+                    Request::Annotations(id, revision, reply) => {
+                        if reply.is_closed() { continue; }
+                        let result = (|| {
+                            let session = &sessions.get(&id).ok_or("Document is closed")?.0;
+                            if session.revision != revision { return Err("Document changed. Refresh annotations.".into()); }
+                            let mut result = crate::comments::AnnotationList { document_id: id, revision, status: "supported", reason: None, annotations: Vec::new() };
+                            if let Some(reason) = session.comments_reason() { result.status = "unsupported"; result.reason = Some(reason.to_owned()); return Ok(result); }
+                            let document = documents.get(&id).ok_or("Document is closed")?;
+                            for (index, spec) in session.plan.iter().enumerate() {
+                                for note in &spec.notes {
+                                    let rect = with_planned_page(document, spec, |page| displayed_note_rect(page, note.rect))?;
+                                    result.annotations.push(crate::comments::AnnotationInfo { id: note.id.clone(), kind: note.kind, page: index, rect, contents: (!note.contents.is_empty()).then(|| note.contents.clone()) });
                                 }
                             }
                             Ok(result)
@@ -430,6 +449,13 @@ impl PdfService {
                                 }
                                 CommentMutation::Update(note_id, contents) => session.proposed_comment(None, Some(&note_id), Some(&contents))?,
                                 CommentMutation::Delete(note_id) => session.proposed_comment(None, Some(&note_id), None)?,
+                                CommentMutation::CreateHighlight(page, rect, contents) => {
+                                    let spec = session.plan.get(page as usize).ok_or("Page is out of range")?;
+                                    let rect = with_planned_page(document, spec, |page| displayed_crop(page, rect))?;
+                                    session.proposed_highlight(Some((page as usize, rect)), None, contents.as_deref(), false)?
+                                }
+                                CommentMutation::UpdateHighlight(id, contents) => session.proposed_highlight(None, Some(&id), contents.as_deref(), false)?,
+                                CommentMutation::DeleteHighlight(id) => session.proposed_highlight(None, Some(&id), None, true)?,
                             };
                             if next == session.plan { return current_info(session, original, document); }
                             let rendered = load_note_document(pdfium.as_ref().map_err(Clone::clone)?, document, session, &next)?;
@@ -587,6 +613,18 @@ impl PdfService {
     }
     pub async fn comments(&self, id: u64, revision: u64) -> Result<crate::comments::CommentList, String> {
         let (tx, rx) = oneshot::channel(); self.sender.send(Request::Comments(id, revision, tx)).map_err(|error| error.to_string())?; rx.await.map_err(|error| error.to_string())?
+    }
+    pub async fn annotations(&self, id: u64, revision: u64) -> Result<crate::comments::AnnotationList, String> {
+        let (tx, rx) = oneshot::channel(); self.sender.send(Request::Annotations(id, revision, tx)).map_err(|error| error.to_string())?; rx.await.map_err(|error| error.to_string())?
+    }
+    pub async fn create_highlight(&self, id: u64, revision: u64, page: u16, rect: CropRect, contents: Option<String>) -> Result<DocumentInfo, String> {
+        let (tx, rx) = oneshot::channel(); self.sender.send(Request::Comment(id, revision, CommentMutation::CreateHighlight(page, rect, contents), tx)).map_err(|error| error.to_string())?; rx.await.map_err(|error| error.to_string())?
+    }
+    pub async fn update_highlight(&self, id: u64, revision: u64, annotation_id: String, contents: Option<String>) -> Result<DocumentInfo, String> {
+        let (tx, rx) = oneshot::channel(); self.sender.send(Request::Comment(id, revision, CommentMutation::UpdateHighlight(annotation_id, contents), tx)).map_err(|error| error.to_string())?; rx.await.map_err(|error| error.to_string())?
+    }
+    pub async fn delete_highlight(&self, id: u64, revision: u64, annotation_id: String) -> Result<DocumentInfo, String> {
+        let (tx, rx) = oneshot::channel(); self.sender.send(Request::Comment(id, revision, CommentMutation::DeleteHighlight(annotation_id), tx)).map_err(|error| error.to_string())?; rx.await.map_err(|error| error.to_string())?
     }
     pub async fn create_comment(&self, id: u64, revision: u64, page: u16, rect: CropRect, contents: String) -> Result<DocumentInfo, String> {
         let (tx, rx) = oneshot::channel(); self.sender.send(Request::Comment(id, revision, CommentMutation::Create(page, rect, contents), tx)).map_err(|error| error.to_string())?; rx.await.map_err(|error| error.to_string())?
@@ -767,7 +805,7 @@ mod tests {
     macro_rules! accepted_reply_values {
         ($($value:ty),* $(,)?) => { $(impl TestReplyValue for $value { type Accepted = Self; fn accept(self) -> Self { self } })* };
     }
-    accepted_reply_values!((), Vec<u8>, Vec<u64>, String, DocumentInfo, SavedCopy, OpenResult, PrintSnapshotInfo, PrintBitmap, BookmarkList, RenderWork, crate::document_properties::DocumentProperties, crate::text_geometry::PageTextGeometry, crate::split::SplitOutput, crate::comments::CommentList);
+    accepted_reply_values!((), Vec<u8>, Vec<u64>, String, DocumentInfo, SavedCopy, OpenResult, PrintSnapshotInfo, PrintBitmap, BookmarkList, RenderWork, crate::document_properties::DocumentProperties, crate::text_geometry::PageTextGeometry, crate::split::SplitOutput, crate::comments::CommentList, crate::comments::AnnotationList);
     fn call<T: TestReplyValue>(service: &PdfService, request: impl FnOnce(Reply<T>) -> Request) -> Result<T::Accepted, String> {
         let (tx, rx) = oneshot::channel(); service.sender.send(request(tx)).unwrap(); rx.blocking_recv().unwrap().map(TestReplyValue::accept)
     }
@@ -802,6 +840,91 @@ mod tests {
     }
     fn comments_print_rgb(bitmap: &PrintBitmap) -> image::RgbImage {
         image::RgbImage::from_fn(bitmap.width, bitmap.height, |x, y| { let index = (y as usize * bitmap.width as usize + x as usize) * 4; image::Rgb([bitmap.bgra[index + 2], bitmap.bgra[index + 1], bitmap.bgra[index]]) })
+    }
+    fn highlights_assert_pixels(before: &image::RgbImage, after: &image::RgbImage, rect: CropRect, ink_threshold: u8) {
+        assert_eq!(before.dimensions(), after.dimensions()); let mut tinted = 0; let mut dark = 0;
+        for (x, y, pixel) in after.enumerate_pixels() {
+            let old = before.get_pixel(x, y);
+            let inside = x as f64 > rect.x * after.width() as f64 + 2.0 && (x as f64) < (rect.x + rect.width) * after.width() as f64 - 2.0 && y as f64 > rect.y * after.height() as f64 + 2.0 && (y as f64) < (rect.y + rect.height) * after.height() as f64 - 2.0;
+            let outside = (x as f64) < rect.x * after.width() as f64 - 2.0 || (x as f64) > (rect.x + rect.width) * after.width() as f64 + 2.0 || (y as f64) < rect.y * after.height() as f64 - 2.0 || (y as f64) > (rect.y + rect.height) * after.height() as f64 + 2.0;
+            if outside { assert_eq!(pixel, old, "An area highlight must not change unrelated pixels"); }
+            if inside {
+                assert!((pixel[0] as i16 - old[0] as i16).abs() <= 1 && (pixel[1] as i16 - old[1] as i16).abs() <= 1);
+                assert!((pixel[2] as f64 - old[2] as f64 * 0.75).abs() <= 2.0, "Expected one yellow multiply fill at 25% opacity: old {old:?}, actual {pixel:?}");
+                if old[0] > 240 && old[1] > 240 && old[2] > 240 { tinted += 1; }
+                if old.0.iter().all(|value| *value < ink_threshold) { assert!(pixel.0.iter().all(|value| *value <= ink_threshold), "Highlight must keep fixture ink visible"); dark += 1; }
+            }
+        }
+        assert!(tinted > 100, "The actual bitmap must show the area highlight"); assert!(dark > 0, "Fixture must independently place ink below {ink_threshold} inside the highlight");
+    }
+    fn highlights_assert_extent(image: &image::RgbImage, rect: CropRect) {
+        let mut pixels = image.enumerate_pixels().filter(|(_, _, pixel)| pixel[0] > 240 && pixel[1] > 240 && (180..205).contains(&pixel[2])); let (x, y, _) = pixels.next().expect("Expected actual translucent highlight pixels"); let mut bounds = (x, y, x, y);
+        for (x, y, _) in pixels { bounds.0 = bounds.0.min(x); bounds.1 = bounds.1.min(y); bounds.2 = bounds.2.max(x); bounds.3 = bounds.3.max(y); }
+        for (actual, expected) in [(bounds.0 as f64, rect.x * image.width() as f64), (bounds.1 as f64, rect.y * image.height() as f64), ((bounds.2 + 1) as f64, (rect.x + rect.width) * image.width() as f64), ((bounds.3 + 1) as f64, (rect.y + rect.height) * image.height() as f64)] { assert!((actual - expected).abs() <= 2.0, "Actual highlight pixel extent {actual}, independently expected {expected}"); }
+    }
+    #[test]
+    fn highlights_all_rotations_inherited_crop_multiply_pixels_unicode_reopen_and_print_isolation() {
+        let _print_lock = print_test_lock(); let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")); let service = PdfService::start(root.join("resources/pdfium/bin/pdfium.dll")); let folder = tempfile::tempdir().unwrap();
+        let marker = CropRect { x: 0.05, y: 0.05, width: 0.9, height: 0.9 };
+        for original in [0, 90, 180, 270] { for edited in 0..4 {
+            let bytes = crate::text_geometry::tests::fixture(original, [1.0, 0.0, 0.0, 1.0, 100.0, 250.0], "VisibleHeader\nVisibleBody"); let mut pdf = lopdf::Document::load_mem(&bytes).unwrap(); let page = pdf.get_pages()[&1];
+            pdf.get_dictionary_mut(page).unwrap().set("MediaBox", vec![20.into(), 30.into(), 420.into(), 430.into()]); let parent = pdf.get_dictionary(page).unwrap().get(b"Parent").unwrap().as_reference().unwrap();
+            for key in [b"MediaBox".as_slice(), b"CropBox", b"Rotate", b"Resources"] { let value = pdf.get_dictionary_mut(page).unwrap().remove(key).unwrap(); pdf.get_dictionary_mut(parent).unwrap().set(key, value); }
+            let path = folder.path().join(format!("highlight-{original}-{edited}.pdf")); pdf.save(&path).unwrap(); let source = std::fs::read(&path).unwrap(); let mut info = call(&service, |reply| Request::Open(path.clone(), reply)).unwrap();
+            for _ in 0..edited { info = call(&service, |reply| Request::Edit(info.id, PageEdit::Rotate { pages: vec![0], clockwise: true }, reply)).unwrap(); }
+            let before = comments_png(&service, info.id, 0, 400); let text = call(&service, |reply| Request::Text(info.id, 0, info.revision, reply)).unwrap(); let geometry = serde_json::to_value(call(&service, |reply| Request::TextGeometry(info.id, 0, info.revision, reply)).unwrap().characters).unwrap();
+            let old = print_snapshot(&service, info.id, info.revision); let old_pixels = service.print_render_blocking(old.token, 0, 400, 400).unwrap(); let dimensions = (info.pages[0].width, info.pages[0].height); let body = "  Area-only é 漢字 😀\n ";
+            info = call(&service, |reply| Request::Comment(info.id, info.revision, CommentMutation::CreateHighlight(0, marker, Some(body.into())), reply)).unwrap(); assert_eq!((info.pages[0].width, info.pages[0].height), dimensions);
+            assert_eq!(call(&service, |reply| Request::Text(info.id, 0, info.revision, reply)).unwrap(), text); assert_eq!(serde_json::to_value(call(&service, |reply| Request::TextGeometry(info.id, 0, info.revision, reply)).unwrap().characters).unwrap(), geometry); assert!(call(&service, |reply| Request::Comments(info.id, info.revision, reply)).unwrap().notes.is_empty());
+            let annotations = call(&service, |reply| Request::Annotations(info.id, info.revision, reply)).unwrap(); assert_eq!(annotations.annotations.len(), 1); let highlight = &annotations.annotations[0]; assert_eq!(highlight.kind, crate::comments::AnnotationKind::Highlight); assert_eq!(highlight.contents.as_deref(), Some(body)); let id = highlight.id.clone(); let displayed = highlight.rect.as_ref().unwrap();
+            for (actual, expected) in [(displayed.x, marker.x), (displayed.y, marker.y), (displayed.width, marker.width), (displayed.height, marker.height)] { assert!((actual - expected).abs() < 0.00001); }
+            let after = comments_png(&service, info.id, 0, 400); highlights_assert_pixels(&before, &after, marker, 40); highlights_assert_extent(&after, marker); assert_eq!(comments_png(&service, info.id, 0, 400), after); assert_eq!(service.print_render_blocking(old.token, 0, 400, 400).unwrap().bgra, old_pixels.bgra);
+            let snapshot = print_snapshot(&service, info.id, info.revision); let snapshot_pixels = service.print_render_blocking(snapshot.token, 0, 400, 400).unwrap(); highlights_assert_pixels(&comments_print_rgb(&old_pixels), &comments_print_rgb(&snapshot_pixels), marker, 40);
+            let copy = folder.path().join(format!("highlight-copy-{original}-{edited}.pdf")); info = call(&service, |reply| Request::Save(info.id, None, copy.clone(), reply)).unwrap().document; let reopened = call(&service, |reply| Request::Open(copy, reply)).unwrap(); assert_eq!(comments_png(&service, reopened.id, 0, 400), after); let imported = call(&service, |reply| Request::Annotations(reopened.id, 0, reply)).unwrap(); assert_eq!(imported.annotations[0].id, id); assert_eq!(imported.annotations[0].contents.as_deref(), Some(body)); assert_eq!(call(&service, |reply| Request::Text(reopened.id, 0, 0, reply)).unwrap(), text); call(&service, |reply| Request::Close(reopened.id, reply)).unwrap();
+            info = call(&service, |reply| Request::Crop(info.id, 0, info.revision, CropRect { x: 0.2, y: 0.0, width: 0.8, height: 1.0 }, reply)).unwrap(); let clipped = call(&service, |reply| Request::Annotations(info.id, info.revision, reply)).unwrap(); let clipped = clipped.annotations[0].rect.as_ref().unwrap(); assert!(clipped.x.abs() < 0.00001 && (clipped.width - 0.9375).abs() < 0.00001 && (clipped.y - 0.05).abs() < 0.00001);
+            highlights_assert_extent(&comments_png(&service, info.id, 0, 320), CropRect { x: 0.0, y: 0.05, width: 0.9375, height: 0.9 });
+            info = call(&service, |reply| Request::Crop(info.id, 0, info.revision, CropRect { x: 0.99, y: 0.0, width: 0.01, height: 1.0 }, reply)).unwrap(); let hidden = call(&service, |reply| Request::Annotations(info.id, info.revision, reply)).unwrap(); assert!(hidden.annotations[0].rect.is_none()); assert_eq!(hidden.annotations[0].contents.as_deref(), Some(body));
+            assert!(!comments_png(&service, info.id, 0, 2).pixels().any(|pixel| pixel[0] > 240 && pixel[1] > 240 && (180..205).contains(&pixel[2])), "Off-crop markup must not remain visible");
+            let hidden_path = folder.path().join(format!("highlight-hidden-{original}-{edited}.pdf")); call(&service, |reply| Request::Save(info.id, None, hidden_path.clone(), reply)).unwrap(); let hidden_open = call(&service, |reply| Request::Open(hidden_path, reply)).unwrap(); assert!(call(&service, |reply| Request::Annotations(hidden_open.id, 0, reply)).unwrap().annotations[0].rect.is_none()); call(&service, |reply| Request::Close(hidden_open.id, reply)).unwrap();
+            info = call(&service, |reply| Request::Edit(info.id, PageEdit::Undo, reply)).unwrap(); info = call(&service, |reply| Request::Edit(info.id, PageEdit::Undo, reply)).unwrap(); assert_eq!(comments_png(&service, info.id, 0, 400), after); info = call(&service, |reply| Request::Comment(info.id, info.revision, CommentMutation::DeleteHighlight(id), reply)).unwrap(); assert_eq!(comments_png(&service, info.id, 0, 400), before);
+            call(&service, |reply| Request::Close(info.id, reply)).unwrap(); assert_eq!(service.print_render_blocking(snapshot.token, 0, 400, 400).unwrap().bgra, snapshot_pixels.bgra); assert_eq!(std::fs::read(path).unwrap(), source);
+        } }
+    }
+    #[test]
+    fn highlights_mixed_corpus_reopen_move_delete_extract_split_and_source_preservation() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")); let service = PdfService::start(root.join("resources/pdfium/bin/pdfium.dll")); let folder = tempfile::tempdir().unwrap(); let area = CropRect { x: 0.15, y: 0.15, width: 0.7, height: 0.7 };
+        for (fixture, count) in [("resources/welcome.pdf", 6usize), ("../test-corpus/synthetic-scan-98.pdf", 98), ("../test-corpus/synthetic-text-1500.pdf", 1500)] {
+            let path = root.join(fixture); let source = std::fs::read(&path).unwrap(); let mut info = call(&service, |reply| Request::Open(path.clone(), reply)).unwrap(); let before = comments_png(&service, info.id, 0, 400);
+            info = call(&service, |reply| Request::Comment(info.id, 0, CommentMutation::CreateHighlight(0, area, None), reply)).unwrap(); highlights_assert_pixels(&before, &comments_png(&service, info.id, 0, 400), area, 160);
+            let first = call(&service, |reply| Request::Annotations(info.id, info.revision, reply)).unwrap(); assert!(first.annotations[0].contents.is_none()); let highlight = first.annotations[0].id.clone();
+            info = call(&service, |reply| Request::Comment(info.id, info.revision, CommentMutation::Create((count - 1) as u16, CropRect { x: 0.03, y: 0.03, width: 0.06, height: 0.06 }, "Retained legacy-compatible note é 😀".into()), reply)).unwrap();
+            let notes = call(&service, |reply| Request::Comments(info.id, info.revision, reply)).unwrap(); assert_eq!(notes.notes.len(), 1); let note = notes.notes[0].id.clone(); assert_ne!(note, highlight);
+            info = call(&service, |reply| Request::Comment(info.id, info.revision, CommentMutation::UpdateHighlight(highlight.clone(), Some("  Corpus highlight 漢字 😀\n ".into())), reply)).unwrap();
+            info = call(&service, |reply| Request::Crop(info.id, 0, info.revision, CropRect { x: 0.0, y: 0.0, width: 0.9, height: 0.9 }, reply)).unwrap(); info = call(&service, |reply| Request::Edit(info.id, PageEdit::Rotate { pages: vec![0], clockwise: true }, reply)).unwrap(); info = call(&service, |reply| Request::Edit(info.id, PageEdit::Move { from: 0, to: count - 1 }, reply)).unwrap(); info = call(&service, |reply| Request::Edit(info.id, PageEdit::Delete { pages: vec![1] }, reply)).unwrap();
+            let expected = call(&service, |reply| Request::Annotations(info.id, info.revision, reply)).unwrap(); assert_eq!(expected.annotations.len(), 2); assert_eq!(expected.annotations.iter().find(|value| value.id == highlight).unwrap().page, count - 2); assert_eq!(expected.annotations.iter().find(|value| value.id == note).unwrap().page, count - 3);
+            let copy = folder.path().join(format!("mixed-corpus-{count}.pdf")); info = call(&service, |reply| Request::Save(info.id, None, copy.clone(), reply)).unwrap().document; assert!(!info.dirty); let reopened = call(&service, |reply| Request::Open(copy, reply)).unwrap(); assert_eq!(reopened.pages.len(), count - 1); assert_eq!(serde_json::to_value(call(&service, |reply| Request::Annotations(reopened.id, 0, reply)).unwrap().annotations).unwrap(), serde_json::to_value(&expected.annotations).unwrap());
+            for page in [count - 3, count - 2] { assert_eq!(comments_png(&service, info.id, page as u16, 400), comments_png(&service, reopened.id, page as u16, 400)); }
+            let extracted = folder.path().join(format!("highlight-extracted-{count}.pdf")); call(&service, |reply| Request::Save(info.id, Some(vec![0, count - 2]), extracted.clone(), reply)).unwrap(); let extracted = call(&service, |reply| Request::Open(extracted, reply)).unwrap(); let annotations = call(&service, |reply| Request::Annotations(extracted.id, 0, reply)).unwrap(); assert_eq!(annotations.annotations.len(), 1); assert_eq!(annotations.annotations[0].kind, crate::comments::AnnotationKind::Highlight); assert_eq!(annotations.annotations[0].id, highlight); assert_eq!(annotations.annotations[0].page, 1); assert_eq!(comments_png(&service, extracted.id, 1, 400), comments_png(&service, info.id, (count - 2) as u16, 400));
+            let split = call(&service, |reply| Request::Split(info.id, info.revision, count.div_ceil(3), folder.path().join(format!("mixed-split-{count}")), reply)).unwrap(); let mut ids = Vec::new();
+            for file in split.files { let part = call(&service, |reply| Request::Open(file.path.clone(), reply)).unwrap(); for annotation in call(&service, |reply| Request::Annotations(part.id, 0, reply)).unwrap().annotations { ids.push(annotation.id); } call(&service, |reply| Request::Close(part.id, reply)).unwrap(); }
+            assert_eq!(ids.len(), 2); assert!(ids.contains(&highlight) && ids.contains(&note)); assert!(!call(&service, |reply| Request::Edit(info.id, PageEdit::Move { from: 0, to: 0 }, reply)).unwrap().dirty, "Split/extract must not change the saved baseline");
+            let donor = call(&service, |reply| Request::Open(root.join("resources/welcome.pdf"), reply)).unwrap(); assert!(call(&service, |reply| Request::CheckCombine(combine_source(&info), combine_source(&donor), reply)).unwrap_err().contains("Annots")); assert!(call(&service, |reply| Request::CheckInsertion(combine_source(&info), combine_source(&donor), 0, reply)).unwrap_err().contains("Annots")); assert!(call(&service, |reply| Request::CheckReplacement(combine_source(&info), combine_source(&donor), 0, 1, reply)).unwrap_err().contains("Annots"));
+            info = call(&service, |reply| Request::Edit(info.id, PageEdit::Delete { pages: vec![count - 2] }, reply)).unwrap(); assert!(!call(&service, |reply| Request::Annotations(info.id, info.revision, reply)).unwrap().annotations.iter().any(|value| value.id == highlight)); info = call(&service, |reply| Request::Edit(info.id, PageEdit::Undo, reply)).unwrap(); assert!(call(&service, |reply| Request::Annotations(info.id, info.revision, reply)).unwrap().annotations.iter().any(|value| value.id == highlight));
+            for id in [info.id, reopened.id, extracted.id, donor.id] { call(&service, |reply| Request::Close(id, reply)).unwrap(); } assert_eq!(std::fs::read(path).unwrap(), source);
+        }
+    }
+    #[test]
+    fn highlights_invalid_stale_closed_preclosed_noops_and_branching_are_guarded() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")); let service = PdfService::start(root.join("resources/pdfium/bin/pdfium.dll")); let path = root.join("resources/welcome.pdf"); let source = std::fs::read(&path).unwrap(); let mut info = call(&service, |reply| Request::Open(path.clone(), reply)).unwrap(); let before = comments_png(&service, info.id, 0, 300); let rect = CropRect { x: 0.1, y: 0.1, width: 0.2, height: 0.2 };
+        for (page, bounds, body) in [(6, rect, None), (0, CropRect { x: f64::NAN, ..rect }, None), (0, CropRect { width: 0.00001, ..rect }, None), (0, CropRect { x: 0.9, ..rect }, None), (0, rect, Some("\0".into())), (0, rect, Some("x".repeat(8193)))] {
+            assert!(call(&service, |reply| Request::Comment(info.id, 0, CommentMutation::CreateHighlight(page, bounds, body), reply)).is_err()); assert!(call(&service, |reply| Request::Annotations(info.id, 0, reply)).unwrap().annotations.is_empty()); assert_eq!(comments_png(&service, info.id, 0, 300), before);
+        }
+        let (reply, canceled) = oneshot::channel(); drop(canceled); service.sender.send(Request::Comment(info.id, 0, CommentMutation::CreateHighlight(0, rect, None), reply)).unwrap(); assert!(call(&service, |reply| Request::Annotations(info.id, 0, reply)).unwrap().annotations.is_empty()); assert!(!call(&service, |reply| Request::Edit(info.id, PageEdit::Move { from: 0, to: 0 }, reply)).unwrap().can_undo);
+        info = call(&service, |reply| Request::Comment(info.id, 0, CommentMutation::CreateHighlight(0, rect, Some(" \n\t".into())), reply)).unwrap(); let list = call(&service, |reply| Request::Annotations(info.id, info.revision, reply)).unwrap(); let first = list.annotations[0].id.clone(); assert!(list.annotations[0].contents.is_none());
+        assert!(call(&service, |reply| Request::Comment(info.id, 0, CommentMutation::UpdateHighlight(first.clone(), Some("Stale".into())), reply)).is_err()); assert!(call(&service, |reply| Request::Annotations(info.id, 0, reply)).is_err()); assert!(call(&service, |reply| Request::Comment(info.id, info.revision, CommentMutation::Delete(first.clone()), reply)).is_err());
+        let unchanged = call(&service, |reply| Request::Comment(info.id, info.revision, CommentMutation::UpdateHighlight(first.clone(), None), reply)).unwrap(); assert_eq!(unchanged.revision, info.revision); info = call(&service, |reply| Request::Edit(info.id, PageEdit::Undo, reply)).unwrap(); info = call(&service, |reply| Request::Comment(info.id, info.revision, CommentMutation::Create(0, rect, "Branch note".into()), reply)).unwrap(); let note = call(&service, |reply| Request::Comments(info.id, info.revision, reply)).unwrap().notes[0].id.clone(); assert!(crate::comments::number(&note).unwrap() > crate::comments::number(&first).unwrap()); assert!(!info.can_redo); assert!(call(&service, |reply| Request::Comment(info.id, info.revision, CommentMutation::DeleteHighlight(note), reply)).is_err());
+        info = call(&service, |reply| Request::Comment(info.id, info.revision, CommentMutation::CreateHighlight(0, rect, None), reply)).unwrap(); let highlight = call(&service, |reply| Request::Annotations(info.id, info.revision, reply)).unwrap().annotations.into_iter().find(|value| value.kind == crate::comments::AnnotationKind::Highlight).unwrap().id; info = call(&service, |reply| Request::Comment(info.id, info.revision, CommentMutation::DeleteHighlight(highlight), reply)).unwrap(); assert_eq!(call(&service, |reply| Request::Annotations(info.id, info.revision, reply)).unwrap().annotations.len(), 1);
+        call(&service, |reply| Request::Close(info.id, reply)).unwrap(); assert!(call(&service, |reply| Request::Annotations(info.id, info.revision, reply)).is_err()); assert!(call(&service, |reply| Request::Comment(info.id, info.revision, CommentMutation::CreateHighlight(0, rect, None), reply)).is_err()); assert_eq!(std::fs::read(path).unwrap(), source);
     }
     #[test]
     fn comments_rotations_inherited_crop_pixels_unicode_reopen_and_print_snapshots_agree() {
@@ -924,6 +1047,7 @@ mod tests {
             let path = folder.path().join(format!("protected-notes-{feature}.pdf")); pdf.save(&path).unwrap(); let source = std::fs::read(&path).unwrap(); let info = call(&service, |reply| Request::Open(path.clone(), reply)).unwrap();
             let list = call(&service, |reply| Request::Comments(info.id, 0, reply)).unwrap(); assert_eq!(list.status, "unsupported"); assert!(list.reason.is_some()); assert!(list.notes.is_empty());
             assert!(call(&service, |reply| Request::Comment(info.id, 0, CommentMutation::Create(0, CropRect { x: 0.1, y: 0.1, width: 0.1, height: 0.1 }, "Blocked".into()), reply)).is_err());
+            assert_eq!(call(&service, |reply| Request::Annotations(info.id, 0, reply)).unwrap().status, "unsupported"); assert!(call(&service, |reply| Request::Comment(info.id, 0, CommentMutation::CreateHighlight(0, CropRect { x: 0.1, y: 0.1, width: 0.1, height: 0.1 }, None), reply)).is_err());
             call(&service, |reply| Request::Close(info.id, reply)).unwrap(); assert_eq!(std::fs::read(path).unwrap(), source);
         }
     }
@@ -2353,6 +2477,7 @@ mod tests {
             let (tx, rx) = oneshot::channel(); service.sender.send(Request::BeginPrint(info.id, 0, tx)).unwrap(); assert!(rx.blocking_recv().unwrap().is_err(), "Encrypted v{version}-{kind} must not print");
             let comments = call(&service, |reply| Request::Comments(info.id, 0, reply)).unwrap(); assert_eq!(comments.status, "unsupported"); assert!(comments.notes.is_empty());
             assert!(call(&service, |reply| Request::Comment(info.id, 0, CommentMutation::Create(0, CropRect { x: 0.1, y: 0.1, width: 0.1, height: 0.1 }, "Blocked encrypted note".into()), reply)).is_err(), "Encrypted v{version}-{kind} must not create notes");
+            assert_eq!(call(&service, |reply| Request::Annotations(info.id, 0, reply)).unwrap().status, "unsupported"); assert!(call(&service, |reply| Request::Comment(info.id, 0, CommentMutation::CreateHighlight(0, CropRect { x: 0.1, y: 0.1, width: 0.1, height: 0.1 }, None), reply)).is_err(), "Encrypted v{version}-{kind} must not create highlights");
             for page in 0..info.pages.len() {
                 let (tx, rx) = oneshot::channel(); service.sender.send(Request::Render(info.id, page as u16, 100, tx)).unwrap(); assert!(!rx.blocking_recv().unwrap().unwrap().is_empty(), "v{version}-{kind} page {page}");
             }

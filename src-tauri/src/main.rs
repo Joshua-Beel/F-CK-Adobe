@@ -50,6 +50,14 @@ async fn document_properties(service: State<'_, PdfService>, id: u64, revision: 
 #[tauri::command]
 async fn document_comments(service: State<'_, PdfService>, id: u64, revision: u64) -> Result<comments::CommentList, String> { service.comments(id, revision).await }
 #[tauri::command]
+async fn document_annotations(service: State<'_, PdfService>, id: u64, revision: u64) -> Result<comments::AnnotationList, String> { service.annotations(id, revision).await }
+#[tauri::command]
+async fn create_highlight(service: State<'_, PdfService>, id: u64, revision: u64, page: u16, rect: service::CropRect, contents: Option<String>) -> Result<DocumentInfo, String> { service.create_highlight(id, revision, page, rect, contents).await }
+#[tauri::command]
+async fn update_highlight(service: State<'_, PdfService>, id: u64, revision: u64, annotation_id: String, contents: Option<String>) -> Result<DocumentInfo, String> { service.update_highlight(id, revision, annotation_id, contents).await }
+#[tauri::command]
+async fn delete_highlight(service: State<'_, PdfService>, id: u64, revision: u64, annotation_id: String) -> Result<DocumentInfo, String> { service.delete_highlight(id, revision, annotation_id).await }
+#[tauri::command]
 async fn create_comment(service: State<'_, PdfService>, id: u64, revision: u64, page: u16, rect: service::CropRect, contents: String) -> Result<DocumentInfo, String> { service.create_comment(id, revision, page, rect, contents).await }
 #[tauri::command]
 async fn update_comment(service: State<'_, PdfService>, id: u64, revision: u64, note_id: String, contents: String) -> Result<DocumentInfo, String> { service.update_comment(id, revision, note_id, contents).await }
@@ -115,6 +123,6 @@ fn main() {
         app.manage(PdfService::start(library));
         app.manage(print_commands::PrintJobs::default());
         Ok(())
-    }).invoke_handler(tauri::generate_handler![open_document, reopen_document, open_example, render_page, close_document, edit_pages, crop_page, create_comment, update_comment, delete_comment, document_comments, save_copy, split_document, combine_documents, insert_pages_copy, replace_pages_copy, page_text, page_text_geometry, document_bookmarks, document_properties, dependency_notices, unlock_document, cancel_password_request, print_commands::print_document, print_commands::cancel_print])
+    }).invoke_handler(tauri::generate_handler![open_document, reopen_document, open_example, render_page, close_document, edit_pages, crop_page, create_comment, update_comment, delete_comment, document_comments, document_annotations, create_highlight, update_highlight, delete_highlight, save_copy, split_document, combine_documents, insert_pages_copy, replace_pages_copy, page_text, page_text_geometry, document_bookmarks, document_properties, dependency_notices, unlock_document, cancel_password_request, print_commands::print_document, print_commands::cancel_print])
       .run(tauri::generate_context!()).expect("Desktop application failed");
 }

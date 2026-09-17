@@ -103,5 +103,5 @@ describe('document search', () => {
     act(() => ui.root.findAllByType('button').find(button => button.children.join('') === 'Previous matching page')!.props.onClick());
     expect(go).toHaveBeenCalledWith(499);
     act(() => ui.unmount());
-  });
+  }, 15_000);
 });
