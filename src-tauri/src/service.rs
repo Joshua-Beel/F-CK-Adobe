@@ -34,12 +34,33 @@ impl Drop for PrintSnapshotInfo {
 }
 pub struct PrintBitmap { pub width: u32, pub height: u32, pub bgra: Vec<u8> }
 type Reply<T> = oneshot::Sender<Result<T, String>>;
+enum UnclaimedReply { Document(u64), Password(u64) }
+struct ReplyLease<T> { value: Option<T>, cleanup: Option<UnclaimedReply>, sender: mpsc::Sender<Request> }
+impl<T> ReplyLease<T> {
+    fn new(value: T, cleanup: UnclaimedReply, sender: mpsc::Sender<Request>) -> Self { Self { value: Some(value), cleanup: Some(cleanup), sender } }
+    fn accept(mut self) -> T { self.cleanup = None; self.value.take().expect("A reply lease owns its value until acceptance") }
+}
+impl<T> std::ops::Deref for ReplyLease<T> {
+    type Target = T;
+    fn deref(&self) -> &T { self.value.as_ref().expect("An unaccepted reply lease owns its value") }
+}
+impl<T> Drop for ReplyLease<T> {
+    fn drop(&mut self) {
+        if let Some(cleanup) = self.cleanup.take() {
+            let (reply, _) = oneshot::channel();
+            let request = match cleanup { UnclaimedReply::Document(id) => Request::Close(id, reply), UnclaimedReply::Password(id) => Request::CancelPassword(id, reply) };
+            let _ = self.sender.send(request);
+        }
+    }
+}
 enum Request {
     #[cfg(test)]
     OpenDocumentsForPath(PathBuf, Reply<Vec<u64>>),
-    Open(PathBuf, Reply<DocumentInfo>),
-    BeginOpen(PathBuf, Reply<OpenResult>),
-    Unlock(u64, String, Reply<OpenResult>),
+    #[cfg(test)]
+    PasswordRequestsForPath(PathBuf, Reply<Vec<u64>>),
+    Open(PathBuf, Reply<ReplyLease<DocumentInfo>>),
+    BeginOpen(PathBuf, Reply<ReplyLease<OpenResult>>),
+    Unlock(u64, String, Reply<ReplyLease<OpenResult>>),
     CancelPassword(u64, Reply<()>),
     BeginPrint(u64, u64, Reply<PrintSnapshotInfo>),
     PrintRender(u64, usize, u32, u32, Reply<PrintBitmap>),
@@ -55,7 +76,7 @@ enum Request {
     Save(u64, Option<Vec<usize>>, PathBuf, Reply<SavedCopy>),
     Split(u64, u64, usize, PathBuf, Reply<crate::split::SplitOutput>),
     CheckCombine(CombineSource, CombineSource, Reply<()>),
-    Combine(CombineSource, CombineSource, PathBuf, Reply<SavedCopy>),
+    Combine(CombineSource, CombineSource, PathBuf, Reply<ReplyLease<SavedCopy>>),
 }
 #[derive(Clone)]
 pub struct PdfService { sender: mpsc::Sender<Request> }
@@ -83,7 +104,7 @@ impl PdfService {
     }
     fn start_worker(library: PathBuf) -> Self {
         let (sender, receiver) = mpsc::channel();
-        let snapshot_cleanup = sender.clone();
+        let resource_cleanup = sender.clone();
         std::thread::Builder::new().name("pdf-worker".into()).spawn(move || {
             let pdfium = Pdfium::bind_to_library(library).map(Pdfium::new).map_err(|e| format!("PDF engine could not start: {e}"));
             let mut documents = HashMap::new();
@@ -111,6 +132,11 @@ impl PdfService {
                         let ids = sessions.iter().filter_map(|(id, (_, info))| (PathBuf::from(&info.path) == path).then_some(*id)).collect();
                         let _ = reply.send(Ok(ids));
                     }
+                    #[cfg(test)]
+                    Request::PasswordRequestsForPath(path, reply) => {
+                        let ids = pending.iter().filter_map(|(id, source)| (*source == path).then_some(*id)).collect();
+                        let _ = reply.send(Ok(ids));
+                    }
                     Request::BeginPrint(id, revision, reply) => {
                         if reply.is_closed() { continue; }
                         let result = (|| {
@@ -121,7 +147,7 @@ impl PdfService {
                             if !matches!(document.permissions().security_handler_revision(), Ok(PdfSecurityHandlerRevision::Unprotected)) { return Err("Printing encrypted or restricted PDFs is not supported in this build.".into()); }
                             let token = next_print; next_print += 1;
                             print_snapshots.insert(token, (document.clone(), session.plan.clone()));
-                            Ok(PrintSnapshotInfo { token, pages: session.plan.len(), name: info.name.clone(), cleanup: snapshot_cleanup.clone() })
+                            Ok(PrintSnapshotInfo { token, pages: session.plan.len(), name: info.name.clone(), cleanup: resource_cleanup.clone() })
                         })();
                         if let Err(Ok(snapshot)) = reply.send(result) { print_snapshots.remove(&snapshot.token); }
                     }
@@ -163,9 +189,13 @@ impl PdfService {
                             Ok(OpenResult::Opened { document: info })
                         })();
                         if !matches!(&result, Ok(OpenResult::PasswordRequired { .. })) { pending.remove(&request_id); }
+                        let result = result.map(|value| {
+                            let cleanup = match &value { OpenResult::Opened { document } => UnclaimedReply::Document(document.id), OpenResult::PasswordRequired { request_id, .. } => UnclaimedReply::Password(*request_id) };
+                            ReplyLease::new(value, cleanup, resource_cleanup.clone())
+                        });
                         if let Err(result) = reply.send(result) {
                             pending.remove(&request_id);
-                            if let Ok(OpenResult::Opened { document }) = result { documents.remove(&document.id); sessions.remove(&document.id); }
+                            if let Ok(value) = &result { if let OpenResult::Opened { document } = &**value { documents.remove(&document.id); sessions.remove(&document.id); } }
                         }
                     }
                     Request::Open(path, reply) => {
@@ -180,6 +210,7 @@ impl PdfService {
                             sessions.insert(id, (EditSession::new(bytes, info.pages.len()), info.clone()));
                             documents.insert(id, std::rc::Rc::new(document)); Ok(info)
                         })();
+                        let result = result.map(|info| { let cleanup = UnclaimedReply::Document(info.id); ReplyLease::new(info, cleanup, resource_cleanup.clone()) });
                         if let Err(Ok(info)) = reply.send(result) { documents.remove(&info.id); sessions.remove(&info.id); }
                     },
                     Request::Render(id, page, width, reply) => {
@@ -345,6 +376,7 @@ impl PdfService {
                             documents.insert(id, std::rc::Rc::new(document));
                             Ok(SavedCopy { path: path.to_string_lossy().into_owned(), document: info })
                         })();
+                        let result = result.map(|saved| { let cleanup = UnclaimedReply::Document(saved.document.id); ReplyLease::new(saved, cleanup, resource_cleanup.clone()) });
                         if let Err(Ok(saved)) = reply.send(result) { documents.remove(&saved.document.id); sessions.remove(&saved.document.id); }
                     }
                     Request::Save(id, pages, path, reply) => {
@@ -369,10 +401,10 @@ impl PdfService {
         Self { sender }
     }
     pub async fn open(&self, path: PathBuf) -> Result<DocumentInfo, String> {
-        let (tx, rx) = oneshot::channel(); self.sender.send(Request::Open(path, tx)).map_err(|e| e.to_string())?; rx.await.map_err(|e| e.to_string())?
+        let (tx, rx) = oneshot::channel(); self.sender.send(Request::Open(path, tx)).map_err(|e| e.to_string())?; rx.await.map_err(|e| e.to_string())?.map(ReplyLease::accept)
     }
     pub async fn begin_open(&self, path: PathBuf) -> Result<OpenResult, String> {
-        let (tx, rx) = oneshot::channel(); self.sender.send(Request::BeginOpen(path, tx)).map_err(|e| e.to_string())?; rx.await.map_err(|e| e.to_string())?
+        let (tx, rx) = oneshot::channel(); self.sender.send(Request::BeginOpen(path, tx)).map_err(|e| e.to_string())?; rx.await.map_err(|e| e.to_string())?.map(ReplyLease::accept)
     }
     pub async fn begin_print(&self, id: u64, revision: u64) -> Result<PrintSnapshotInfo, String> {
         let (tx, rx) = oneshot::channel(); self.sender.send(Request::BeginPrint(id, revision, tx)).map_err(|error| error.to_string())?; rx.await.map_err(|error| error.to_string())?
@@ -384,7 +416,7 @@ impl PdfService {
         let (tx, rx) = oneshot::channel(); self.sender.send(Request::PrintRender(token, page, max_width, max_height, tx)).map_err(|error| error.to_string())?; rx.blocking_recv().map_err(|error| error.to_string())?
     }
     pub async fn unlock(&self, id: u64, password: String) -> Result<OpenResult, String> {
-        let (tx, rx) = oneshot::channel(); self.sender.send(Request::Unlock(id, password, tx)).map_err(|e| e.to_string())?; rx.await.map_err(|e| e.to_string())?
+        let (tx, rx) = oneshot::channel(); self.sender.send(Request::Unlock(id, password, tx)).map_err(|e| e.to_string())?; rx.await.map_err(|e| e.to_string())?.map(ReplyLease::accept)
     }
     pub async fn cancel_password(&self, id: u64) -> Result<(), String> {
         let (tx, rx) = oneshot::channel(); self.sender.send(Request::CancelPassword(id, tx)).map_err(|e| e.to_string())?; rx.await.map_err(|e| e.to_string())?
@@ -423,7 +455,7 @@ impl PdfService {
         let (tx, rx) = oneshot::channel(); self.sender.send(Request::CheckCombine(first, second, tx)).map_err(|error| error.to_string())?; rx.await.map_err(|error| error.to_string())?
     }
     pub async fn combine(&self, first: CombineSource, second: CombineSource, path: PathBuf) -> Result<SavedCopy, String> {
-        let (tx, rx) = oneshot::channel(); self.sender.send(Request::Combine(first, second, path, tx)).map_err(|error| error.to_string())?; rx.await.map_err(|error| error.to_string())?
+        let (tx, rx) = oneshot::channel(); self.sender.send(Request::Combine(first, second, path, tx)).map_err(|error| error.to_string())?; rx.await.map_err(|error| error.to_string())?.map(ReplyLease::accept)
     }
 }
 
@@ -515,11 +547,21 @@ mod tests {
     use super::*;
     // Print admission is a process-wide four-job resource; isolate only its tests, not the PDF worker or the full suite.
     static PRINT_TESTS: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    static PASSWORD_TESTS: std::sync::Mutex<()> = std::sync::Mutex::new(());
     fn print_test_lock() -> std::sync::MutexGuard<'static, ()> {
         PRINT_TESTS.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
     }
-    fn call<T>(service: &PdfService, request: impl FnOnce(Reply<T>) -> Request) -> Result<T, String> {
-        let (tx, rx) = oneshot::channel(); service.sender.send(request(tx)).unwrap(); rx.blocking_recv().unwrap()
+    fn password_test_lock() -> std::sync::MutexGuard<'static, ()> {
+        PASSWORD_TESTS.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+    trait TestReplyValue { type Accepted; fn accept(self) -> Self::Accepted; }
+    impl<T> TestReplyValue for ReplyLease<T> { type Accepted = T; fn accept(self) -> T { ReplyLease::accept(self) } }
+    macro_rules! accepted_reply_values {
+        ($($value:ty),* $(,)?) => { $(impl TestReplyValue for $value { type Accepted = Self; fn accept(self) -> Self { self } })* };
+    }
+    accepted_reply_values!((), Vec<u8>, Vec<u64>, String, DocumentInfo, SavedCopy, OpenResult, PrintSnapshotInfo, PrintBitmap, BookmarkList, crate::document_properties::DocumentProperties, crate::text_geometry::PageTextGeometry, crate::split::SplitOutput);
+    fn call<T: TestReplyValue>(service: &PdfService, request: impl FnOnce(Reply<T>) -> Request) -> Result<T::Accepted, String> {
+        let (tx, rx) = oneshot::channel(); service.sender.send(request(tx)).unwrap(); rx.blocking_recv().unwrap().map(TestReplyValue::accept)
     }
     struct TestPrintSnapshot { service: PdfService, info: PrintSnapshotInfo }
     impl std::ops::Deref for TestPrintSnapshot {
@@ -587,6 +629,147 @@ mod tests {
         }
         assert_eq!(std::fs::read(&path).unwrap(), source);
         assert!(retained.is_empty(), "A canceled Open retained {} unreachable document(s)", retained.len());
+    }
+    struct UnreadReplyCleanup { service: PdfService, paths: Vec<PathBuf> }
+    impl Drop for UnreadReplyCleanup {
+        fn drop(&mut self) {
+            for path in &self.paths {
+                let (tx, rx) = oneshot::channel();
+                if self.service.sender.send(Request::OpenDocumentsForPath(path.clone(), tx)).is_ok() {
+                    if let Ok(Ok(ids)) = rx.blocking_recv() {
+                        for id in ids {
+                            let (tx, rx) = oneshot::channel();
+                            if self.service.sender.send(Request::Close(id, tx)).is_ok() { let _ = rx.blocking_recv(); }
+                        }
+                    }
+                }
+                let (tx, rx) = oneshot::channel();
+                if self.service.sender.send(Request::PasswordRequestsForPath(path.clone(), tx)).is_ok() {
+                    if let Ok(Ok(ids)) = rx.blocking_recv() {
+                        for id in ids {
+                            let (tx, rx) = oneshot::channel();
+                            if self.service.sender.send(Request::CancelPassword(id, tx)).is_ok() { let _ = rx.blocking_recv(); }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    fn unread_document_reply<T>(service: &PdfService, path: &PathBuf, request: impl FnOnce(Reply<T>) -> Request) -> Vec<u64> {
+        let (tx, rx) = oneshot::channel(); service.sender.send(request(tx)).unwrap();
+        let registered = call(service, |reply| Request::OpenDocumentsForPath(path.clone(), reply)).unwrap();
+        assert_eq!(registered.len(), 1, "The worker barrier must observe the successfully registered document");
+        assert!(!rx.is_empty(), "The result must already be sent before its unread receiver is dropped");
+        drop(rx);
+        call(service, |reply| Request::OpenDocumentsForPath(path.clone(), reply)).unwrap()
+    }
+    fn password_source(root: &PathBuf) -> Vec<u8> {
+        let mut pdf = lopdf::Document::load(root.join("resources/welcome.pdf")).unwrap();
+        pdf.trailer.set("ID", vec![lopdf::Object::string_literal("unread-password-fixture"), lopdf::Object::string_literal("unread-password-fixture")]);
+        let encryption = lopdf::EncryptionVersion::V2 { document: &pdf, owner_password: "owner password", user_password: "test password", key_length: 128, permissions: lopdf::Permissions::all() };
+        let state = lopdf::EncryptionState::try_from(encryption).unwrap(); pdf.encrypt(&state).unwrap();
+        let mut bytes = Vec::new(); pdf.save_to(&mut bytes).unwrap(); bytes
+    }
+    #[test]
+    fn unread_document_open_and_begin_open_success_replies_release_registered_sessions() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")); let service = PdfService::start(root.join("resources/pdfium/bin/pdfium.dll")); let folder = tempfile::tempdir().unwrap();
+        let source = std::fs::read(root.join("resources/welcome.pdf")).unwrap();
+        let mut cleanup = UnreadReplyCleanup { service: service.clone(), paths: Vec::new() }; let mut leaks = Vec::new();
+        for begin_open in [false, true] {
+            let path = folder.path().join(if begin_open { "begin-open.pdf" } else { "open.pdf" }); std::fs::write(&path, &source).unwrap(); cleanup.paths.push(path.clone());
+            let retained = if begin_open { unread_document_reply(&service, &path, |reply| Request::BeginOpen(path.clone(), reply)) }
+                else { unread_document_reply(&service, &path, |reply| Request::Open(path.clone(), reply)) };
+            leaks.push((if begin_open { "BeginOpen" } else { "Open" }, retained.len()));
+            assert_eq!(std::fs::read(&path).unwrap(), source);
+        }
+        assert!(leaks.iter().all(|(_, count)| *count == 0), "Successfully sent but unread document replies retained sessions: {leaks:?}");
+    }
+    #[test]
+    fn unread_document_unlock_success_reply_releases_registered_session() {
+        let _password_lock = password_test_lock();
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")); let service = PdfService::start(root.join("resources/pdfium/bin/pdfium.dll")); let folder = tempfile::tempdir().unwrap();
+        let path = folder.path().join("unlock.pdf"); let source = password_source(&root); std::fs::write(&path, &source).unwrap();
+        let _cleanup = UnreadReplyCleanup { service: service.clone(), paths: vec![path.clone()] };
+        let challenge = call(&service, |reply| Request::BeginOpen(path.clone(), reply)).unwrap();
+        let request_id = match challenge { OpenResult::PasswordRequired { request_id, .. } => request_id, _ => panic!("Expected password challenge") };
+        let retained = unread_document_reply(&service, &path, |reply| Request::Unlock(request_id, "test password".into(), reply));
+        assert_eq!(std::fs::read(&path).unwrap(), source);
+        assert!(retained.is_empty(), "Successfully sent but unread Unlock retained {} session(s)", retained.len());
+    }
+    #[test]
+    fn unread_document_combine_success_reply_releases_session_and_preserves_published_pdf() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")); let service = PdfService::start(root.join("resources/pdfium/bin/pdfium.dll")); let folder = tempfile::tempdir().unwrap();
+        let source = std::fs::read(root.join("resources/welcome.pdf")).unwrap(); let first_path = folder.path().join("first.pdf"); let second_path = folder.path().join("second.pdf"); let output = folder.path().join("combined.pdf");
+        std::fs::write(&first_path, &source).unwrap(); std::fs::write(&second_path, &source).unwrap();
+        let _cleanup = UnreadReplyCleanup { service: service.clone(), paths: vec![first_path.clone(), second_path.clone(), output.clone()] };
+        let first = call(&service, |reply| Request::Open(first_path.clone(), reply)).unwrap(); let second = call(&service, |reply| Request::Open(second_path.clone(), reply)).unwrap();
+        let retained = unread_document_reply(&service, &output, |reply| Request::Combine(combine_source(&first), combine_source(&second), output.clone(), reply));
+        assert_eq!(lopdf::Document::load(&output).unwrap().get_pages().len(), 12);
+        let reopened = call(&service, |reply| Request::Open(output.clone(), reply)).unwrap(); assert_eq!(reopened.pages.len(), 12);
+        call(&service, |reply| Request::Close(reopened.id, reply)).unwrap();
+        assert_eq!(std::fs::read(&first_path).unwrap(), source); assert_eq!(std::fs::read(&second_path).unwrap(), source);
+        for source in [&first, &second] { assert_eq!(call(&service, |reply| Request::Properties(source.id, 0, reply)).unwrap().page_count, 6); }
+        assert!(retained.is_empty(), "Successfully sent but unread Combine retained {} session(s)", retained.len());
+    }
+    #[test]
+    fn unread_password_required_reply_releases_pending_challenge() {
+        let _password_lock = password_test_lock();
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")); let service = PdfService::start(root.join("resources/pdfium/bin/pdfium.dll")); let folder = tempfile::tempdir().unwrap();
+        let path = folder.path().join("password.pdf"); let source = password_source(&root); std::fs::write(&path, &source).unwrap();
+        let _cleanup = UnreadReplyCleanup { service: service.clone(), paths: vec![path.clone()] };
+        let (tx, rx) = oneshot::channel(); service.sender.send(Request::BeginOpen(path.clone(), tx)).unwrap();
+        let pending = call(&service, |reply| Request::PasswordRequestsForPath(path.clone(), reply)).unwrap(); assert_eq!(pending.len(), 1);
+        assert!(!rx.is_empty(), "The challenge reply must be sent before its unread receiver is dropped"); drop(rx);
+        let retained = call(&service, |reply| Request::PasswordRequestsForPath(path.clone(), reply)).unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), source);
+        assert!(retained.is_empty(), "Successfully sent but unread PasswordRequired retained {} pending token(s)", retained.len());
+    }
+    #[test]
+    fn accepted_document_replies_and_password_challenges_remain_usable_after_dto_drop() {
+        let _password_lock = password_test_lock();
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")); let service = PdfService::start(root.join("resources/pdfium/bin/pdfium.dll")); let folder = tempfile::tempdir().unwrap();
+        let first_path = folder.path().join("first.pdf"); let second_path = folder.path().join("second.pdf"); let password_path = folder.path().join("password.pdf"); let output = folder.path().join("combined.pdf");
+        let source = std::fs::read(root.join("resources/welcome.pdf")).unwrap(); std::fs::write(&first_path, &source).unwrap(); std::fs::write(&second_path, &source).unwrap(); std::fs::write(&password_path, password_source(&root)).unwrap();
+        let _cleanup = UnreadReplyCleanup { service: service.clone(), paths: vec![first_path.clone(), second_path.clone(), password_path.clone(), output.clone()] };
+        let first = tauri::async_runtime::block_on(service.open(first_path)).unwrap(); let first_source = combine_source(&first); drop(first);
+        let second = tauri::async_runtime::block_on(service.begin_open(second_path)).unwrap();
+        let second_source = match &second { OpenResult::Opened { document } => combine_source(document), _ => panic!("Ordinary PDF must open") }; drop(second);
+        for id in [first_source.id, second_source.id] { assert_eq!(call(&service, |reply| Request::Properties(id, 0, reply)).unwrap().page_count, 6); }
+        let challenge = tauri::async_runtime::block_on(service.begin_open(password_path.clone())).unwrap();
+        let request_id = match &challenge { OpenResult::PasswordRequired { request_id, .. } => *request_id, _ => panic!("Expected password challenge") }; drop(challenge);
+        let wrong = tauri::async_runtime::block_on(service.unlock(request_id, "wrong".into())).unwrap(); assert!(matches!(wrong, OpenResult::PasswordRequired { incorrect: true, .. })); drop(wrong);
+        let opened = tauri::async_runtime::block_on(service.unlock(request_id, "test password".into())).unwrap();
+        let unlocked_id = match &opened { OpenResult::Opened { document } => document.id, _ => panic!("Correct password must open") }; drop(opened);
+        assert_eq!(call(&service, |reply| Request::Properties(unlocked_id, 0, reply)).unwrap().page_count, 6);
+        let text = call(&service, |reply| Request::Text(unlocked_id, 0, 0, reply)).unwrap(); assert!(text.contains("Page 1 of 6"));
+        let challenge = tauri::async_runtime::block_on(service.begin_open(password_path.clone())).unwrap();
+        let canceled = match &challenge { OpenResult::PasswordRequired { request_id, .. } => *request_id, _ => panic!("Expected password challenge") }; drop(challenge);
+        tauri::async_runtime::block_on(service.cancel_password(canceled)).unwrap(); assert!(tauri::async_runtime::block_on(service.unlock(canceled, "test password".into())).is_err());
+        let combined = tauri::async_runtime::block_on(service.combine(first_source, second_source, output.clone())).unwrap(); let combined_id = combined.document.id;
+        assert!(!combined.document.dirty && !combined.document.can_undo && !combined.document.can_redo); drop(combined);
+        assert_eq!(call(&service, |reply| Request::Properties(combined_id, 0, reply)).unwrap().page_count, 12);
+        assert!(call(&service, |reply| Request::Text(combined_id, 11, 0, reply)).unwrap().contains("Page 6 of 6"));
+        assert_eq!(lopdf::Document::load(output).unwrap().get_pages().len(), 12);
+    }
+    #[test]
+    fn unread_preclosed_open_begin_unlock_and_combine_replies_never_retain_resources_or_publish() {
+        let _password_lock = password_test_lock();
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")); let service = PdfService::start(root.join("resources/pdfium/bin/pdfium.dll")); let folder = tempfile::tempdir().unwrap();
+        let path = folder.path().join("ordinary.pdf"); let password_path = folder.path().join("password.pdf"); let output = folder.path().join("must-not-publish.pdf");
+        let source = std::fs::read(root.join("resources/welcome.pdf")).unwrap(); let encrypted = password_source(&root); std::fs::write(&path, &source).unwrap(); std::fs::write(&password_path, &encrypted).unwrap();
+        let _cleanup = UnreadReplyCleanup { service: service.clone(), paths: vec![path.clone(), password_path.clone(), output.clone()] };
+        let (tx, rx) = oneshot::channel(); drop(rx); service.sender.send(Request::Open(path.clone(), tx)).unwrap();
+        let (tx, rx) = oneshot::channel(); drop(rx); service.sender.send(Request::BeginOpen(password_path.clone(), tx)).unwrap();
+        assert!(call(&service, |reply| Request::OpenDocumentsForPath(path.clone(), reply)).unwrap().is_empty());
+        assert!(call(&service, |reply| Request::PasswordRequestsForPath(password_path.clone(), reply)).unwrap().is_empty());
+        let challenge = call(&service, |reply| Request::BeginOpen(password_path.clone(), reply)).unwrap(); let request_id = match challenge { OpenResult::PasswordRequired { request_id, .. } => request_id, _ => panic!("Expected password challenge") };
+        let (tx, rx) = oneshot::channel(); drop(rx); service.sender.send(Request::Unlock(request_id, "test password".into(), tx)).unwrap();
+        assert!(call(&service, |reply| Request::PasswordRequestsForPath(password_path.clone(), reply)).unwrap().is_empty());
+        assert!(call(&service, |reply| Request::OpenDocumentsForPath(password_path.clone(), reply)).unwrap().is_empty());
+        let first = call(&service, |reply| Request::Open(path.clone(), reply)).unwrap(); let second = call(&service, |reply| Request::Open(path.clone(), reply)).unwrap();
+        let (tx, rx) = oneshot::channel(); drop(rx); service.sender.send(Request::Combine(combine_source(&first), combine_source(&second), output.clone(), tx)).unwrap();
+        assert!(call(&service, |reply| Request::OpenDocumentsForPath(output.clone(), reply)).unwrap().is_empty()); assert!(!output.exists());
+        assert_eq!(std::fs::read(path).unwrap(), source); assert_eq!(std::fs::read(password_path).unwrap(), encrypted);
     }
     #[test]
     fn print_snapshot_lease_survives_thread_handoff_source_close_and_releases_on_completion_or_unwind() {
@@ -1294,6 +1477,7 @@ mod tests {
     #[test]
     fn encrypted_open_retries_cancels_and_keeps_edits_blocked() {
         let _print_lock = print_test_lock();
+        let _password_lock = password_test_lock();
         use lopdf::encryption::crypt_filters::{Aes128CryptFilter, Aes256CryptFilter, CryptFilter};
         use std::{collections::BTreeMap, sync::Arc};
         let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -1324,20 +1508,20 @@ mod tests {
             pdf.save(&path).unwrap();
             let source = std::fs::read(&path).unwrap();
             let (tx, rx) = oneshot::channel(); service.sender.send(Request::BeginOpen(path.clone(), tx)).unwrap();
-            let result = rx.blocking_recv().unwrap().unwrap();
+            let result = rx.blocking_recv().unwrap().unwrap().accept();
             let info = if user_password.is_empty() {
                 match result { OpenResult::Opened { document } => document, _ => panic!("Empty password should open") }
             } else {
                 let request_id = match result { OpenResult::PasswordRequired { request_id, incorrect, .. } => { assert!(!incorrect); request_id }, _ => panic!("Expected password challenge") };
                 for wrong in ["wrong", ""] {
                     let (tx, rx) = oneshot::channel(); service.sender.send(Request::Unlock(request_id, wrong.into(), tx)).unwrap();
-                    assert!(matches!(rx.blocking_recv().unwrap().unwrap(), OpenResult::PasswordRequired { .. }));
+                    assert!(matches!(rx.blocking_recv().unwrap().unwrap().accept(), OpenResult::PasswordRequired { .. }));
                 }
                 let (tx, rx) = oneshot::channel(); service.sender.send(Request::Unlock(request_id, user_password.into(), tx)).unwrap();
-                let opened = match rx.blocking_recv().unwrap().unwrap() { OpenResult::Opened { document } => document, _ => panic!("Correct password failed") };
+                let opened = match rx.blocking_recv().unwrap().unwrap().accept() { OpenResult::Opened { document } => document, _ => panic!("Correct password failed") };
                 let (tx, rx) = oneshot::channel(); service.sender.send(Request::Unlock(request_id, user_password.into(), tx)).unwrap(); assert!(rx.blocking_recv().unwrap().is_err());
                 let (tx, rx) = oneshot::channel(); service.sender.send(Request::BeginOpen(path.clone(), tx)).unwrap();
-                let cancelled = match rx.blocking_recv().unwrap().unwrap() { OpenResult::PasswordRequired { request_id, .. } => request_id, _ => panic!("Expected challenge") };
+                let cancelled = match rx.blocking_recv().unwrap().unwrap().accept() { OpenResult::PasswordRequired { request_id, .. } => request_id, _ => panic!("Expected challenge") };
                 let (tx, rx) = oneshot::channel(); service.sender.send(Request::CancelPassword(cancelled, tx)).unwrap(); rx.blocking_recv().unwrap().unwrap();
                 let (tx, rx) = oneshot::channel(); service.sender.send(Request::Unlock(cancelled, user_password.into(), tx)).unwrap(); assert!(rx.blocking_recv().unwrap().is_err());
                 opened

@@ -14,4 +14,6 @@ The implementation uses a native Windows print dialog and PDFium raster output, 
 
 Automated coverage includes snapshot stability through edits/closure, unread-reply capacity release, spool-thread handoff, normal completion and panic cleanup, order/rotation, all/current/disjoint page selection, BGRA color channels and white background, allocation limits, asymmetric printer DPI, early cancellation, resource-reservation lifetime, UI retry and late cancellation replies. GDI spooling itself is not mocked end to end. Pending cancellation IDs are bounded to 64 and expire after five minutes if no job reserves them.
 
+The snapshot lease covers the worker-to-service reply handoff. It does not establish that a later Tauri, WebView, or JavaScript recipient received the completed print result.
+
 Still required: inspect Microsoft Print to PDF output, exercise a physical printer, verify mixed-size/orientation output, and induce actual printer/driver errors and cancellation. Desktop automation is currently unreliable, so these native acceptance checks remain blocked.
