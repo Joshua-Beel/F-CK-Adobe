@@ -78,8 +78,9 @@ You'll find it at `src-tauri/target/debug/pdf-workstation.exe`. Keep the `resour
 To run the tests:
 
 ```powershell
+cargo fetch --locked --target x86_64-pc-windows-msvc --manifest-path src-tauri/Cargo.toml
 npm test
-cargo test --manifest-path src-tauri/Cargo.toml
+cargo test --locked --manifest-path src-tauri/Cargo.toml
 ```
 
 To build an installer, see [Releases and signing](docs/releases.md). That guide covers the local signing key, GitHub Actions secrets, and publishing updates.
@@ -94,6 +95,7 @@ For more background, see the [architecture notes](docs/decisions.md), [PDFium do
 
 ## Recent changes
 
+- Updated local test setup to fetch the locked Windows Cargo registry before frontend tests. This supplies the cache used by offline dependency-notice checks while keeping those checks fail-closed.
 - Tagged **v0.2.6** and started [GitHub Actions run 35250878119](https://github.com/Joshua-Beel/Smacrobat/actions/runs/35250878119). Its locked Windows Cargo fetch and full npm tests passed; native Cargo is still running, so no signed artifact, upload, draft release, installation, or update verification is claimed. The immutable [v0.2.5 workflow](https://github.com/Joshua-Beel/Smacrobat/actions/runs/35250005735) stopped during npm tests before native tests, signing, installer creation, asset upload, or release creation. See [release notes](docs/release-notes.md) and [releases and signing](docs/releases.md).
 - Added **Replace pages** in Organize Pages. It creates a new copy by substituting one contiguous target range with every current edited donor page; target Info/XMP metadata is retained even when the full target range is replaced, and both source tabs keep their state. The replacement source gate passed 109 frontend/release tests, 85 native tests with one separately ignored manual probe, the production frontend build, and a standalone Windows debug build. A mocked-IPC browser harness checked the range preview, submitted revisions, and derived output count, not the native save dialog. A prior interrupted native run had no test-result footer; its cause remains unconfirmed and the captured rerun passed. This source feature is newer than the 0.2.4 draft; see [review findings](docs/review-findings.md) and the [Organize Pages guide](docs/tools/organize-pages.md).
 - Added **Insert pages** in Organize Pages. It creates a new copy by placing all current edited donor pages at a chosen boundary in a distinct target PDF; target Info/XMP metadata is retained and both source tabs keep their state. The source gate passed 102 frontend/release tests, 79 native tests, the production frontend build, and a standalone Windows debug build. Native coverage checks ordered fixture pairs, output pages, rotated/cropped content, source history, and publication guards; a mocked-IPC browser harness checked the boundary preview and submitted revisions, not the Windows save dialog. See [review findings](docs/review-findings.md) and the [Organize Pages guide](docs/tools/organize-pages.md).
