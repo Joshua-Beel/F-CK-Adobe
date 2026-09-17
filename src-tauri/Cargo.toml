@@ -1,0 +1,19 @@
+[package]
+name = "pdf-workstation"
+version = "0.1.0"
+edition = "2021"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+serde = { version = "1", features = ["derive"] }
+pdfium-render = "=0.9.4"
+image = { version = "0.25", default-features = false, features = ["png"] }
+rfd = "0.15"
+tokio = { version = "1", features = ["sync"] }
+
+[profile.release]
+strip = true
+lto = "thin"
