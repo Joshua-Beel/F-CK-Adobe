@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { ArrowDownToLine, ArrowLeft, ArrowRight, CheckSquare, Crop, RotateCcw, RotateCw, Scissors, Trash2, Undo2, Redo2, X } from 'lucide-react';
+import { ArrowDownToLine, ArrowLeft, ArrowRight, CheckSquare, Crop, Files, RotateCcw, RotateCw, Scissors, Trash2, Undo2, Redo2, X } from 'lucide-react';
 import type { SplitOutput } from './bridge';
 import type { DocumentInfo, PageEdit } from './model';
 import { parsePageRange } from './model';
@@ -33,7 +33,7 @@ function Thumbnail({ document, index }: { document: DocumentInfo; index: number 
   return <div ref={element} className={s.thumbnail} style={{ aspectRatio: `${size.width}/${size.height}` }}>{url ? <img src={url} alt={`Page ${index + 1} preview`} draggable={false} /> : <span>{error ? 'Preview unavailable' : 'Loading…'}</span>}</div>;
 }
 
-export default function Organizer({ document, currentPage = 0, busy, edit, save, split, crop, close }: { document: DocumentInfo; currentPage?: number; busy: boolean; edit: (action: PageEdit) => Promise<boolean>; save: (pages?: number[]) => Promise<void>; split: (pagesPerFile: number) => Promise<SplitOutput | null>; crop: (page: number, rect: { x: number; y: number; width: number; height: number }) => Promise<void>; close: () => void }) {
+export default function Organizer({ document, currentPage = 0, busy, edit, save, split, crop, insert = () => {}, close }: { document: DocumentInfo; currentPage?: number; busy: boolean; edit: (action: PageEdit) => Promise<boolean>; save: (pages?: number[]) => Promise<void>; split: (pagesPerFile: number) => Promise<SplitOutput | null>; crop: (page: number, rect: { x: number; y: number; width: number; height: number }) => Promise<void>; insert?: () => void; close: () => void }) {
   const [selected, setSelected] = useState<number[]>(() => [clampPage(currentPage, document.pages.length)]);
   const [range, setRange] = useState(() => String(clampPage(currentPage, document.pages.length) + 1));
   const [destination, setDestination] = useState('');
@@ -90,6 +90,7 @@ export default function Organizer({ document, currentPage = 0, busy, edit, save,
       <button disabled={busy || count !== 1} onClick={() => void moveTo()}>Move</button>
       <button aria-label="Undo page edit" disabled={busy || !document.can_undo} onClick={() => void change({ kind: 'undo' })}><Undo2 size={17} /></button>
       <button aria-label="Redo page edit" disabled={busy || !document.can_redo} onClick={() => void change({ kind: 'redo' })}><Redo2 size={17} /></button>
+      <button disabled={busy} onClick={insert}><Files size={16} /> Insert pages</button>
       <button disabled={busy || count !== 1} onClick={() => setCropOpen(true)}><Crop size={16} /> Crop</button>
       <button disabled={busy} onClick={() => setSplitOpen(true)}><Scissors size={16} /> Split</button>
       <button className={s.save} disabled={busy} onClick={() => void save()}>Save a copy</button>

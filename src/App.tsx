@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { Undo2, Redo2 } from 'lucide-react';
 import { ArrowDownToLine, ArrowUpRight, Bookmark, ChevronDown, ChevronLeft, ChevronRight, ChevronsUpDown, CircleHelp, Combine, File, FileCheck2, FileImage, FileOutput, FilePenLine, FilePlus2, Files, FolderOpen, Hand, Highlighter, Home, LayoutGrid, List, Maximize, Menu, MessageSquare, Minus, MoreHorizontal, MousePointer2, PanelLeftClose, Pencil, Plus, Printer, RotateCw, Save, ScanLine, Search, ShieldCheck, Signature, SlidersHorizontal, Star, Sun, Type, X, ZoomIn, ZoomOut, type LucideIcon } from 'lucide-react';
-import { closeDocument, native, openDocument, reopenDocument, editPages, saveCopy, splitDocument, cropPage, combineDocuments, type OpenResult, type SplitOutput, type SavedCopy } from './bridge';
+import { closeDocument, native, openDocument, reopenDocument, editPages, saveCopy, splitDocument, cropPage, combineDocuments, insertPagesCopy, type OpenResult, type SplitOutput, type SavedCopy } from './bridge';
 import { clampPage, toolGroups, type DocumentInfo, type PageEdit } from './model';
 import Viewer from './Viewer';
 import Organizer from './Organizer';
@@ -16,6 +16,7 @@ import PrintDialog from './PrintDialog';
 import DocumentProperties from './DocumentProperties';
 import DependencyNotices from './DependencyNotices';
 import CombineDialog from './CombineDialog';
+import InsertPagesDialog from './InsertPagesDialog';
 import { readPreferences, savePreferences } from './preferences';
 import { readRecentFiles, saveRecentFiles, rememberFile } from './recentFiles';
 import s from './Workspace.module.css';
@@ -58,6 +59,7 @@ export default function App() {
   const [recentFiles, setRecentFiles] = useState(readRecentFiles);
   const [organizing, setOrganizing] = useState(false);
   const [combineOpen, setCombineOpen] = useState(false);
+  const [insertOpen, setInsertOpen] = useState(false);
   const [pendingClose, setPendingClose] = useState<number | 'window' | null>(null);
   const closingDocument = useRef<number | null>(null);
   useEffect(() => {
@@ -168,16 +170,38 @@ export default function App() {
       return result;
     } finally { setBusy(false); }
   };
+  const insert = async (target: { id: number; revision: number }, donor: { id: number; revision: number }, at: number): Promise<SavedCopy | null> => {
+    if (busy || closingDocument.current !== null) throw new Error('The workspace is not ready to insert pages.');
+    if (target.id === donor.id) throw new Error('Choose two different open PDFs.');
+    if (!Number.isSafeInteger(at) || at < 0) throw new Error('Choose a valid insertion boundary.');
+    const targetDocument = documents.find(document => document.id === target.id);
+    const donorDocument = documents.find(document => document.id === donor.id);
+    if (!targetDocument || !donorDocument) throw new Error('One selected PDF is no longer open. Choose two open PDFs.');
+    if (targetDocument.revision !== target.revision || donorDocument.revision !== donor.revision) throw new Error('A selected PDF changed. Choose the documents again.');
+    if (at > targetDocument.pages.length) throw new Error('Choose a valid insertion boundary.');
+    if (targetDocument.pages.length + donorDocument.pages.length > 4096) throw new Error('These PDFs exceed the 4,096-page insert limit.');
+    setBusy(true); setError(''); setNotice('');
+    try {
+      const result = await insertPagesCopy(target, donor, at);
+      if (result) opened(result.document, false);
+      return result;
+    } finally { setBusy(false); }
+  };
   const launchOrganizer = () => { if (busy || closingDocument.current !== null) return; if (doc) { setOrganizing(true); setView('document'); } else void open(false, true); };
   const launchCombine = () => {
     if (busy || closingDocument.current !== null) return;
     if (documents.length < 2) { setNotice('Open two PDFs to combine them.'); return; }
     setMenu(false); setOrganizing(false); setView('document'); setCombineOpen(true);
   };
+  const launchInsert = () => {
+    if (busy || closingDocument.current !== null) return;
+    if (documents.length < 2) { setNotice('Open two PDFs to insert pages into a new copy.'); return; }
+    setMenu(false); setInsertOpen(true);
+  };
   const go = (value: number) => { if (doc) { const next = clampPage(value, doc.pages.length); trackPage(next); setTarget(v => ({ page: next, token: v.token + 1 })); } };
   useEffect(() => {
     const listener = (event: KeyboardEvent) => {
-      if (updatesOpen || pageTextOpen || printOpen || propertiesOpen || noticesOpen || passwordRequest || pendingClose !== null || combineOpen) return;
+      if (updatesOpen || pageTextOpen || printOpen || propertiesOpen || noticesOpen || passwordRequest || pendingClose !== null || combineOpen || insertOpen) return;
       if ((event.target as HTMLElement | null)?.closest?.('dialog')) return;
       if (event.ctrlKey && event.key.toLowerCase() === 'o') { event.preventDefault(); void open(); }
       if (event.ctrlKey && event.key.toLowerCase() === 'f' && doc) { event.preventDefault(); setView('document'); setOrganizing(false); setSearchOpen(true); return; }
@@ -237,6 +261,7 @@ export default function App() {
     {propertiesOpen && doc && <DocumentProperties key={`${doc.id}-${doc.revision}`} document={doc} close={() => setPropertiesOpen(false)} />}
     {noticesOpen && <DependencyNotices close={() => setNoticesOpen(false)} />}
     {combineOpen && <CombineDialog documents={documents} activeId={active} busy={busy} combine={combine} close={() => setCombineOpen(false)} />}
+    {insertOpen && <InsertPagesDialog documents={documents} activeId={active} busy={busy} insert={insert} close={() => setInsertOpen(false)} />}
     <div className={s.globalbar}>
       <nav className={s.primaryNav}><button className={toolsOpen && view !== 'home' ? s.selectedNav : ''} onClick={() => view === 'document' ? setToolsOpen(v => !v) : setView('tools')}>All tools</button><button disabled>Edit</button><button disabled>Convert</button><button disabled>E-sign</button></nav>
       <div className={s.globalActions}><IconButton icon={Search} label="Find text" disabled={!doc || busy} active={searchOpen} onClick={() => { setView('document'); setOrganizing(false); searchOpen ? closeSearch() : setSearchOpen(true); }} /><span className={s.divider} /><IconButton icon={Undo2} label="Undo" disabled={busy || !doc?.can_undo} onClick={() => void edit({ kind: 'undo' })} /><IconButton icon={Redo2} label="Redo" disabled={busy || !doc?.can_redo} onClick={() => void edit({ kind: 'redo' })} /><IconButton icon={Save} label="Save a copy" disabled={busy || !doc} onClick={() => void save()} /><IconButton icon={Printer} label="Print" disabled={busy || !doc} onClick={() => setPrintOpen(true)} /><IconButton icon={Sun} label="Toggle theme" onClick={() => setDark(v => !v)} /><IconButton icon={CircleHelp} label="Build information" onClick={() => setNotice('Organize Pages and document search are available. Other tools marked unavailable are planned for later milestones. Save a Copy writes a new file and preserves your original.')} /><button className={s.openButton} onClick={() => void open()} disabled={busy}><FolderOpen size={16} /> {busy ? 'Working…' : 'Open a file'}</button></div>
@@ -255,7 +280,7 @@ export default function App() {
         </section>
       </> : view === 'tools' ? <section className={s.toolsCatalog}><div className={s.catalogHeading}><div><p className={s.eyebrow}>THE COMPLETE WORKSPACE</p><h1>All tools</h1><p>Combine Files and Organize Pages are ready. Other advanced tools are planned for later milestones.</p></div><label className={s.search}><Search size={16} /><input aria-label="Search tools" placeholder="Find a tool" value={query} onChange={e => setQuery(e.target.value)} /></label></div>{toolGroups.map(group => <section key={group.name}><h2>{group.name}</h2><div className={s.catalogGrid}>{group.tools.filter(name => name.toLowerCase().includes(query.toLowerCase())).map((name, i) => <div className={s.catalogCard} key={name}>{toolRow(name, i)}<span className={s.planned}>{name === 'Organize pages' || name === 'Combine files' ? 'Available' : 'Not available yet'}</span></div>)}</div></section>)}</section> : doc ? <>
         {toolsOpen && <aside className={s.toolsPanel}><div className={s.panelHeading}><h2>All tools</h2><IconButton icon={PanelLeftClose} label="Collapse all tools" onClick={() => setToolsOpen(false)} /></div>{['Export a PDF', 'Edit a PDF', 'Create a PDF', 'Combine files', 'Organize pages', 'Comment', 'Fill & sign', 'Scan & OCR', 'Protect a PDF', 'Compress a PDF'].map(toolRow)}<button className={s.textButton} onClick={() => setView('tools')}>View all tools <ChevronRight size={15} /></button><div className={s.panelNote}>Combine Files and Organize Pages are available. More tools are in development.</div></aside>}
-        {organizing ? <Organizer key={doc.id} document={doc} currentPage={page} busy={busy} edit={edit} save={save} split={split} crop={crop} close={() => setOrganizing(false)} /> : <div className={s.documentArea}><Viewer key={`${doc.id}-${doc.revision}`} document={doc} zoom={zoom} fit={fit} target={target} onPage={trackPage} hand={hand} search={activeSearch} /><div className={s.quickToolbar}><IconButton icon={MousePointer2} label="Select text on page" active={!hand} onClick={() => setHand(false)} /><IconButton icon={Hand} label="Pan document" active={hand} onClick={() => setHand(true)} /><IconButton icon={Type} label="Read and copy page text" onClick={() => setPageTextOpen(true)} /><span className={s.horizontalDivider} /><IconButton icon={MessageSquare} label="Add comment" disabled /><IconButton icon={Highlighter} label="Highlight text" disabled /><IconButton icon={Pencil} label="Draw" disabled /><IconButton icon={Type} label="Fill in text" disabled /><IconButton icon={Signature} label="Add signature" disabled /><span className={s.horizontalDivider} /><IconButton icon={MoreHorizontal} label="Customize quick tools" disabled /></div></div>}
+        {organizing ? <Organizer key={doc.id} document={doc} currentPage={page} busy={busy} edit={edit} save={save} split={split} crop={crop} insert={launchInsert} close={() => setOrganizing(false)} /> : <div className={s.documentArea}><Viewer key={`${doc.id}-${doc.revision}`} document={doc} zoom={zoom} fit={fit} target={target} onPage={trackPage} hand={hand} search={activeSearch} /><div className={s.quickToolbar}><IconButton icon={MousePointer2} label="Select text on page" active={!hand} onClick={() => setHand(false)} /><IconButton icon={Hand} label="Pan document" active={hand} onClick={() => setHand(true)} /><IconButton icon={Type} label="Read and copy page text" onClick={() => setPageTextOpen(true)} /><span className={s.horizontalDivider} /><IconButton icon={MessageSquare} label="Add comment" disabled /><IconButton icon={Highlighter} label="Highlight text" disabled /><IconButton icon={Pencil} label="Draw" disabled /><IconButton icon={Type} label="Fill in text" disabled /><IconButton icon={Signature} label="Add signature" disabled /><span className={s.horizontalDivider} /><IconButton icon={MoreHorizontal} label="Customize quick tools" disabled /></div></div>}
         {!organizing && bookmarksOpen && <BookmarksPanel key={`${doc.id}-${doc.revision}`} document={doc} go={go} close={() => setBookmarksOpen(false)} />}
         {!organizing && searchOpen && !bookmarksOpen && <SearchPanel key={`${doc.id}-${doc.revision}`} document={doc} go={go} close={closeSearch} onHighlights={receiveSearch} />}
         {!organizing && nav && !searchOpen && !bookmarksOpen && <aside className={s.pagesPanel}><div className={s.panelHeading}><h2>Pages</h2><IconButton icon={X} label="Close pages" onClick={() => setNav(false)} /></div><button onClick={() => setBookmarksOpen(true)}>Bookmarks</button><div className={s.pageList}>{doc.pages.map((size, i) => <button className={i === page ? s.currentPage : ''} key={i} onClick={() => go(i)}><File size={24} /><span>Page {i + 1}<small>{(size.width / 72).toFixed(1)} × {(size.height / 72).toFixed(1)} in</small></span></button>)}</div></aside>}

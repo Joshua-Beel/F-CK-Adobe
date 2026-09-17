@@ -63,6 +63,15 @@ it('splits the current page plan without editing or saving the working document'
   act(() => ui.unmount());
 });
 
+it('opens the new-copy insertion flow without editing the current working document', () => {
+  const insert = vi.fn(), edit = vi.fn(), save = vi.fn(); let ui!: ReactTestRenderer;
+  act(() => { ui = create(<Organizer document={document} busy={false} edit={edit} save={save} split={vi.fn()} crop={vi.fn()} insert={insert} close={vi.fn()} />); });
+  act(() => ui.root.findAllByType('button').find(button => button.children.includes(' Insert pages'))!.props.onClick());
+  expect(insert).toHaveBeenCalledOnce();
+  expect(edit).not.toHaveBeenCalled(); expect(save).not.toHaveBeenCalled();
+  act(() => ui.unmount());
+});
+
 it('crops exactly one selected current page through the crop dialog', async () => {
   const crop = vi.fn().mockResolvedValue(undefined); let ui!: ReactTestRenderer;
   act(() => { ui = create(<Organizer document={document} busy={false} edit={vi.fn()} save={vi.fn()} split={vi.fn()} crop={crop} close={vi.fn()} />); });

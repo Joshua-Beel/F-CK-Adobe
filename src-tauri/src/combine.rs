@@ -111,6 +111,13 @@ pub fn validate_sources(first: &EditSession, second: &EditSession) -> Result<usi
     Ok(count)
 }
 
+pub fn validate_insertion(target: &EditSession, donor: &EditSession, at: usize) -> Result<usize, String> {
+    if at > target.plan.len() { return Err("Choose an insertion position within the target PDF, including its beginning or end.".into()); }
+    let count = page_count(target, donor)?;
+    checked_document(target, "Target")?; checked_document(donor, "Donor")?;
+    Ok(count)
+}
+
 fn inherited(document: &Document, mut id: ObjectId, key: &[u8]) -> Result<Option<Object>, String> {
     let mut visited = HashSet::new();
     loop {
@@ -152,10 +159,22 @@ fn version(document: &Document) -> Result<(u8, u8), String> {
     Ok(declared.map_or(header, |declared| header.max(declared)))
 }
 
+enum PageSequence { Concatenate, InsertAt(usize) }
+
 pub fn assemble(first: &EditSession, second: &EditSession) -> Result<Vec<u8>, String> {
+    assemble_sequence(first, second, PageSequence::Concatenate)
+}
+
+pub fn assemble_insertion(target: &EditSession, donor: &EditSession, at: usize) -> Result<Vec<u8>, String> {
+    if at > target.plan.len() { return Err("Choose an insertion position within the target PDF, including its beginning or end.".into()); }
+    assemble_sequence(target, donor, PageSequence::InsertAt(at))
+}
+
+fn assemble_sequence(first: &EditSession, second: &EditSession, sequence: PageSequence) -> Result<Vec<u8>, String> {
     let count = page_count(first, second)?;
-    let mut first = checked_document(first, "First")?;
-    let mut second = checked_document(second, "Second")?;
+    let labels = if matches!(&sequence, PageSequence::InsertAt(..)) { ("Target", "Donor") } else { ("First", "Second") };
+    let mut first = checked_document(first, labels.0)?;
+    let mut second = checked_document(second, labels.1)?;
     let version = version(&first)?.max(version(&second)?);
     let objects = first.objects.len().checked_add(second.objects.len()).ok_or("The combined object graph is too large.")?;
     if objects > u32::MAX as usize - 3 { return Err("The combined object graph is too large.".into()); }
@@ -164,7 +183,17 @@ pub fn assemble(first: &EditSession, second: &EditSession) -> Result<Vec<u8>, St
     second.renumber_objects_with(start);
     let info = first.trailer.get(b"Info").ok().cloned();
     let metadata = first.catalog().map_err(|error| error.to_string())?.get(b"Metadata").ok().cloned();
-    let mut pages = flatten_pages(&mut first)?; pages.extend(flatten_pages(&mut second)?);
+    // Metadata ownership follows the target/first source independently of the displayed page order.
+    let mut pages = flatten_pages(&mut first)?;
+    let donor = flatten_pages(&mut second)?;
+    match sequence {
+        PageSequence::Concatenate => pages.extend(donor),
+        PageSequence::InsertAt(at) => {
+            if at > pages.len() { return Err("Insertion position differs from the exported target plan.".into()); }
+            let suffix = pages.split_off(at);
+            pages.extend(donor); pages.extend(suffix);
+        }
+    }
     if pages.len() != count { return Err("Combined page count differs from the edit plans.".into()); }
     let mut output = Document::with_version(format!("{}.{}", version.0, version.1));
     output.max_id = second.max_id;
@@ -191,6 +220,14 @@ pub fn prepare_and_write(first: &EditSession, second: &EditSession, path: &Path,
     Ok(bytes)
 }
 
+pub fn prepare_insertion_and_write(target: &EditSession, donor: &EditSession, at: usize, path: &Path, validate: impl FnOnce(&[u8], usize) -> Result<(), String>) -> Result<Vec<u8>, String> {
+    if path.symlink_metadata().is_ok() { return Err("That file already exists. Choose a new filename; Insert Pages never overwrites an existing file.".into()); }
+    let bytes = assemble_insertion(target, donor, at)?;
+    validate(&bytes, page_count(target, donor)?).map_err(|error| format!("Inserted output validation failed: {error}"))?;
+    write_new_file(path, &bytes)?;
+    Ok(bytes)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -205,6 +242,75 @@ mod tests {
         document.catalog_mut().unwrap().set("Metadata", metadata);
         for object in document.objects.values_mut() { if let Ok(dictionary) = object.as_dict_mut() { if dictionary.get(b"Type").is_ok_and(|kind| kind.as_name().is_ok_and(|kind| kind == b"Font")) { dictionary.set("BaseFont", Object::Name(font.as_bytes().to_vec())); } } }
         let mut bytes = Vec::new(); document.save_to(&mut bytes).unwrap(); bytes
+    }
+    #[test]
+    fn insert_current_order_beginning_middle_end_target_metadata_and_resources_preserve_sessions() {
+        let target_bytes = source("target-title", "Helvetica"); let donor_bytes = source("donor-title", "Courier");
+        let mut target = EditSession::new(target_bytes.clone(), 6); let mut donor = EditSession::new(donor_bytes.clone(), 6);
+        target.apply(PageEdit::Move { from: 0, to: 2 }).unwrap(); target.mark_saved();
+        target.apply(PageEdit::Rotate { pages: vec![0], clockwise: true }).unwrap();
+        target.apply(PageEdit::Crop { page: 1, crop: CropBox { left: 30.0, bottom: 60.0, right: 590.0, top: 780.0 } }).unwrap();
+        donor.apply(PageEdit::Delete { pages: vec![1, 3] }).unwrap(); donor.apply(PageEdit::Move { from: 3, to: 0 }).unwrap();
+        donor.apply(PageEdit::Rotate { pages: vec![1], clockwise: false }).unwrap();
+        let target_plan = target.plan.clone(); let donor_plan = donor.plan.clone();
+        let originals = [Document::load_mem(&target_bytes).unwrap(), Document::load_mem(&donor_bytes).unwrap()];
+        let cases = [
+            (0, vec![(1,5,0),(1,0,270),(1,2,0),(1,4,0),(0,1,90),(0,2,0),(0,0,0),(0,3,0),(0,4,0),(0,5,0)]),
+            (2, vec![(0,1,90),(0,2,0),(1,5,0),(1,0,270),(1,2,0),(1,4,0),(0,0,0),(0,3,0),(0,4,0),(0,5,0)]),
+            (6, vec![(0,1,90),(0,2,0),(0,0,0),(0,3,0),(0,4,0),(0,5,0),(1,5,0),(1,0,270),(1,2,0),(1,4,0)]),
+        ];
+        for (at, expected) in cases {
+            assert_eq!(validate_insertion(&target, &donor, at).unwrap(), 10);
+            let output = Document::load_mem(&assemble_insertion(&target, &donor, at).unwrap()).unwrap();
+            assert_eq!(output.get_pages().len(), 10);
+            let mut target_fonts = HashSet::new(); let mut donor_fonts = HashSet::new();
+            for (index, id) in output.get_pages().into_values().enumerate() {
+                let (owner, source_page, rotation) = expected[index];
+                assert_eq!(output.get_page_content(id), originals[owner].get_page_content(originals[owner].get_pages()[&(source_page + 1)]));
+                assert_eq!(output.get_dictionary(id).unwrap().get(b"Rotate").unwrap().as_i64().unwrap(), rotation);
+                let resources = inherited(&output, id, b"Resources").unwrap().unwrap();
+                let fonts = output.dereference(resources.as_dict().unwrap().get(b"Font").unwrap()).unwrap().1.as_dict().unwrap();
+                for (_, reference) in fonts.iter() {
+                    let font = output.dereference(reference).unwrap().1.as_dict().unwrap();
+                    assert_eq!(font.get(b"BaseFont").unwrap().as_name().unwrap(), if owner == 0 { b"Helvetica".as_slice() } else { b"Courier".as_slice() });
+                    if owner == 0 { target_fonts.insert(reference.as_reference().unwrap()); } else { donor_fonts.insert(reference.as_reference().unwrap()); }
+                }
+                if owner == 0 && source_page == 2 { assert_eq!(output.get_dictionary(id).unwrap().get(b"CropBox").unwrap().as_array().unwrap().iter().map(|value| value.as_float().unwrap()).collect::<Vec<_>>(), vec![30.0, 60.0, 590.0, 780.0]); }
+            }
+            assert!(target_fonts.is_disjoint(&donor_fonts));
+            let original_fonts: HashSet<_> = originals[0].objects.iter().filter_map(|(id, value)| value.as_dict().ok().filter(|value| value.get(b"Type").is_ok_and(|value| value.as_name().is_ok_and(|name| name == b"Font"))).map(|_| *id)).collect();
+            assert_eq!(target_fonts.len(), original_fonts.len(), "Target prefix and suffix must reuse the same font graph");
+            let info = output.dereference(output.trailer.get(b"Info").unwrap()).unwrap().1.as_dict().unwrap();
+            assert_eq!(info.get(b"Title").unwrap().as_str().unwrap(), b"target-title");
+            let xmp = output.dereference(output.catalog().unwrap().get(b"Metadata").unwrap()).unwrap().1.as_stream().unwrap();
+            assert_eq!(xmp.content, b"<fixture>target-title</fixture>"); assert!(!output.trailer.has(b"ID"));
+        }
+        assert_eq!(target.source, target_bytes); assert_eq!(donor.source, donor_bytes);
+        assert_eq!(target.plan, target_plan); assert_eq!(donor.plan, donor_plan); assert_eq!((target.revision, donor.revision), (3,3));
+        assert!(target.dirty() && donor.dirty() && target.can_undo() && donor.can_undo());
+        target.apply(PageEdit::Undo).unwrap(); target.apply(PageEdit::Undo).unwrap(); assert!(!target.dirty());
+    }
+    #[test]
+    fn insert_invalid_boundaries_guards_validation_failure_and_racing_output_never_publish() {
+        let target = EditSession::new(sample(), 6); let donor = EditSession::new(sample(), 6);
+        assert!(assemble_insertion(&target, &donor, 7).unwrap_err().contains("position"));
+        assert!(validate_insertion(&target, &donor, usize::MAX).unwrap_err().contains("position"));
+        assert!(assemble_insertion(&target, &EditSession::new(b"not a PDF".to_vec(), 6), 3).is_err());
+        let mut signed = Document::load_mem(&sample()).unwrap(); signed.add_object(dictionary! { "Type" => "Sig", "ByteRange" => vec![0.into(), 1.into(), 2.into(), 3.into()] });
+        let mut signed_bytes = Vec::new(); signed.save_to(&mut signed_bytes).unwrap();
+        assert!(assemble_insertion(&target, &EditSession::new(signed_bytes, 6), 0).unwrap_err().contains("Signed"));
+        let mut unsupported = Document::load_mem(&sample()).unwrap(); unsupported.catalog_mut().unwrap().set("Outlines", dictionary! {});
+        let mut bytes = Vec::new(); unsupported.save_to(&mut bytes).unwrap();
+        assert!(assemble_insertion(&EditSession::new(bytes, 6), &donor, 0).unwrap_err().contains("Outlines"));
+        let mut large = EditSession::new(sample(), 6); large.plan.resize(MAX_PAGES - 5, large.plan[0].clone());
+        assert!(validate_insertion(&target, &large, 0).unwrap_err().contains("4096"));
+        let folder = tempfile::tempdir().unwrap(); let path = folder.path().join("inserted.pdf");
+        assert!(prepare_insertion_and_write(&target, &donor, 2, &path, |_, _| Err("Injected validation failure".into())).unwrap_err().contains("Injected"));
+        assert!(!path.exists()); assert_eq!(std::fs::read_dir(folder.path()).unwrap().count(), 0);
+        assert!(prepare_insertion_and_write(&target, &donor, 2, &path, |_, _| { std::fs::write(&path, b"racing file").unwrap(); Ok(()) }).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), b"racing file");
+        assert!(prepare_insertion_and_write(&target, &donor, 2, &path, |_, _| panic!("Existing output must reject before validation")).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), b"racing file");
     }
     #[test]
     fn combine_current_order_crop_rotation_resource_collisions_and_first_metadata_preserve_sessions() {
