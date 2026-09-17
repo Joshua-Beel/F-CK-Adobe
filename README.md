@@ -39,6 +39,8 @@ Next: complete viewer core (text selection/search, encrypted-file prompt, bookma
 
 ## Recent changes
 
+- Matched update-manifest URLs to GitHub's uploaded asset names, which replace spaces with periods. Verified the uploaded installer digest matches the locally tested installer before publication.
+
 - Added the 0.2.0 per-user Windows NSIS installer, bundled PDF engine, signed GitHub-release updater with release notes/progress and unsaved-document protection, and release-manifest validation. Signing keys remain outside Git. Windows Authenticode signing is not configured. Eleven frontend/release tests and seven native tests pass; the installer exits successfully and the installed app renders the bundled sample PDF.
 
 - Added the first Windows viewer foundation and current-style workspace, native worker/cache, synthetic fixtures, and viewport/rendering tests. Rust 1.98.1 was installed on the development machine. Detailed verification and remaining acceptance conditions are recorded in [docs/phase-0-status.md](docs/phase-0-status.md).

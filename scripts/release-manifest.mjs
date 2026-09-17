@@ -6,7 +6,8 @@ export function createManifest(version, installer, signature, notes, date = new 
   if (!/^\d+\.\d+\.\d+$/.test(version)) throw new Error('Use a stable major.minor.patch version.');
   if (!installer.endsWith('_x64-setup.exe')) throw new Error('Expected a Windows x64 NSIS installer.');
   if (!signature.trim()) throw new Error('Installer signature is missing.');
-  return { version, notes, pub_date: date, platforms: { 'windows-x86_64': { signature: signature.trim(), url: `https://github.com/Joshua-Beel/F-CK-Adobe/releases/download/v${version}/${encodeURIComponent(basename(installer))}` } } };
+  const assetName = basename(installer).replace(/ /g, '.');
+  return { version, notes, pub_date: date, platforms: { 'windows-x86_64': { signature: signature.trim(), url: `https://github.com/Joshua-Beel/F-CK-Adobe/releases/download/v${version}/${encodeURIComponent(assetName)}` } } };
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
