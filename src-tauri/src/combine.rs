@@ -118,6 +118,23 @@ pub fn validate_insertion(target: &EditSession, donor: &EditSession, at: usize) 
     Ok(count)
 }
 
+fn replacement_end(pages: usize, start: usize, count: usize) -> Result<usize, String> {
+    start.checked_add(count).filter(|end| count > 0 && *end <= pages)
+        .ok_or_else(|| "Choose a nonempty contiguous replacement range within the target PDF.".into())
+}
+
+fn replacement_page_count(target: &EditSession, donor: &EditSession, start: usize, count: usize) -> Result<usize, String> {
+    replacement_end(target.plan.len(), start, count)?;
+    // The existing aggregate input limit applies even when replacement makes a smaller output.
+    Ok(page_count(target, donor)? - count)
+}
+
+pub fn validate_replacement(target: &EditSession, donor: &EditSession, start: usize, count: usize) -> Result<usize, String> {
+    let output_count = replacement_page_count(target, donor, start, count)?;
+    checked_document(target, "Target")?; checked_document(donor, "Donor")?;
+    Ok(output_count)
+}
+
 fn inherited(document: &Document, mut id: ObjectId, key: &[u8]) -> Result<Option<Object>, String> {
     let mut visited = HashSet::new();
     loop {
@@ -159,20 +176,33 @@ fn version(document: &Document) -> Result<(u8, u8), String> {
     Ok(declared.map_or(header, |declared| header.max(declared)))
 }
 
-enum PageSequence { Concatenate, InsertAt(usize) }
+#[derive(Clone, Copy)]
+pub(crate) enum CopyOperation { Combine, Insert { at: usize }, Replace { start: usize, count: usize } }
+impl CopyOperation {
+    pub(crate) fn name(self) -> &'static str {
+        match self { Self::Combine => "Combine", Self::Insert { .. } => "Insert Pages", Self::Replace { .. } => "Replace Pages" }
+    }
+}
 
 pub fn assemble(first: &EditSession, second: &EditSession) -> Result<Vec<u8>, String> {
-    assemble_sequence(first, second, PageSequence::Concatenate)
+    assemble_sequence(first, second, CopyOperation::Combine)
 }
 
 pub fn assemble_insertion(target: &EditSession, donor: &EditSession, at: usize) -> Result<Vec<u8>, String> {
     if at > target.plan.len() { return Err("Choose an insertion position within the target PDF, including its beginning or end.".into()); }
-    assemble_sequence(target, donor, PageSequence::InsertAt(at))
+    assemble_sequence(target, donor, CopyOperation::Insert { at })
 }
 
-fn assemble_sequence(first: &EditSession, second: &EditSession, sequence: PageSequence) -> Result<Vec<u8>, String> {
-    let count = page_count(first, second)?;
-    let labels = if matches!(&sequence, PageSequence::InsertAt(..)) { ("Target", "Donor") } else { ("First", "Second") };
+pub fn assemble_replacement(target: &EditSession, donor: &EditSession, start: usize, count: usize) -> Result<Vec<u8>, String> {
+    assemble_sequence(target, donor, CopyOperation::Replace { start, count })
+}
+
+fn assemble_sequence(first: &EditSession, second: &EditSession, sequence: CopyOperation) -> Result<Vec<u8>, String> {
+    let count = match sequence {
+        CopyOperation::Replace { start, count } => replacement_page_count(first, second, start, count)?,
+        _ => page_count(first, second)?,
+    };
+    let labels = if matches!(sequence, CopyOperation::Combine) { ("First", "Second") } else { ("Target", "Donor") };
     let mut first = checked_document(first, labels.0)?;
     let mut second = checked_document(second, labels.1)?;
     let version = version(&first)?.max(version(&second)?);
@@ -187,11 +217,16 @@ fn assemble_sequence(first: &EditSession, second: &EditSession, sequence: PageSe
     let mut pages = flatten_pages(&mut first)?;
     let donor = flatten_pages(&mut second)?;
     match sequence {
-        PageSequence::Concatenate => pages.extend(donor),
-        PageSequence::InsertAt(at) => {
+        CopyOperation::Combine => pages.extend(donor),
+        CopyOperation::Insert { at } => {
             if at > pages.len() { return Err("Insertion position differs from the exported target plan.".into()); }
             let suffix = pages.split_off(at);
             pages.extend(donor); pages.extend(suffix);
+        }
+        CopyOperation::Replace { start, count } => {
+            let end = replacement_end(pages.len(), start, count)?;
+            let suffix = pages.split_off(end);
+            pages.truncate(start); pages.extend(donor); pages.extend(suffix);
         }
     }
     if pages.len() != count { return Err("Combined page count differs from the edit plans.".into()); }
@@ -228,6 +263,15 @@ pub fn prepare_insertion_and_write(target: &EditSession, donor: &EditSession, at
     Ok(bytes)
 }
 
+pub fn prepare_replacement_and_write(target: &EditSession, donor: &EditSession, start: usize, count: usize, path: &Path, validate: impl FnOnce(&[u8], usize) -> Result<(), String>) -> Result<Vec<u8>, String> {
+    if path.symlink_metadata().is_ok() { return Err("That file already exists. Choose a new filename; Replace Pages never overwrites an existing file.".into()); }
+    let expected = replacement_page_count(target, donor, start, count)?;
+    let bytes = assemble_replacement(target, donor, start, count)?;
+    validate(&bytes, expected).map_err(|error| format!("Replaced output validation failed: {error}"))?;
+    write_new_file(path, &bytes)?;
+    Ok(bytes)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -242,6 +286,78 @@ mod tests {
         document.catalog_mut().unwrap().set("Metadata", metadata);
         for object in document.objects.values_mut() { if let Ok(dictionary) = object.as_dict_mut() { if dictionary.get(b"Type").is_ok_and(|kind| kind.as_name().is_ok_and(|kind| kind == b"Font")) { dictionary.set("BaseFont", Object::Name(font.as_bytes().to_vec())); } } }
         let mut bytes = Vec::new(); document.save_to(&mut bytes).unwrap(); bytes
+    }
+    #[test]
+    fn replace_first_middle_last_whole_and_differing_counts_keep_target_metadata_and_source_history() {
+        let target_bytes = source("target-title", "Helvetica"); let donor_bytes = source("donor-title", "Courier");
+        let mut target = EditSession::new(target_bytes.clone(), 6); let mut donor = EditSession::new(donor_bytes.clone(), 6);
+        target.apply(PageEdit::Move { from: 0, to: 2 }).unwrap(); target.mark_saved();
+        target.apply(PageEdit::Rotate { pages: vec![0], clockwise: true }).unwrap();
+        target.apply(PageEdit::Crop { page: 1, crop: CropBox { left: 30.0, bottom: 60.0, right: 590.0, top: 780.0 } }).unwrap();
+        donor.apply(PageEdit::Delete { pages: vec![1, 3] }).unwrap(); donor.apply(PageEdit::Move { from: 3, to: 0 }).unwrap();
+        donor.apply(PageEdit::Rotate { pages: vec![1], clockwise: false }).unwrap();
+        let target_plan = target.plan.clone(); let donor_plan = donor.plan.clone();
+        let originals = [Document::load_mem(&target_bytes).unwrap(), Document::load_mem(&donor_bytes).unwrap()];
+        let cases = [
+            (0,2,vec![(1,5,0),(1,0,270),(1,2,0),(1,4,0),(0,0,0),(0,3,0),(0,4,0),(0,5,0)]),
+            (2,2,vec![(0,1,90),(0,2,0),(1,5,0),(1,0,270),(1,2,0),(1,4,0),(0,4,0),(0,5,0)]),
+            (4,2,vec![(0,1,90),(0,2,0),(0,0,0),(0,3,0),(1,5,0),(1,0,270),(1,2,0),(1,4,0)]),
+            (0,6,vec![(1,5,0),(1,0,270),(1,2,0),(1,4,0)]),
+            (0,5,vec![(1,5,0),(1,0,270),(1,2,0),(1,4,0),(0,5,0)]),
+            (1,4,vec![(0,1,90),(1,5,0),(1,0,270),(1,2,0),(1,4,0),(0,5,0)]),
+        ];
+        for (start, count, expected) in cases {
+            assert_eq!(validate_replacement(&target, &donor, start, count).unwrap(), expected.len());
+            let output = Document::load_mem(&assemble_replacement(&target, &donor, start, count).unwrap()).unwrap();
+            assert_eq!(output.get_pages().len(), expected.len());
+            let mut target_fonts = HashSet::new(); let mut donor_fonts = HashSet::new();
+            for (index, id) in output.get_pages().into_values().enumerate() {
+                let (owner, source_page, rotation) = expected[index];
+                assert_eq!(output.get_page_content(id), originals[owner].get_page_content(originals[owner].get_pages()[&(source_page + 1)]));
+                assert_eq!(output.get_dictionary(id).unwrap().get(b"Rotate").unwrap().as_i64().unwrap(), rotation);
+                let resources = inherited(&output, id, b"Resources").unwrap().unwrap();
+                let fonts = output.dereference(resources.as_dict().unwrap().get(b"Font").unwrap()).unwrap().1.as_dict().unwrap();
+                for (_, reference) in fonts.iter() {
+                    let font = output.dereference(reference).unwrap().1.as_dict().unwrap();
+                    assert_eq!(font.get(b"BaseFont").unwrap().as_name().unwrap(), if owner == 0 { b"Helvetica".as_slice() } else { b"Courier".as_slice() });
+                    if owner == 0 { target_fonts.insert(reference.as_reference().unwrap()); } else { donor_fonts.insert(reference.as_reference().unwrap()); }
+                }
+                if owner == 0 && source_page == 2 { assert_eq!(output.get_dictionary(id).unwrap().get(b"CropBox").unwrap().as_array().unwrap().iter().map(|value| value.as_float().unwrap()).collect::<Vec<_>>(), vec![30.0,60.0,590.0,780.0]); }
+            }
+            assert!(target_fonts.is_disjoint(&donor_fonts));
+            if count == 6 { assert!(target_fonts.is_empty()); }
+            else {
+                let original_fonts = originals[0].objects.values().filter(|value| value.as_dict().is_ok_and(|value| value.get(b"Type").is_ok_and(|value| value.as_name().is_ok_and(|name| name == b"Font")))).count();
+                assert_eq!(target_fonts.len(), original_fonts, "Retained target pages must share one resource graph");
+            }
+            let info = output.dereference(output.trailer.get(b"Info").unwrap()).unwrap().1.as_dict().unwrap(); assert_eq!(info.get(b"Title").unwrap().as_str().unwrap(), b"target-title");
+            let xmp = output.dereference(output.catalog().unwrap().get(b"Metadata").unwrap()).unwrap().1.as_stream().unwrap(); assert_eq!(xmp.content, b"<fixture>target-title</fixture>");
+            assert!(!output.trailer.has(b"ID"));
+        }
+        assert_eq!(target.source, target_bytes); assert_eq!(donor.source, donor_bytes); assert_eq!(target.plan, target_plan); assert_eq!(donor.plan, donor_plan);
+        assert_eq!((target.revision, donor.revision), (3,3)); assert!(target.dirty() && donor.dirty() && target.can_undo() && donor.can_undo());
+        target.apply(PageEdit::Undo).unwrap(); target.apply(PageEdit::Undo).unwrap(); assert!(!target.dirty());
+    }
+    #[test]
+    fn replace_invalid_ranges_removed_page_features_input_limits_and_publish_failures_reject() {
+        let target = EditSession::new(sample(), 6); let donor = EditSession::new(sample(), 6);
+        for (start,count) in [(0,0),(6,1),(5,2),(usize::MAX,1),(1,usize::MAX)] { assert!(validate_replacement(&target, &donor, start, count).unwrap_err().contains("range")); }
+        let mut unsupported = Document::load_mem(&sample()).unwrap(); let removed = unsupported.get_pages()[&3]; unsupported.get_dictionary_mut(removed).unwrap().set("Annots", Vec::<Object>::new());
+        let mut bytes = Vec::new(); unsupported.save_to(&mut bytes).unwrap(); let unsupported = EditSession::new(bytes, 6);
+        for (start,count) in [(2,1),(0,6)] { assert!(assemble_replacement(&unsupported, &donor, start, count).unwrap_err().contains("Annots"), "Removed pages must still satisfy full-input preservation guards"); }
+        assert!(assemble_replacement(&target, &EditSession::new(b"not a PDF".to_vec(), 6), 0, 6).is_err());
+        let mut signed = Document::load_mem(&sample()).unwrap(); signed.add_object(dictionary! { "Type" => "Sig", "ByteRange" => vec![0.into(),1.into(),2.into(),3.into()] });
+        let mut bytes = Vec::new(); signed.save_to(&mut bytes).unwrap(); assert!(assemble_replacement(&EditSession::new(bytes, 6), &donor, 0, 6).unwrap_err().contains("Signed"));
+        let mut large = EditSession::new(sample(), 6); large.plan.resize(MAX_PAGES - 5, large.plan[0].clone());
+        assert!(replacement_page_count(&large, &donor, 0, large.plan.len()).unwrap_err().contains("4096"), "Smaller output must not bypass the input cap");
+        large.plan.pop(); assert_eq!(replacement_page_count(&large, &donor, 0, large.plan.len()).unwrap(), 6);
+        output_size(MAX_OUTPUT_BYTES).unwrap(); assert!(output_size(MAX_OUTPUT_BYTES + 1).is_err());
+        let folder = tempfile::tempdir().unwrap(); let path = folder.path().join("replaced.pdf");
+        assert!(prepare_replacement_and_write(&target, &donor, 2, 2, &path, |_,_| Err("Injected validation failure".into())).unwrap_err().contains("Injected"));
+        assert!(!path.exists()); assert_eq!(std::fs::read_dir(folder.path()).unwrap().count(), 0);
+        assert!(prepare_replacement_and_write(&target, &donor, 2, 2, &path, |_,expected| { assert_eq!(expected,10); std::fs::write(&path,b"racing file").unwrap(); Ok(()) }).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), b"racing file");
+        assert!(prepare_replacement_and_write(&target, &donor, 2, 2, &path, |_,_| panic!("Existing output must reject before validation")).is_err());
     }
     #[test]
     fn insert_current_order_beginning_middle_end_target_metadata_and_resources_preserve_sessions() {

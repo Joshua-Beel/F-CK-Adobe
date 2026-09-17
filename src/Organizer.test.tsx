@@ -72,6 +72,17 @@ it('opens the new-copy insertion flow without editing the current working docume
   act(() => ui.unmount());
 });
 
+it('passes the selected contiguous range to replacement without editing the working document', () => {
+  const replace = vi.fn(), edit = vi.fn(), save = vi.fn(); let ui!: ReactTestRenderer;
+  act(() => { ui = create(<Organizer document={document} busy={false} edit={edit} save={save} split={vi.fn()} crop={vi.fn()} replace={replace} close={vi.fn()} />); });
+  act(() => pageButton(ui, 2).props.onClick({ shiftKey: false, ctrlKey: false, metaKey: false }));
+  act(() => pageButton(ui, 4).props.onClick({ shiftKey: true, ctrlKey: false, metaKey: false }));
+  act(() => ui.root.findAllByType('button').find(button => button.children.includes(' Replace pages'))!.props.onClick());
+  expect(replace).toHaveBeenCalledWith([1, 2, 3]);
+  expect(edit).not.toHaveBeenCalled(); expect(save).not.toHaveBeenCalled();
+  act(() => ui.unmount());
+});
+
 it('crops exactly one selected current page through the crop dialog', async () => {
   const crop = vi.fn().mockResolvedValue(undefined); let ui!: ReactTestRenderer;
   act(() => { ui = create(<Organizer document={document} busy={false} edit={vi.fn()} save={vi.fn()} split={vi.fn()} crop={crop} close={vi.fn()} />); });
