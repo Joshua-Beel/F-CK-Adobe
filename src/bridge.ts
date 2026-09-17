@@ -7,6 +7,8 @@ export async function openDocument(example = false) {
 }
 export const closeDocument = (id: number) => invoke<void>('close_document', { id });
 export const pageText = (id: number, page: number, revision: number) => invoke<string>('page_text', { id, page, revision });
+export type BookmarkList = { items: { title: string; page: number | null; depth: number }[]; truncated: boolean };
+export const documentBookmarks = (id: number, revision: number) => invoke<BookmarkList>('document_bookmarks', { id, revision });
 export const editPages = (id: number, edit: PageEdit) => invoke<DocumentInfo>('edit_pages', { id, edit });
 export const saveCopy = (id: number, pages?: number[]) => invoke<{ path: string; document: DocumentInfo } | null>('save_copy', { id, pages: pages ?? null });
 export async function renderPage(id: number, page: number, width: number) {

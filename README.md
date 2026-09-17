@@ -15,6 +15,7 @@ Version 0.2.0 has a signed update package, but no Windows publisher signature. T
 ## What works
 
 - **Reading:** open PDFs in tabs, scroll through pages, pan, jump to a page, zoom from 10% to 400%, or fit the page to the window width.
+- **Bookmarks (source build):** browse up to 1,000 embedded bookmarks with nested indentation and jump to supported internal page destinations. Unsupported actions stay disabled; destination zoom/position and bookmark editing are not implemented.
 - **Search (source build):** Ctrl+F searches embedded PDF text, with optional case matching, selectable excerpts, and links to matching pages. Search follows page edits; scans need OCR first. Results show one excerpt per matching page, up to 500 pages.
 - **Organizing pages:** select thumbnails or enter a page range, rotate pages, move a page earlier or later, delete pages, and extract a selection into a new PDF.
 - **Saving:** undo and redo page edits, then use **Save a Copy**. Your original stays untouched, and the app asks before closing a document with unsaved edits.
@@ -85,6 +86,7 @@ For more background, see the [architecture notes](docs/decisions.md), [PDFium do
 
 ## Recent changes
 
+- Added a native bookmark pane with internal page navigation, nested entries, an explicit 1,000-entry cap, and disabled unsupported destinations. All 21 frontend/release tests, 9 native tests, and the production build pass, including nested bookmark extraction, external-action rejection, stale requests, and UI navigation. Native desktop interaction remains unverified. This change is newer than the 0.2.4 draft.
 - The source build now saves reading preferences locally: theme, zoom, fit mode, pan mode, and panel visibility. Invalid saved values fall back to defaults, and unavailable storage shows a session-only notice. All 19 frontend/release tests and the production build pass, including an app remount test and storage failure cases. These changes are newer than the 0.2.4 draft; native restart verification is still pending.
 - The 0.2.4 release workflow passed all tests, signed the installer, verified its packaged application, and created a draft release. Downloaded assets were independently checked locally: both publisher signatures are valid and timestamped; installer SHA-256 is `cf97903897c10f0f02c31bc61f9ac9d929a9c5abdc116dc200cce01a4cd68c7a`, matching GitHub. Desktop automation still returns unreliable window captures, so installation/search UI checks and the full upgrade test remain unverified. The release stays a draft.
 - The 0.2.3 signature check found Tauri's restored unsigned build file. CI now verifies the installer, extracts its packaged application using 7-Zip, and verifies that application's timestamped publisher signature. Prepared 0.2.4 for this check. Publishing and the upgrade test are still pending.

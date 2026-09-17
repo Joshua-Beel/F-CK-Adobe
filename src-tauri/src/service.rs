@@ -10,11 +10,16 @@ pub struct PageSize { width: f32, height: f32 }
 pub struct DocumentInfo { id: u64, name: String, path: String, pages: Vec<PageSize>, revision: u64, dirty: bool, can_undo: bool, can_redo: bool }
 #[derive(Serialize)]
 pub struct SavedCopy { path: String, document: DocumentInfo }
+#[derive(Serialize)]
+pub struct BookmarkInfo { title: String, page: Option<usize>, depth: usize }
+#[derive(Serialize)]
+pub struct BookmarkList { items: Vec<BookmarkInfo>, truncated: bool }
 type Reply<T> = oneshot::Sender<Result<T, String>>;
 enum Request {
     Open(PathBuf, Reply<DocumentInfo>),
     Render(u64, u16, i32, Reply<Vec<u8>>),
     Text(u64, u16, u64, Reply<String>),
+    Bookmarks(u64, u64, Reply<BookmarkList>),
     Close(u64, Reply<()>),
     Edit(u64, PageEdit, Reply<DocumentInfo>),
     Save(u64, Option<Vec<usize>>, PathBuf, Reply<SavedCopy>),
@@ -91,6 +96,26 @@ impl PdfService {
                         };
                         let _ = reply.send(result);
                     },
+                    Request::Bookmarks(id, revision, reply) => {
+                        let result = (|| {
+                            let (session, _) = sessions.get(&id).ok_or("Document is closed")?;
+                            if session.revision != revision { return Err("Document changed. Reopen bookmarks.".into()); }
+                            let document = documents.get(&id).ok_or("Document is closed")?;
+                            let mut items = Vec::new();
+                            let mut depths = HashMap::new();
+                            let mut truncated = false;
+                            for bookmark in document.bookmarks().iter().take(1001) {
+                                if items.len() == 1000 { truncated = true; break; }
+                                let depth = bookmark.parent().and_then(|parent| depths.get(&parent).copied()).map_or(0, |depth: usize| depth + 1);
+                                depths.insert(bookmark.clone(), depth);
+                                let source = bookmark.destination().and_then(|destination| destination.page_index().ok());
+                                let page = source.and_then(|source| session.plan.iter().position(|spec| spec.source == source as usize));
+                                items.push(BookmarkInfo { title: bookmark.title().filter(|s| !s.is_empty()).unwrap_or_else(|| "Untitled bookmark".into()), page, depth });
+                            }
+                            Ok(BookmarkList { items, truncated })
+                        })();
+                        let _ = reply.send(result);
+                    }
                     Request::Text(id, page, revision, reply) => {
                         if reply.is_closed() { continue; }
                         let result = (|| {
@@ -146,6 +171,9 @@ impl PdfService {
     pub async fn text(&self, id: u64, page: u16, revision: u64) -> Result<String, String> {
         let (tx, rx) = oneshot::channel(); self.sender.send(Request::Text(id, page, revision, tx)).map_err(|e| e.to_string())?; rx.await.map_err(|e| e.to_string())?
     }
+    pub async fn bookmarks(&self, id: u64, revision: u64) -> Result<BookmarkList, String> {
+        let (tx, rx) = oneshot::channel(); self.sender.send(Request::Bookmarks(id, revision, tx)).map_err(|e| e.to_string())?; rx.await.map_err(|e| e.to_string())?
+    }
     pub async fn edit(&self, id: u64, edit: PageEdit) -> Result<DocumentInfo, String> {
         let (tx, rx) = oneshot::channel(); self.sender.send(Request::Edit(id, edit, tx)).map_err(|e| e.to_string())?; rx.await.map_err(|e| e.to_string())?
     }
@@ -166,6 +194,34 @@ fn current_info(session: &EditSession, original: &DocumentInfo) -> DocumentInfo 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn bookmarks_include_nested_destinations_and_disable_external_actions() {
+        use lopdf::{dictionary, Object};
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let mut pdf = lopdf::Document::load(root.join("resources/welcome.pdf")).unwrap();
+        let pages = pdf.get_pages();
+        let outlines = pdf.new_object_id();
+        let first = pdf.new_object_id();
+        let child = pdf.new_object_id();
+        let external = pdf.new_object_id();
+        pdf.objects.insert(outlines, dictionary! { "Type" => "Outlines", "First" => first, "Last" => external, "Count" => 3 }.into());
+        pdf.objects.insert(first, dictionary! { "Title" => Object::string_literal("Start"), "Parent" => outlines, "Next" => external, "First" => child, "Last" => child, "Count" => 1, "Dest" => vec![Object::Reference(pages[&1]), Object::Name(b"Fit".to_vec())] }.into());
+        pdf.objects.insert(child, dictionary! { "Title" => Object::string_literal("Second page"), "Parent" => first, "Dest" => vec![Object::Reference(pages[&2]), Object::Name(b"Fit".to_vec())] }.into());
+        pdf.objects.insert(external, dictionary! { "Title" => Object::string_literal("External"), "Parent" => outlines, "Prev" => first, "A" => dictionary! { "S" => "URI", "URI" => Object::string_literal("https://example.com") } }.into());
+        pdf.catalog_mut().unwrap().set("Outlines", outlines);
+        let folder = tempfile::tempdir().unwrap();
+        let path = folder.path().join("bookmarks.pdf"); pdf.save(&path).unwrap();
+        let service = PdfService::start(root.join("resources/pdfium/bin/pdfium.dll"));
+        let (tx, rx) = oneshot::channel(); service.sender.send(Request::Open(path, tx)).unwrap();
+        let info = rx.blocking_recv().unwrap().unwrap();
+        let (tx, rx) = oneshot::channel(); service.sender.send(Request::Bookmarks(info.id, 0, tx)).unwrap();
+        let result = rx.blocking_recv().unwrap().unwrap();
+        assert!(!result.truncated); assert_eq!(result.items.len(), 3);
+        assert_eq!(result.items[0].title, "Start"); assert_eq!(result.items[0].page, Some(0));
+        assert_eq!(result.items[1].depth, 1); assert_eq!(result.items[1].page, Some(1));
+        assert_eq!(result.items[2].page, None);
+        let (tx, rx) = oneshot::channel(); service.sender.send(Request::Bookmarks(info.id, 99, tx)).unwrap(); assert!(rx.blocking_recv().unwrap().is_err());
+    }
     #[test]
     fn text_follows_page_edits_and_rejects_stale_or_closed_requests() {
         let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
