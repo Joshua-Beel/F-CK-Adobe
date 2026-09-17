@@ -1,4 +1,12 @@
-## 0.2.1
+## 0.2.2
+
+- Find embedded PDF text with Ctrl+F, optional case matching, selectable excerpts, and links to matching pages.
+- Stop a search while reading; results follow the current page order after edits.
+- Fixed Windows signing command arguments containing spaces.
+
+Search shows one excerpt per matching page, up to 500 pages. On-page selection, match highlighting, and OCR remain in development.
+
+## 0.2.1 (unreleased)
 
 - Windows publisher signing through Joshua Beel's Azure signing profile.
 - Release builds verify timestamped signatures on the application and installer.
