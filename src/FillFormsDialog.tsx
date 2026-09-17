@@ -1,11 +1,11 @@
 import { useEffect, useRef, useState } from 'react';
-import type { DocumentFormFields, FormCheckboxField, FormField, FormPatch, FormTextField, SavedCopy } from './bridge';
+import type { DocumentFormFields, FormCheckboxField, FormField, FormPatch, FormRadioField, FormTextField, SavedCopy } from './bridge';
 import type { DocumentInfo } from './model';
 import s from './FillFormsDialog.module.css';
 
-type DraftValue = string | boolean;
+type DraftValue = string | boolean | null;
 
-function initialValue(field: FormField): DraftValue { return field.kind === 'text' ? field.value : field.checked; }
+function initialValue(field: FormField): DraftValue { return field.kind === 'text' ? field.value : field.kind === 'checkbox' ? field.checked : field.selectedOptionId; }
 
 function textDraft(field: FormTextField, values: Record<string, DraftValue>): string {
   const value = values[field.fieldId];
@@ -17,15 +17,23 @@ function checkboxDraft(field: FormCheckboxField, values: Record<string, DraftVal
   return typeof value === 'boolean' ? value : field.checked;
 }
 
+function radioDraft(field: FormRadioField, values: Record<string, DraftValue>): string | null {
+  const value = values[field.fieldId];
+  return typeof value === 'string' || value === null ? value : field.selectedOptionId;
+}
+
 export function formPatches(fields: FormField[], values: Record<string, DraftValue>): FormPatch[] {
   const patches: FormPatch[] = [];
   for (const field of fields) {
     if (field.kind === 'text') {
       const value = textDraft(field, values);
       if (value !== field.value) patches.push({ fieldId: field.fieldId, kind: 'text', value });
-    } else {
+    } else if (field.kind === 'checkbox') {
       const checked = checkboxDraft(field, values);
       if (checked !== field.checked) patches.push({ fieldId: field.fieldId, kind: 'checkbox', checked });
+    } else {
+      const optionId = radioDraft(field, values);
+      if (optionId !== field.selectedOptionId && optionId !== null) patches.push({ fieldId: field.fieldId, kind: 'radio', optionId });
     }
   }
   return patches;
@@ -34,7 +42,11 @@ export function formPatches(fields: FormField[], values: Record<string, DraftVal
 export function validateFormPatches(fields: FormField[], values: Record<string, DraftValue>, byteLimit: number): string | null {
   for (const field of fields) {
     const value = values[field.fieldId];
-    if (value !== undefined && typeof value !== (field.kind === 'text' ? 'string' : 'boolean')) return 'This form changed. Reload it and try again.';
+    if (value === undefined) continue;
+    if (field.kind === 'radio') {
+      if (value === null && field.selectedOptionId !== null) return 'This radio group cannot be cleared.';
+      if (value !== null && (typeof value !== 'string' || !field.options.some(option => option.optionId === value))) return 'This form changed. Reload it and try again.';
+    } else if (typeof value !== (field.kind === 'text' ? 'string' : 'boolean')) return 'This form changed. Reload it and try again.';
   }
   const patches = formPatches(fields, values);
   if (!patches.length) return 'Change at least one field before saving a new copy.';
@@ -86,7 +98,9 @@ export default function FillFormsDialog({ document, formFields, error: loadError
     <p>Edit the supported fields below. Text fields accept printable ASCII. Windows will ask where to save a new PDF. Your open source PDF stays unchanged.</p>
     {loadError ? <p role="alert">{loadError}</p> : !formFields ? <p role="status">Checking this PDF for supported fields…</p> : formFields.status === 'unsupported' ? <p role="status">Filling is unavailable. {formFields.reason || 'This PDF has form fields this build does not change.'}</p> : !fields.length ? <p role="status">This PDF has no supported fields.</p> : <div className={s.fields}>{fields.map(field => {
       if (field.kind === 'text') return <label key={field.fieldId}><span>{field.name}<small>Page {field.page + 1}{field.maxLength === null ? '' : ` · ${field.maxLength} characters`}</small></span><input aria-label={field.name} value={textDraft(field, values)} disabled={working} maxLength={field.maxLength ?? undefined} onChange={event => change(field.fieldId, event.target.value)} /></label>;
-      return <label className={s.checkbox} key={field.fieldId}><input type="checkbox" aria-label={`${field.name}, page ${field.page + 1}`} checked={checkboxDraft(field, values)} disabled={working} onChange={event => change(field.fieldId, event.target.checked)} /><span>{field.name}<small>Page {field.page + 1}</small></span></label>;
+      if (field.kind === 'checkbox') return <label className={s.checkbox} key={field.fieldId}><input type="checkbox" aria-label={`${field.name}, page ${field.page + 1}`} checked={checkboxDraft(field, values)} disabled={working} onChange={event => change(field.fieldId, event.target.checked)} /><span>{field.name}<small>Page {field.page + 1}</small></span></label>;
+      const selected = radioDraft(field, values);
+      return <fieldset className={s.radio} key={field.fieldId}><legend>{field.name}<small>Page {field.page + 1}</small></legend>{field.options.map(option => <label key={option.optionId}><input type="radio" name={field.fieldId} aria-label={`${field.name}: ${option.label}, page ${field.page + 1}`} checked={selected === option.optionId} disabled={working} onChange={() => change(field.fieldId, option.optionId)} /><span>{option.label}</span></label>)}</fieldset>;
     })}</div>}
     {error && <p role="alert">{error}</p>}
     {notice && <p role="status">{notice}</p>}

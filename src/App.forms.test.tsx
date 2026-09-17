@@ -8,7 +8,7 @@ import type { DocumentInfo } from './model';
 vi.mock('./bridge', () => ({ native: false, openDocument: vi.fn(), reopenDocument: vi.fn(), closeDocument: vi.fn(), editPages: vi.fn(), saveCopy: vi.fn(), splitDocument: vi.fn(), cropPage: vi.fn(), combineDocuments: vi.fn(), insertPagesCopy: vi.fn(), replacePagesCopy: vi.fn(), documentFormFields: vi.fn(), fillFormCopy: vi.fn() }));
 vi.mock('./Viewer', () => ({ default: () => <div>Viewer</div> }));
 const document = (id: number, revision: number): DocumentInfo => ({ id, name: `file-${id}.pdf`, path: `C:/file-${id}.pdf`, pages: [{ width: 612, height: 792 }], revision, dirty: true, can_undo: true, can_redo: false });
-const fields = (id: number, revision: number) => ({ documentId: id, revision, status: 'supported' as const, reason: null, input: 'printable-ascii' as const, valueByteLimit: 4096, fields: [{ kind: 'text' as const, fieldId: 'name', name: 'Name', page: 0, value: 'Ada', maxLength: 20 }, { kind: 'checkbox' as const, fieldId: 'approved', name: 'Approve terms', page: 0, checked: false }] });
+const fields = (id: number, revision: number) => ({ documentId: id, revision, status: 'supported' as const, reason: null, input: 'printable-ascii' as const, valueByteLimit: 4096, fields: [{ kind: 'text' as const, fieldId: 'name', name: 'Name', page: 0, value: 'Ada', maxLength: 20 }, { kind: 'checkbox' as const, fieldId: 'approved', name: 'Approve terms', page: 0, checked: false }, { kind: 'radio' as const, fieldId: 'delivery', name: 'Delivery', page: 0, options: [{ optionId: 'delivery-email', label: 'Email' }, { optionId: 'delivery-post', label: 'Post' }], selectedOptionId: null }] });
 beforeEach(() => { vi.clearAllMocks(); const storage = new Map(); vi.stubGlobal('window', { localStorage: { getItem: (key: string) => storage.get(key) ?? null, setItem: (key: string, value: string) => storage.set(key, value) }, addEventListener: vi.fn(), removeEventListener: vi.fn() }); });
 afterEach(() => vi.unstubAllGlobals());
 async function open(ui: ReactTestRenderer, info: DocumentInfo) { vi.mocked(openDocument).mockResolvedValue({ status: 'opened', document: info }); await act(async () => ui.root.findAllByType('button').find(item => item.children.includes('Open a file'))!.props.onClick()); }
@@ -24,8 +24,9 @@ it('fills current tagged field patches into a new clean active tab while keeping
   act(() => ui.root.findByProps({ title: 'Fill existing fields' }).props.onClick());
   await act(async () => {});
   act(() => ui.root.findByProps({ 'aria-label': 'Approve terms, page 1' }).props.onChange({ target: { checked: true } }));
+  act(() => ui.root.findByProps({ 'aria-label': 'Delivery: Post, page 1' }).props.onChange());
   await act(async () => save(ui).props.onClick());
-  expect(fillFormCopy).toHaveBeenCalledWith(1, 4, [{ fieldId: 'approved', kind: 'checkbox', checked: true }]);
+  expect(fillFormCopy).toHaveBeenCalledWith(1, 4, [{ fieldId: 'approved', kind: 'checkbox', checked: true }, { fieldId: 'delivery', kind: 'radio', optionId: 'delivery-post' }]);
   expect(ui.root.findByType(Viewer).props.document).toMatchObject({ id: 2, dirty: false, revision: 0 });
   expect(ui.root.findAllByType('span').some(item => item.children.includes('file-1.pdf') && item.children.includes(' *'))).toBe(true);
   act(() => ui.unmount());

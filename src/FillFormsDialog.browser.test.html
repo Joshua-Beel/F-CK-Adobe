@@ -1,5 +1,5 @@
 <!doctype html>
-<html><head><meta charset="UTF-8"><title>Fill forms browser test</title><style>body{margin:24px;font-family:system-ui,sans-serif}.dialog{max-width:460px;border:1px solid #bbb;border-radius:8px;padding:20px}.dialog label{display:block;margin:14px 0}.dialog input{display:block;width:100%;margin-top:5px;padding:7px}.dialog input[type="checkbox"]{display:inline-block;width:auto;margin:0 6px 0 0;padding:0}output{display:block;margin-top:14px;white-space:pre-wrap}</style></head>
+<html><head><meta charset="UTF-8"><title>Fill forms browser test</title><style>body{margin:24px;font-family:system-ui,sans-serif}.dialog{max-width:460px;border:1px solid #bbb;border-radius:8px;padding:20px}.dialog label{display:block;margin:14px 0}.dialog input{display:block;width:100%;margin-top:5px;padding:7px}.dialog input[type="checkbox"],.dialog input[type="radio"]{display:inline-block;width:auto;margin:0 6px 0 0;padding:0}.dialog fieldset{margin:14px 0}.dialog fieldset label{margin:7px 0}output{display:block;margin-top:14px;white-space:pre-wrap}</style></head>
 <body>
   <p>This mocked native dialog proof checks DOM drafts and patches only. It does not create, save, or render a PDF.</p>
   <main class="dialog" aria-label="Fill existing fields">
@@ -7,18 +7,20 @@
     <label>Name <input id="name" value="Ada" maxlength="20"></label>
     <label>City <input id="city" value=""></label>
     <label><input id="updates" type="checkbox"> Receive updates <small>Page 1</small></label>
+    <fieldset><legend>Contact method <small>Page 1</small></legend><label><input name="contact" type="radio" value="contact-email" checked> Email updates</label><label><input name="contact" type="radio" value="contact-post"> Postal mail</label></fieldset>
+    <fieldset><legend>Contact frequency <small>Page 1</small></legend><label><input name="frequency" type="radio" value="frequency-weekly"> Weekly</label><label><input name="frequency" type="radio" value="frequency-monthly"> Monthly</label></fieldset>
     <button id="save">Save filled copy</button><button id="cancel">Cancel native dialog</button>
     <output id="result">Ready.</output>
   </main>
   <script>
-    const initial = { name: 'Ada', city: '', updates: false };
+    const initial = { name: 'Ada', city: '', updates: false, contact: 'contact-email', frequency: null };
     const mockNative = { canceled: false, last: null, fill(values) { this.last = values; return this.canceled ? null : { path: 'C:/filled.pdf', document: { id: 8, revision: 0, dirty: false } }; } };
     const result = document.getElementById('result');
-    const values = () => ({ name: document.getElementById('name').value, city: document.getElementById('city').value, updates: document.getElementById('updates').checked });
+    const values = () => ({ name: document.getElementById('name').value, city: document.getElementById('city').value, updates: document.getElementById('updates').checked, contact: document.querySelector('input[name="contact"]:checked')?.value ?? null, frequency: document.querySelector('input[name="frequency"]:checked')?.value ?? null });
     document.getElementById('save').addEventListener('click', () => {
       const current = values();
       if (![current.name, current.city].every(value => /^[\x20-\x7E]*$/.test(value))) { result.textContent = 'Printable ASCII only.'; return; }
-      const patches = [{ fieldId: 'name', kind: 'text', value: current.name }, { fieldId: 'city', kind: 'text', value: current.city }, { fieldId: 'updates', kind: 'checkbox', checked: current.updates }].filter(patch => initial[patch.fieldId] !== (patch.kind === 'text' ? patch.value : patch.checked));
+      const patches = [{ fieldId: 'name', kind: 'text', value: current.name }, { fieldId: 'city', kind: 'text', value: current.city }, { fieldId: 'updates', kind: 'checkbox', checked: current.updates }, { fieldId: 'contact', kind: 'radio', optionId: current.contact }, { fieldId: 'frequency', kind: 'radio', optionId: current.frequency }].filter(patch => patch.kind === 'radio' ? patch.optionId !== null && initial[patch.fieldId] !== patch.optionId : initial[patch.fieldId] !== (patch.kind === 'text' ? patch.value : patch.checked));
       if (!patches.length) { result.textContent = 'Change at least one field.'; return; }
       const copy = mockNative.fill(patches);
       result.textContent = copy ? `mock native copy ${copy.document.id}; patches ${JSON.stringify(patches)}` : 'Saving was canceled. Your entries are still here.';

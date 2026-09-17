@@ -22,6 +22,7 @@ mod tests {
     use super::*;
     const FIXTURE: &[u8] = include_bytes!("../tests/fixtures/reportlab-plain-fields.pdf");
     const MIXED: &[u8] = include_bytes!("../tests/fixtures/reportlab-mixed-fields.pdf");
+    const RADIO: &[u8] = include_bytes!("../tests/fixtures/reportlab-radio-fields.pdf");
     fn session(bytes: Vec<u8>) -> EditSession { EditSession::new(bytes, 1) }
     fn fixture() -> EditSession { session(FIXTURE.to_vec()) }
     fn mutated(change: impl FnOnce(&mut Document)) -> EditSession {
@@ -30,6 +31,55 @@ mod tests {
     }
     fn field_ids(document: &Document) -> Vec<ObjectId> {
         dict(document, document.catalog().unwrap().get(b"AcroForm").unwrap()).unwrap().get(b"Fields").unwrap().as_array().unwrap().iter().map(|value| value.as_reference().unwrap()).collect()
+    }
+    #[test]
+    fn radios_tagged_selected_blank_source_switching_and_raw_appearances_are_exact() {
+        let source=session(RADIO.to_vec());let parsed=FormDocument::parse(&source).unwrap();assert_eq!(parsed.fields.len(),1);let field=&parsed.fields[0].dto;let radio=field.radio.as_ref().unwrap();assert_eq!(radio.options.iter().map(|option|option.label.as_str()).collect::<Vec<_>>(),vec!["Choice A","Choice B","Choice C"]);assert_eq!(radio.selected_option_id,Some(radio.options[1].option_id.clone()));
+        let wire=serde_json::to_value(FormDocument::query(&source,42)).unwrap();let item=&wire["fields"][0];assert_eq!(item["kind"],"radio");assert_eq!(item["fieldId"],field.field_id);assert_eq!(item["selectedOptionId"],radio.options[1].option_id);assert_eq!(item["options"][1]["label"],"Choice B");assert!(item.get("value").is_none()&&item.get("checked").is_none()&&item["options"][0].get("object").is_none());
+        let patch:FieldValue=serde_json::from_value(serde_json::json!({"fieldId":field.field_id,"kind":"radio","optionId":radio.options[0].option_id})).unwrap();for bad in[serde_json::json!({"fieldId":field.field_id,"kind":"radio","optionId":null}),serde_json::json!({"fieldId":field.field_id,"kind":"radio","optionId":radio.options[0].option_id,"checked":true})]{assert!(serde_json::from_value::<FieldValue>(bad).is_err());}
+        let original=parsed.document.clone();let(bytes,fields)=parsed.prepare(&[patch]).unwrap();let changed=FormDocument::parse(&session(bytes)).unwrap();assert_eq!(fields[0].value,"Choice A");let parent=changed.document.get_dictionary(changed.fields[0].object).unwrap();assert_eq!(parent.get(b"V").unwrap().as_name().unwrap(),b"Choice A");
+        for(index,option)in changed.fields[0].dto.radio.as_ref().unwrap().options.iter().enumerate(){let widget=changed.document.get_dictionary(option.object).unwrap();assert_eq!(widget.get(b"AS").unwrap().as_name().unwrap(),if index==0{b"Choice A".as_slice()}else{b"Off".as_slice()});for key in[b"AP".as_slice(),b"MK",b"BS",b"Rect",b"F",b"Parent",b"P"]{assert_eq!(widget.get(key).ok(),original.get_dictionary(option.object).unwrap().get(key).ok());}}
+        for(id,value)in&original.objects{if matches!(value,Object::Stream(_)){assert_eq!(changed.document.get_object(*id).unwrap(),value,"All original raw AP streams/resources remain unchanged");}}
+        let mut blank=original;let parent_id=field_ids(&blank)[0];let children=blank.get_dictionary(parent_id).unwrap().get(b"Kids").unwrap().as_array().unwrap().clone();blank.get_dictionary_mut(parent_id).unwrap().remove(b"V");for child in children{blank.get_dictionary_mut(child.as_reference().unwrap()).unwrap().set("AS",Object::Name(b"Off".to_vec()));}let mut bytes=Vec::new();blank.save_to(&mut bytes).unwrap();let blank=session(bytes);let parsed=FormDocument::parse(&blank).unwrap();assert!(parsed.fields[0].dto.radio.as_ref().unwrap().selected_option_id.is_none());assert!(serde_json::to_value(FormDocument::query(&blank,1)).unwrap()["fields"][0]["selectedOptionId"].is_null());let radio=parsed.fields[0].dto.radio.as_ref().unwrap();let patch=FieldValue::Radio {field_id:parsed.fields[0].dto.field_id.clone(),option_id:radio.options[2].option_id.clone()};assert_eq!(parsed.prepare(&[patch]).unwrap().1[0].value,"Choice C");assert_eq!(source.source,RADIO);
+    }
+    #[test]
+    fn radios_refuse_ambiguous_hierarchies_states_flags_pages_and_transforms() {
+        for kind in 0..21 {
+            let mut doc=Document::load_mem(RADIO).unwrap();let parent=field_ids(&doc)[0];let kids=doc.get_dictionary(parent).unwrap().get(b"Kids").unwrap().as_array().unwrap().clone();let a=kids[0].as_reference().unwrap();let b=kids[1].as_reference().unwrap();let page=*doc.get_pages().values().next().unwrap();
+            match kind {
+                0=>{doc.get_dictionary_mut(parent).unwrap().set("Kids",vec![kids[0].clone(),kids[0].clone()]);},
+                1=>{doc.get_dictionary_mut(parent).unwrap().set("Kids",vec![Object::Reference(parent),kids[1].clone()]);},
+                2=>{doc.get_dictionary_mut(a).unwrap().set("Parent",a);},
+                3=>{doc.get_dictionary_mut(a).unwrap().set("T",Object::string_literal("Ambiguous child name"));},
+                4=>{doc.get_dictionary_mut(a).unwrap().set("AS",Object::Name(b"Choice A".to_vec()));},
+                5=>{doc.get_dictionary_mut(parent).unwrap().remove(b"V");},
+                6=>{doc.get_dictionary_mut(b).unwrap().set("AS",Object::Name(b"Off".to_vec()));},
+                7=>{doc.get_dictionary_mut(parent).unwrap().set("V",Object::Name(b"Unknown".to_vec()));},
+                8=>{doc.get_dictionary_mut(parent).unwrap().set("DV",Object::Name(b"Unknown".to_vec()));},
+                9=>{doc.get_dictionary_mut(parent).unwrap().set("Ff",49154|33554432);},
+                10=>{doc.get_dictionary_mut(parent).unwrap().set("Ff",49155);},
+                11=>{doc.get_dictionary_mut(a).unwrap().set("F",6);},
+                12=>{doc.get_dictionary_mut(a).unwrap().set("P",parent);},
+                13=>{doc.get_dictionary_mut(page).unwrap().set("Annots",vec![kids[0].clone(),kids[1].clone()]);},
+                14=>{let mut refs=kids.clone();refs.push(kids[0].clone());doc.get_dictionary_mut(page).unwrap().set("Annots",refs);},
+                15=>{doc.get_dictionary_mut(parent).unwrap().set("AA",dictionary!{});},
+                16=>{doc.get_dictionary_mut(parent).unwrap().set("Kids",vec![kids[0].clone();33]);},
+                17=>{let ap=doc.get_dictionary_mut(a).unwrap().get_mut(b"AP").unwrap().as_dict_mut().unwrap();for(_,states)in ap {let states=states.as_dict_mut().unwrap();let on=states.remove(b"Choice A").unwrap();states.set("Choice B",on);}},
+                18=>{let ap=doc.get_dictionary(a).unwrap().get(b"AP").unwrap().as_dict().unwrap().get(b"N").unwrap().as_dict().unwrap().get(b"Choice A").unwrap().as_reference().unwrap();let stream=doc.get_object_mut(ap).unwrap().as_stream_mut().unwrap();stream.dict.remove(b"Filter");stream.set_content(b"q 1 0 0 1 11 10 cm 0 0 1 1 re f Q".to_vec());},
+                19=>{let form=doc.catalog().unwrap().get(b"AcroForm").unwrap().as_reference().unwrap();let mut second=doc.get_dictionary(parent).unwrap().clone();second.set("T",Object::string_literal("Shared children"));let second=doc.add_object(second);doc.get_dictionary_mut(form).unwrap().set("Fields",vec![Object::Reference(parent),Object::Reference(second)]);},
+                _=>{doc.get_dictionary_mut(a).unwrap().set("Ff",49154);},
+            }
+            let mut bytes=Vec::new();doc.save_to(&mut bytes).unwrap();let source=session(bytes.clone());let query=FormDocument::query(&source,7);assert_eq!(query.status,"unsupported","Radio adversarial case {kind}");assert!(query.fields.is_empty());assert_eq!(source.source,bytes);
+        }
+        let source=session(RADIO.to_vec());let field=FormDocument::parse(&source).unwrap().fields[0].dto.clone();for patches in[vec![FieldValue::Radio {field_id:field.field_id.clone(),option_id:"unknown".into()}],vec![FieldValue::Radio {field_id:field.field_id.clone(),option_id:String::new()}],vec![FieldValue::Checkbox {field_id:field.field_id.clone(),checked:false}],vec![FieldValue::Text {field_id:field.field_id.clone(),value:"Choice A".into()}],vec![FieldValue::Radio {field_id:field.field_id.clone(),option_id:field.radio.as_ref().unwrap().options[1].option_id.clone()}]] {assert!(FormDocument::parse(&source).unwrap().prepare(&patches).is_err());}
+    }
+    #[test]
+    fn radios_widget_budget_defaults_custom_exact_labels_and_cross_kind_patches_are_atomic() {
+        let build=|groups:usize|{let mut doc=Document::load_mem(RADIO).unwrap();let form=doc.catalog().unwrap().get(b"AcroForm").unwrap().as_reference().unwrap();let original=field_ids(&doc)[0];let parent=doc.get_dictionary(original).unwrap().clone();let child=doc.get_dictionary(parent.get(b"Kids").unwrap().as_array().unwrap()[0].as_reference().unwrap()).unwrap().clone();let page=*doc.get_pages().values().next().unwrap();let mut roots=Vec::new();let mut widgets=Vec::new();for group in 0..groups{let mut root=parent.clone();root.set("T",Object::string_literal(format!("Group {group}")));root.remove(b"V");let root=doc.add_object(root);let mut kids=Vec::new();for index in 0..32{let mut widget=child.clone();widget.set("Parent",root);let mut ap=widget.get(b"AP").unwrap().as_dict().unwrap().clone();for(_,states)in&mut ap{let states=states.as_dict_mut().unwrap();let on=states.remove(b"Choice A").unwrap();states.set(format!("Choice {index}"),on);}widget.set("AP",ap);widget.set("AS",Object::Name(b"Off".to_vec()));let id=doc.add_object(widget);kids.push(Object::Reference(id));widgets.push(Object::Reference(id));}doc.get_dictionary_mut(root).unwrap().set("Kids",kids);roots.push(Object::Reference(root));}doc.get_dictionary_mut(form).unwrap().set("Fields",roots);doc.get_dictionary_mut(page).unwrap().set("Annots",widgets);let mut bytes=Vec::new();doc.save_to(&mut bytes).unwrap();session(bytes)};
+        let boundary=build(8);let parsed=FormDocument::parse(&boundary).unwrap();assert_eq!(parsed.fields.len(),8);let untouched=parsed.document.clone();let first=&parsed.fields[0].dto;let patch=FieldValue::Radio {field_id:first.field_id.clone(),option_id:first.radio.as_ref().unwrap().options[0].option_id.clone()};let(output,fields)=parsed.prepare(&[patch]).unwrap();assert!(fields[1..].iter().all(|field|field.radio.as_ref().unwrap().selected_option_id.is_none()));let output=FormDocument::parse(&session(output)).unwrap();for field in &output.fields[1..]{assert_eq!(output.document.get_object(field.object).unwrap(),untouched.get_object(field.object).unwrap());for option in &field.dto.radio.as_ref().unwrap().options{assert_eq!(output.document.get_object(option.object).unwrap(),untouched.get_object(option.object).unwrap());}}
+        let oversized=build(9);let mut doc=Document::load_mem(&oversized.source).unwrap();let page=*doc.get_pages().values().next().unwrap();let pages=doc.get_dictionary(page).unwrap().get(b"Parent").unwrap().as_reference().unwrap();let mut extra=doc.get_dictionary(page).unwrap().clone();let widgets=extra.get(b"Annots").unwrap().as_array().unwrap().clone();extra.set("Annots",widgets[256..].to_vec());doc.get_dictionary_mut(page).unwrap().set("Annots",widgets[..256].to_vec());let extra=doc.add_object(extra);for widget in &widgets[256..]{doc.get_dictionary_mut(widget.as_reference().unwrap()).unwrap().set("P",extra);}let tree=doc.get_dictionary_mut(pages).unwrap();tree.get_mut(b"Kids").unwrap().as_array_mut().unwrap().push(Object::Reference(extra));tree.set("Count",2);let mut bytes=Vec::new();doc.save_to(&mut bytes).unwrap();let original_bytes=bytes.clone();let aggregate=EditSession::new(bytes,2);let reason=FormDocument::parse(&aggregate).err().unwrap();assert_eq!(reason,"Form filling is limited to 256 total page widgets.");assert_eq!(aggregate.source,original_bytes);
+        let mut doc=Document::load_mem(RADIO).unwrap();let parent=field_ids(&doc)[0];let child=doc.get_dictionary(parent).unwrap().get(b"Kids").unwrap().as_array().unwrap()[0].as_reference().unwrap();let label=" Choice /A (custom) ";let mut ap=doc.get_dictionary(child).unwrap().get(b"AP").unwrap().as_dict().unwrap().clone();for(_,states)in&mut ap{let states=states.as_dict_mut().unwrap();let on=states.remove(b"Choice A").unwrap();states.set(label,on);}doc.get_dictionary_mut(child).unwrap().set("AP",ap);doc.get_dictionary_mut(parent).unwrap().set("DV",Object::Name(b"Choice C".to_vec()));let mut bytes=Vec::new();doc.save_to(&mut bytes).unwrap();let source=session(bytes.clone());let parsed=FormDocument::parse(&source).unwrap();let field=&parsed.fields[0].dto;let option=field.radio.as_ref().unwrap().options[0].clone();assert_eq!(option.label,label);let id=field.field_id.clone();assert!(FormDocument::parse(&source).unwrap().prepare(&[FieldValue::Radio {field_id:id.clone(),option_id:option.option_id.clone()},FieldValue::Radio {field_id:id.clone(),option_id:option.option_id.clone()}]).is_err());let(output,fields)=parsed.prepare(&[FieldValue::Radio {field_id:id,option_id:option.option_id}]).unwrap();assert_eq!(fields[0].value,label);let output=FormDocument::parse(&session(output)).unwrap();assert_eq!(output.document.get_dictionary(parent).unwrap().get(b"DV").unwrap().as_name().unwrap(),b"Choice C");assert_eq!(source.source,bytes);
+        let mixed=session(MIXED.to_vec());let fields=FormDocument::parse(&mixed).unwrap();for field in fields.fields{assert!(FormDocument::parse(&mixed).unwrap().prepare(&[FieldValue::Radio {field_id:field.dto.field_id,option_id:"option".into()}]).is_err());}
     }
     #[test]
     fn checkboxes_tagged_wire_shape_false_and_wrong_kind_are_explicit() {
@@ -190,12 +240,18 @@ mod tests {
     }
 }
 #[derive(Clone, Debug)]
-pub struct FormField { pub field_id: String, pub name: String, pub page: usize, pub value: String, pub max_length: Option<usize>, pub checked: Option<bool>, pub(crate) on_state: Option<String> }
+pub struct FormField { pub field_id: String, pub name: String, pub page: usize, pub value: String, pub max_length: Option<usize>, pub checked: Option<bool>, pub(crate) on_state: Option<String>, pub radio: Option<RadioInfo> }
+#[derive(Clone,Debug)]
+pub struct RadioInfo { pub options:Vec<RadioOption>, pub selected_option_id:Option<String> }
+#[derive(Clone,Debug,Serialize)]
+#[serde(rename_all="camelCase")]
+pub struct RadioOption { pub option_id:String, pub label:String, #[serde(skip)] pub(crate) object:ObjectId }
 impl Serialize for FormField {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         let mut map = serializer.serialize_map(Some(6))?;
         map.serialize_entry("fieldId", &self.field_id)?; map.serialize_entry("name", &self.name)?; map.serialize_entry("page", &self.page)?;
-        if let Some(checked) = self.checked { map.serialize_entry("kind", "checkbox")?; map.serialize_entry("checked", &checked)?; }
+        if let Some(radio)=&self.radio {map.serialize_entry("kind","radio")?;map.serialize_entry("options",&radio.options)?;map.serialize_entry("selectedOptionId",&radio.selected_option_id)?;}
+        else if let Some(checked) = self.checked { map.serialize_entry("kind", "checkbox")?; map.serialize_entry("checked", &checked)?; }
         else { map.serialize_entry("kind", "text")?; map.serialize_entry("value", &self.value)?; map.serialize_entry("maxLength", &self.max_length)?; }
         map.end()
     }
@@ -205,8 +261,9 @@ impl Serialize for FormField {
 pub enum FieldValue {
     Text { #[serde(rename = "fieldId")] field_id: String, value: String },
     Checkbox { #[serde(rename = "fieldId")] field_id: String, checked: bool },
+    Radio { #[serde(rename="fieldId")] field_id:String, #[serde(rename="optionId")] option_id:String },
 }
-impl FieldValue { fn field_id(&self) -> &str { match self { Self::Text { field_id, .. } | Self::Checkbox { field_id, .. } => field_id } } }
+impl FieldValue { fn field_id(&self) -> &str { match self { Self::Text { field_id, .. } | Self::Checkbox { field_id, .. } | Self::Radio {field_id,..} => field_id } } }
 
 #[derive(Clone)]
 struct Style { width: f32, height: f32, border: f32, background: Option<Vec<f32>>, border_color: Option<Vec<f32>>, text_color: Vec<f32>, font: String, size: f32, font_object: Object }
@@ -243,7 +300,8 @@ fn same_appearance(actual: &Content<Vec<Operation>>, expected: &Content<Vec<Oper
 }
 
 // Checkbox artwork is retained verbatim: this validator never generates a glyph or substitutes a style.
-fn checkbox(doc: &Document, field: &Dictionary, ap_bytes: &mut usize) -> Result<(Vec<u8>, bool), String> {
+fn checkbox(doc: &Document, field: &Dictionary, ap_bytes: &mut usize) -> Result<(Vec<u8>, bool), String> { button_appearance(doc,field,ap_bytes,false) }
+fn button_appearance(doc: &Document, field: &Dictionary, ap_bytes: &mut usize, radio:bool) -> Result<(Vec<u8>, bool), String> {
     let rect = numbers(field.get(b"Rect").map_err(|_| "The checkbox rectangle is missing.")?)?;
     if rect.len() != 4 { return Err("The checkbox rectangle is invalid.".into()); }
     let (width, height) = (rect[2]-rect[0], rect[3]-rect[1]);
@@ -258,7 +316,7 @@ fn checkbox(doc: &Document, field: &Dictionary, ap_bytes: &mut usize) -> Result<
         let states = dict(doc,value)?;
         if states.len()!=2 || !states.has(b"Off") { return Err("A checkbox requires Off and one distinct on appearance state.".into()); }
         let on = states.iter().find(|(name,_)| name.as_slice()!=b"Off").map(|(name,_)|name).ok_or("The checkbox on state is missing.")?;
-        if on.is_empty() || on.len()>64 || !on.iter().all(u8::is_ascii_alphanumeric) { return Err("The checkbox on-state name is unsupported.".into()); }
+        if on.is_empty() || on.len()>64 || if radio {!on.iter().all(|byte|(32..=126).contains(byte)) || on.iter().all(|byte|*byte==b' ')}else{!on.iter().all(u8::is_ascii_alphanumeric)} { return Err("The button on-state name is unsupported.".into()); }
         if on_state.as_ref().is_some_and(|state|state!=on) { return Err("The checkbox appearance state names disagree.".into()); }
         on_state=Some(on.clone());
         let mut decoded_states = Vec::new();
@@ -274,25 +332,26 @@ fn checkbox(doc: &Document, field: &Dictionary, ap_bytes: &mut usize) -> Result<
             *ap_bytes+=decoded.len(); if *ap_bytes>MAX_TEXT { return Err("The form appearances exceed 1 MiB.".into()); }
             let content=Content::decode(&decoded).map_err(|_| "The checkbox appearance cannot be parsed.")?;
             if content.operations.is_empty() || content.operations.len()>256 { return Err("The checkbox appearance exceeds its operator limit.".into()); }
-            let mut stack=0usize; let mut path=false; let mut painted=0;
+            let mut stack=Vec::new();let mut offset=(0.0f32,0.0f32); let mut path=false; let mut painted=0;
             for operation in &content.operations {
-                let count=match operation.operator.as_str() { "q"|"Q"|"h"|"f"|"f*"|"s"|"S"|"n"=>0,"g"|"G"|"w"=>1,"m"|"l"=>2,"rg"|"RG"=>3,"re"=>4,"c"=>6,_=>return Err("The checkbox uses unsupported appearance operators.".into()) };
+                let count=match operation.operator.as_str() { "q"|"Q"|"h"|"f"|"f*"|"s"|"S"|"n"=>0,"g"|"G"|"w"=>1,"m"|"l"=>2,"rg"|"RG"=>3,"re"=>4,"c"=>6,"cm" if radio=>6,_=>return Err("The button uses unsupported appearance operators.".into()) };
                 if operation.operands.len()!=count { return Err("The checkbox appearance operator is malformed.".into()); }
                 let values=operation.operands.iter().map(number).collect::<Result<Vec<_>,_>>()?;
                 if values.iter().any(|value|value.abs()>10000.0) { return Err("The checkbox appearance number exceeds its limit.".into()); }
                 match operation.operator.as_str() {
-                    "q"=>{if path || stack>=8 { return Err("The checkbox graphics stack is unsupported.".into()); } stack+=1;},
-                    "Q"=>{if path || stack==0 { return Err("The checkbox graphics stack is unbalanced.".into()); } stack-=1;},
+                    "q"=>{if path || stack.len()>=8 { return Err("The button graphics stack is unsupported.".into()); } stack.push(offset);},
+                    "Q"=>{if path { return Err("The button graphics stack is unbalanced.".into()); } offset=stack.pop().ok_or("The button graphics stack is unbalanced.")?;},
+                    "cm"=>{if path || stack.is_empty() || offset!=(0.0,0.0) || values!=vec![1.0,0.0,0.0,1.0,width/2.0,height/2.0] {return Err("Only one safe centered radio appearance translation is supported per graphics state.".into());}offset=(width/2.0,height/2.0);},
                     "g"|"G"|"rg"|"RG"=>{color(&Object::Array(operation.operands.clone()))?;},
                     "w"=>{if !(0.0..=4.0).contains(&values[0]) {return Err("The checkbox stroke width is unsupported.".into());}},
-                    "m"|"l"|"c"=>{if operation.operator!="m" && !path { return Err("The checkbox path is malformed.".into()); } if values.chunks_exact(2).any(|point|!(0.0..=width).contains(&point[0]) || !(0.0..=height).contains(&point[1])) { return Err("The checkbox path is outside its appearance bounds.".into()); } path=true;},
-                    "re"=>{if values[0]<0.0 || values[1]<0.0 || values[2]<=0.0 || values[3]<=0.0 || values[0]+values[2]>width || values[1]+values[3]>height { return Err("The checkbox rectangle path is out of bounds.".into()); } path=true;},
+                    "m"|"l"|"c"=>{if operation.operator!="m" && !path { return Err("The button path is malformed.".into()); } if values.chunks_exact(2).any(|point|!(0.0..=width).contains(&(point[0]+offset.0)) || !(0.0..=height).contains(&(point[1]+offset.1))) { return Err("The button path is outside its appearance bounds.".into()); } path=true;},
+                    "re"=>{if values[0]+offset.0<0.0 || values[1]+offset.1<0.0 || values[2]<=0.0 || values[3]<=0.0 || values[0]+offset.0+values[2]>width || values[1]+offset.1+values[3]>height { return Err("The button rectangle path is out of bounds.".into()); } path=true;},
                     "h"=>{if !path {return Err("The checkbox path is malformed.".into());}},
                     "f"|"f*"|"s"|"S"=>{if !path {return Err("The checkbox paint has no path.".into());} painted+=1;path=false;},
                     "n"=>{path=false;},_=>unreachable!(),
                 }
             }
-            if stack!=0 || path || painted==0 { return Err("The checkbox appearance is incomplete or unbalanced.".into()); }
+            if !stack.is_empty() || path || painted==0 { return Err("The button appearance is incomplete or unbalanced.".into()); }
             decoded_states.push(content);
         }
         if same_appearance(&decoded_states[0],&decoded_states[1]) { return Err("The checkbox on and Off appearances must differ.".into()); }
@@ -320,6 +379,34 @@ fn font(doc: &Document, value: &Object) -> Result<(), String> {
         else { let name = value.as_name().map_err(|_| "Invalid form font glyph.")?; if code > 255 { return Err("Invalid form font encoding range.".into()); } if (32..=126).contains(&code) { if code == 39 && name == b"quotesingle" { quote = true; } else if code == 96 && name == b"grave" { grave = true; } else { return Err("The form remaps printable ASCII glyphs.".into()); } } code += 1; }
     }
     if !quote || !grave { return Err("The form does not use the supported ASCII quote encoding.".into()); } Ok(())
+}
+
+fn radio_group(doc:&Document,parent:&Dictionary,id:ObjectId,widgets:&HashMap<ObjectId,usize>,pages:&[ObjectId],consumed:&mut HashSet<ObjectId>,ap_bytes:&mut usize) -> Result<(usize,RadioInfo,String),String> {
+    keys(parent,&[b"FT",b"Ff",b"T",b"TU",b"Kids",b"V",b"DV"])?;
+    if parent.get(b"FT").and_then(Object::as_name).ok()!=Some(b"Btn") || !matches!(parent.get(b"Ff").and_then(Object::as_i64).ok(),Some(49152|49154)) || widgets.contains_key(&id) {return Err("Only one-level Radio and NoToggleToOff groups with optional Required are supported.".into());}
+    let kids=parent.get(b"Kids").and_then(Object::as_array).map_err(|_|"The radio child list is invalid.")?;
+    if !(2..=32).contains(&kids.len()){return Err("Each radio group requires between 2 and 32 options.".into());}
+    let value=parent.get(b"V").ok().map(|value|value.as_name().map_err(|_|"The radio current value is invalid.")).transpose()?;
+    let mut options=Vec::new();let mut states=HashSet::new();let mut group_page=None;let mut selected=None;
+    for kid in kids {
+        let widget_id=kid.as_reference().map_err(|_|"The radio widget must be a reference.")?;
+        if !consumed.insert(widget_id){return Err("A radio widget is repeated or shared between fields.".into());}
+        let page=*widgets.get(&widget_id).ok_or("A radio widget has no canonical page annotation.")?;
+        if group_page.is_some_and(|owner|owner!=page){return Err("Radio groups spanning multiple pages are unsupported.".into());}group_page=Some(page);
+        let widget=doc.get_dictionary(widget_id).map_err(|_|"The radio widget is invalid.")?;
+        keys(widget,&[b"Type",b"Subtype",b"FT",b"Parent",b"P",b"F",b"Rect",b"AP",b"AS",b"BS",b"MK",b"H"])?;
+        if widget.get(b"Type").ok().is_some_and(|value|value.as_name().ok()!=Some(b"Annot")) || widget.get(b"Subtype").and_then(Object::as_name).ok()!=Some(b"Widget") || widget.get(b"FT").ok().is_some_and(|value|value.as_name().ok()!=Some(b"Btn")) || widget.get(b"Parent").and_then(Object::as_reference).ok()!=Some(id) || widget.get(b"P").and_then(Object::as_reference).ok()!=Some(pages[page]) || widget.get(b"F").and_then(Object::as_i64).ok()!=Some(4) {return Err("The radio widget flags, parent, or page relationship is unsupported.".into());}
+        let mut appearance_widget=widget.clone();appearance_widget.set("V",widget.get(b"AS").map_err(|_|"The radio appearance state is missing.")?.clone());
+        let(on,is_selected)=button_appearance(doc,&appearance_widget,ap_bytes,true)?;
+        if !states.insert(on.clone()){return Err("Radio option states must be distinct, without radios in unison.".into());}
+        let label=String::from_utf8(on).map_err(|_|"The radio source option name is unsupported.")?;let option_id=format!("option-{}-{}",widget_id.0,widget_id.1);
+        if is_selected {if selected.is_some(){return Err("Multiple selected radio widgets are unsupported.".into());}if value!=Some(label.as_bytes()){return Err("The selected radio widget and parent value disagree.".into());}selected=Some(option_id.clone());}
+        options.push(RadioOption {option_id,label,object:widget_id});
+    }
+    if selected.is_none() && value.is_some_and(|value|value!=b"Off"){return Err("The blank radio group and parent value disagree.".into());}
+    if parent.get(b"DV").ok().is_some_and(|value|value.as_name().ok().is_none_or(|value|value!=b"Off"&&!states.contains(value))){return Err("The radio default must be Off or a valid source option state.".into());}
+    let current=selected.as_ref().and_then(|selected|options.iter().find(|option|&option.option_id==selected)).map(|option|option.label.clone()).unwrap_or_default();
+    Ok((group_page.ok_or("The radio page is missing.")?,RadioInfo {options,selected_option_id:selected},current))
 }
 
 fn style(doc: &Document, form: &Dictionary, field: &Dictionary) -> Result<Style, String> {
@@ -398,11 +485,19 @@ impl FormDocument {
         if roots.len() > MAX_FIELDS { return Err("Form filling is limited to 256 fields.".into()); }
         let mut widgets = HashMap::new();
         for (page, id) in pages.iter().enumerate() { if let Ok(annots) = document.get_dictionary(*id).map_err(|_| "Invalid form page.")?.get(b"Annots") { let annots = object(&document, annots)?.as_array().map_err(|_| "The form widget list is invalid.")?; if annots.len() > MAX_FIELDS { return Err("The form widget list is too large.".into()); } for annot in annots { let id = annot.as_reference().map_err(|_| "Only referenced form widgets are supported.")?; if widgets.insert(id, page).is_some() { return Err("Repeated or ambiguous form widgets are not supported.".into()); } if widgets.len() > MAX_FIELDS { return Err("Form filling is limited to 256 total page widgets.".into()); } } } }
-        let mut fields = Vec::new(); let mut names = HashSet::new(); let mut ids = HashSet::new(); let mut text_bytes = 0; let mut ap_bytes = 0;
+        let mut fields = Vec::new(); let mut names = HashSet::new(); let mut ids = HashSet::new();let mut consumed_widgets=HashSet::new(); let mut text_bytes = 0; let mut ap_bytes = 0;
         for reference in roots {
             let id = reference.as_reference().map_err(|_| "Only flat referenced form fields are supported.")?;
             if !ids.insert(id) { return Err("Repeated form field references are not supported.".into()); }
             let field = document.get_dictionary(id).map_err(|_| "The form field is invalid.")?;
+            if field.has(b"Kids") && field.get(b"FT").and_then(Object::as_name).ok()==Some(b"Btn") {
+                let name=text(field.get(b"T").map_err(|_|"The radio field name is missing.")?)?;
+                if name.trim().is_empty() || name.len()>1024 || name.chars().any(char::is_control) || !names.insert(name.clone()){return Err("Unnamed or duplicate radio fields are unsupported.".into());}
+                let(page,radio,value)=radio_group(&document,field,id,&widgets,&pages,&mut consumed_widgets,&mut ap_bytes)?;
+                text_bytes+=name.len()+value.len()+radio.options.iter().map(|option|option.label.len()).sum::<usize>();if text_bytes>MAX_TEXT{return Err("The form names, options and values exceed 1 MiB.".into());}
+                fields.push(ParsedField {dto:FormField {field_id:format!("field-{}-{}",id.0,id.1),name,page,value,max_length:None,checked:None,on_state:None,radio:Some(radio)},object:id,style:None,on_state:None});continue;
+            }
+            if !consumed_widgets.insert(id){return Err("A form widget is repeated or shared between fields.".into());}
             let is_checkbox=field.get(b"FT").and_then(Object::as_name).ok()==Some(b"Btn");
             if is_checkbox { keys(field,&[b"Type",b"Subtype",b"FT",b"T",b"TU",b"V",b"DV",b"AS",b"F",b"Ff",b"Rect",b"P",b"AP",b"BS",b"MK",b"H"])?; }
             else { keys(field, &[b"Type", b"Subtype", b"FT", b"T", b"TU", b"V", b"DV", b"F", b"Ff", b"Rect", b"P", b"DA", b"AP", b"BS", b"MK", b"MaxLen", b"Q"])?; }
@@ -416,7 +511,7 @@ impl FormDocument {
             if is_checkbox {
                 let (on_state,checked)=checkbox(&document,field,&mut ap_bytes)?;
                 text_bytes+=name.len(); if text_bytes>MAX_TEXT {return Err("The form text exceeds 1 MiB.".into());}
-                fields.push(ParsedField {dto:FormField {field_id:format!("field-{}-{}",id.0,id.1),name,page,value:checked.to_string(),max_length:None,checked:Some(checked),on_state:Some(String::from_utf8(on_state.clone()).map_err(|_|"Invalid checkbox state name.")?)},object:id,style:None,on_state:Some(on_state)});
+                fields.push(ParsedField {dto:FormField {field_id:format!("field-{}-{}",id.0,id.1),name,page,value:checked.to_string(),max_length:None,checked:Some(checked),on_state:Some(String::from_utf8(on_state.clone()).map_err(|_|"Invalid checkbox state name.")?),radio:None},object:id,style:None,on_state:Some(on_state)});
                 continue;
             }
             let value = field.get(b"V").ok().map(text).transpose()?.unwrap_or_default(); ascii(&value)?;
@@ -441,9 +536,9 @@ impl FormDocument {
                 let decoded = stream.decompressed_content_with_limit(MAX_AP).map_err(|_| "The form appearance exceeds its decoding limit or uses an unsupported filter.")?; ap_bytes += decoded.len(); if ap_bytes > MAX_TEXT { return Err("The form appearances exceed 1 MiB.".into()); }
                 if !same_appearance(&Content::decode(&decoded).map_err(|_| "The form appearance cannot be parsed.")?, &appearance(&style, &value)) { return Err("The form contains an unknown appearance or layout; filling it could discard artwork.".into()); }
             } else if !value.is_empty() { return Err("A populated form field without its original appearance is unsupported.".into()); }
-            let parsed = ParsedField { dto: FormField { field_id: format!("field-{}-{}", id.0, id.1), name, page, value, max_length, checked:None, on_state:None }, object: id, style:Some(style), on_state:None }; fits(&parsed, &parsed.dto.value)?; fields.push(parsed);
+            let parsed = ParsedField { dto: FormField { field_id: format!("field-{}-{}", id.0, id.1), name, page, value, max_length, checked:None, on_state:None, radio:None }, object: id, style:Some(style), on_state:None }; fits(&parsed, &parsed.dto.value)?; fields.push(parsed);
         }
-        if ids.len() != widgets.len() { return Err("The form contains orphaned or foreign page annotations.".into()); }
+        if consumed_widgets.len() != widgets.len() { return Err("The form contains orphaned or foreign page annotations.".into()); }
         Ok(Self { document, fields, pages: pages.len() })
     }
     pub fn query(session: &EditSession, id: u64) -> FormFields {
@@ -459,12 +554,18 @@ impl FormDocument {
             match patch {
                 FieldValue::Text {value,..}=>{fits(field,value)?;changed|=*value!=field.dto.value;field.dto.value=value.clone();},
                 FieldValue::Checkbox {checked,..}=>{let current=field.dto.checked.ok_or("The submitted form patch has the wrong field kind.")?;changed|=current!=*checked;field.dto.checked=Some(*checked);field.dto.value=checked.to_string();},
+                FieldValue::Radio {option_id,..}=>{let radio=field.dto.radio.as_mut().ok_or("The submitted form patch has the wrong field kind.")?;let option=radio.options.iter().find(|option|&option.option_id==option_id).ok_or("The radio option no longer exists. Refresh the field list.")?;changed|=radio.selected_option_id.as_ref()!=Some(option_id);radio.selected_option_id=Some(option_id.clone());field.dto.value=option.label.clone();},
             }
         }
         if !changed { return Err("Change at least one form value before saving a new copy.".into()); }
-        if self.fields.iter().map(|field| field.dto.name.len() + field.dto.value.len()).sum::<usize>() > MAX_TEXT { return Err("The form names and values exceed 1 MiB.".into()); }
+        if self.fields.iter().map(|field| field.dto.name.len() + field.dto.value.len()+field.dto.radio.as_ref().map(|radio|radio.options.iter().map(|option|option.label.len()).sum::<usize>()).unwrap_or(0)).sum::<usize>() > MAX_TEXT { return Err("The form names, options and values exceed 1 MiB.".into()); }
         for field in &self.fields {
             if !seen.contains(field.dto.field_id.as_str()) { continue; }
+            if let Some(radio)=&field.dto.radio {
+                let selected=radio.options.iter().find(|option|Some(&option.option_id)==radio.selected_option_id.as_ref()).ok_or("A radio patch must select one existing option.")?;
+                self.document.get_dictionary_mut(field.object).map_err(|_|"The radio parent disappeared during preparation.")?.set("V",Object::Name(selected.label.as_bytes().to_vec()));
+                for option in &radio.options {self.document.get_dictionary_mut(option.object).map_err(|_|"The radio widget disappeared during preparation.")?.set("AS",Object::Name(if option.option_id==selected.option_id {option.label.as_bytes().to_vec()}else{b"Off".to_vec()}));}continue;
+            }
             if let Some(checked)=field.dto.checked {
                 let state=Object::Name(if checked {field.on_state.clone().ok_or("Missing checkbox on state.")?} else {b"Off".to_vec()});
                 let widget=self.document.get_dictionary_mut(field.object).map_err(|_| "The checkbox disappeared during preparation.")?;widget.set("V",state.clone());widget.set("AS",state);

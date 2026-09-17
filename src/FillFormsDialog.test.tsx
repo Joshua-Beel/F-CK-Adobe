@@ -5,7 +5,7 @@ import type { DocumentFormFields, SavedCopy } from './bridge';
 import type { DocumentInfo } from './model';
 
 const document: DocumentInfo = { id: 4, name: 'form.pdf', path: 'C:/form.pdf', pages: [{ width: 612, height: 792 }], revision: 7, dirty: true, can_undo: true, can_redo: false };
-const fields: DocumentFormFields = { documentId: 4, revision: 7, status: 'supported', reason: null, input: 'printable-ascii', valueByteLimit: 4096, fields: [{ kind: 'text', fieldId: 'name', name: 'Name', page: 0, value: 'Ada', maxLength: 12 }, { kind: 'text', fieldId: 'city', name: 'City', page: 0, value: '', maxLength: null }, { kind: 'checkbox', fieldId: 'approved', name: 'Approve terms', page: 1, checked: true }, { kind: 'checkbox', fieldId: 'updates', name: 'Receive updates', page: 1, checked: false }] };
+const fields: DocumentFormFields = { documentId: 4, revision: 7, status: 'supported', reason: null, input: 'printable-ascii', valueByteLimit: 4096, fields: [{ kind: 'text', fieldId: 'name', name: 'Name', page: 0, value: 'Ada', maxLength: 12 }, { kind: 'text', fieldId: 'city', name: 'City', page: 0, value: '', maxLength: null }, { kind: 'checkbox', fieldId: 'approved', name: 'Approve terms', page: 1, checked: true }, { kind: 'checkbox', fieldId: 'updates', name: 'Receive updates', page: 1, checked: false }, { kind: 'radio', fieldId: 'contact', name: 'Contact method', page: 2, options: [{ optionId: 'contact-email', label: 'Email updates' }, { optionId: 'contact-post', label: 'Postal mail' }], selectedOptionId: 'contact-email' }, { kind: 'radio', fieldId: 'frequency', name: 'Contact frequency', page: 2, options: [{ optionId: 'frequency-weekly', label: 'Weekly' }, { optionId: 'frequency-monthly', label: 'Monthly' }], selectedOptionId: null }] };
 const output: SavedCopy = { path: 'C:/filled.pdf', document: { ...document, id: 8, name: 'filled.pdf', path: 'C:/filled.pdf', revision: 0, dirty: false, can_undo: false } };
 const save = (ui: ReactTestRenderer) => ui.root.findAllByType('button').find(button => button.children.join('') === 'Save filled copy')!;
 
@@ -16,22 +16,26 @@ async function mount({ formFields = fields, error = '', busy = false, fill = vi.
 }
 
 describe('FillFormsDialog', () => {
-  it('uses tagged changed-only text and checkbox patches and states new-copy source preservation', async () => {
+  it('uses tagged changed-only text, checkbox, and radio patches and states new-copy source preservation', async () => {
     const { ui, fill, close } = await mount();
     expect(JSON.stringify(ui.toJSON())).toContain('Your open source PDF stays unchanged.');
     act(() => ui.root.findByProps({ 'aria-label': 'Name' }).props.onChange({ target: { value: 'Ada Lovelace' } }));
     act(() => ui.root.findByProps({ 'aria-label': 'Approve terms, page 2' }).props.onChange({ target: { checked: false } }));
+    act(() => ui.root.findByProps({ 'aria-label': 'Contact frequency: Monthly, page 3' }).props.onChange());
     await act(async () => save(ui).props.onClick());
-    expect(fill).toHaveBeenCalledWith(4, 7, [{ fieldId: 'name', kind: 'text', value: 'Ada Lovelace' }, { fieldId: 'approved', kind: 'checkbox', checked: false }]);
+    expect(fill).toHaveBeenCalledWith(4, 7, [{ fieldId: 'name', kind: 'text', value: 'Ada Lovelace' }, { fieldId: 'approved', kind: 'checkbox', checked: false }, { fieldId: 'frequency', kind: 'radio', optionId: 'frequency-monthly' }]);
     expect(close).toHaveBeenCalledOnce();
     act(() => ui.unmount());
   });
 
-  it('validates text without dropping blank or false checkbox values and recognizes a reverted checkbox as unchanged', () => {
-    expect(formPatches(fields.fields, { name: 'Ada', city: '', approved: true, updates: false })).toEqual([]);
-    expect(formPatches(fields.fields, { name: 'Ada', city: 'Paris', approved: false, updates: true })).toEqual([{ fieldId: 'city', kind: 'text', value: 'Paris' }, { fieldId: 'approved', kind: 'checkbox', checked: false }, { fieldId: 'updates', kind: 'checkbox', checked: true }]);
-    expect(validateFormPatches(fields.fields, { name: 'Ada', city: '', approved: true, updates: false }, 4096)).toContain('Change at least one');
-    expect(validateFormPatches(fields.fields, { name: 'Åda', city: '', approved: true, updates: false }, 4096)).toContain('printable ASCII');
+  it('validates text without dropping blank, false, or blank-radio values and recognizes reverted inputs as unchanged', () => {
+    const initial = { name: 'Ada', city: '', approved: true, updates: false, contact: 'contact-email', frequency: null };
+    expect(formPatches(fields.fields, initial)).toEqual([]);
+    expect(formPatches(fields.fields, { ...initial, city: 'Paris', approved: false, updates: true, contact: 'contact-post', frequency: 'frequency-monthly' })).toEqual([{ fieldId: 'city', kind: 'text', value: 'Paris' }, { fieldId: 'approved', kind: 'checkbox', checked: false }, { fieldId: 'updates', kind: 'checkbox', checked: true }, { fieldId: 'contact', kind: 'radio', optionId: 'contact-post' }, { fieldId: 'frequency', kind: 'radio', optionId: 'frequency-monthly' }]);
+    expect(validateFormPatches(fields.fields, initial, 4096)).toContain('Change at least one');
+    expect(validateFormPatches(fields.fields, { ...initial, name: 'Åda' }, 4096)).toContain('printable ASCII');
+    expect(validateFormPatches(fields.fields, { ...initial, contact: null }, 4096)).toContain('cannot be cleared');
+    expect(validateFormPatches(fields.fields, { ...initial, frequency: 'unknown' }, 4096)).toContain('form changed');
     const name = fields.fields[0];
     if (name.kind !== 'text') throw new Error('fixture field changed');
     expect(validateFormPatches([{ ...name, maxLength: 3 }], { name: 'ABCD' }, 4096)).toContain('3-character');
@@ -55,6 +59,25 @@ describe('FillFormsDialog', () => {
     expect(fill).toHaveBeenCalledWith(4, 7, [{ fieldId: 'updates', kind: 'checkbox', checked: true }]);
     expect(close).not.toHaveBeenCalled();
     expect(ui.root.findByProps({ 'aria-label': 'Receive updates, page 2' }).props.checked).toBe(true);
+    act(() => ui.unmount());
+  });
+
+  it('uses independent source-named radio groups, including a supported blank group', async () => {
+    const { ui, fill, close } = await mount({ fill: vi.fn().mockResolvedValue(null) });
+    const email = ui.root.findByProps({ 'aria-label': 'Contact method: Email updates, page 3' });
+    const post = ui.root.findByProps({ 'aria-label': 'Contact method: Postal mail, page 3' });
+    const weekly = ui.root.findByProps({ 'aria-label': 'Contact frequency: Weekly, page 3' });
+    expect(email.props.type).toBe('radio');
+    expect(email.props.name).toBe('contact');
+    expect(email.props.checked).toBe(true);
+    expect(post.props.checked).toBe(false);
+    expect(weekly.props.name).toBe('frequency');
+    expect(weekly.props.checked).toBe(false);
+    act(() => post.props.onChange());
+    act(() => weekly.props.onChange());
+    await act(async () => save(ui).props.onClick());
+    expect(fill).toHaveBeenCalledWith(4, 7, [{ fieldId: 'contact', kind: 'radio', optionId: 'contact-post' }, { fieldId: 'frequency', kind: 'radio', optionId: 'frequency-weekly' }]);
+    expect(close).not.toHaveBeenCalled();
     act(() => ui.unmount());
   });
 
