@@ -25,10 +25,18 @@ pub enum OpenResult {
     Opened { document: DocumentInfo },
     PasswordRequired { request_id: u64, name: String, incorrect: bool },
 }
-pub struct PrintSnapshotInfo { pub token: u64, pub pages: usize, pub name: String }
+pub struct PrintSnapshotInfo { pub token: u64, pub pages: usize, pub name: String, cleanup: mpsc::Sender<Request> }
+impl Drop for PrintSnapshotInfo {
+    fn drop(&mut self) {
+        let (reply, _) = oneshot::channel();
+        let _ = self.cleanup.send(Request::EndPrint(self.token, reply));
+    }
+}
 pub struct PrintBitmap { pub width: u32, pub height: u32, pub bgra: Vec<u8> }
 type Reply<T> = oneshot::Sender<Result<T, String>>;
 enum Request {
+    #[cfg(test)]
+    OpenDocumentsForPath(PathBuf, Reply<Vec<u64>>),
     Open(PathBuf, Reply<DocumentInfo>),
     BeginOpen(PathBuf, Reply<OpenResult>),
     Unlock(u64, String, Reply<OpenResult>),
@@ -75,6 +83,7 @@ impl PdfService {
     }
     fn start_worker(library: PathBuf) -> Self {
         let (sender, receiver) = mpsc::channel();
+        let snapshot_cleanup = sender.clone();
         std::thread::Builder::new().name("pdf-worker".into()).spawn(move || {
             let pdfium = Pdfium::bind_to_library(library).map(Pdfium::new).map_err(|e| format!("PDF engine could not start: {e}"));
             let mut documents = HashMap::new();
@@ -97,6 +106,11 @@ impl PdfService {
                     other => other,
                 };
                 match request {
+                    #[cfg(test)]
+                    Request::OpenDocumentsForPath(path, reply) => {
+                        let ids = sessions.iter().filter_map(|(id, (_, info))| (PathBuf::from(&info.path) == path).then_some(*id)).collect();
+                        let _ = reply.send(Ok(ids));
+                    }
                     Request::BeginPrint(id, revision, reply) => {
                         if reply.is_closed() { continue; }
                         let result = (|| {
@@ -107,7 +121,7 @@ impl PdfService {
                             if !matches!(document.permissions().security_handler_revision(), Ok(PdfSecurityHandlerRevision::Unprotected)) { return Err("Printing encrypted or restricted PDFs is not supported in this build.".into()); }
                             let token = next_print; next_print += 1;
                             print_snapshots.insert(token, (document.clone(), session.plan.clone()));
-                            Ok(PrintSnapshotInfo { token, pages: session.plan.len(), name: info.name.clone() })
+                            Ok(PrintSnapshotInfo { token, pages: session.plan.len(), name: info.name.clone(), cleanup: snapshot_cleanup.clone() })
                         })();
                         if let Err(Ok(snapshot)) = reply.send(result) { print_snapshots.remove(&snapshot.token); }
                     }
@@ -155,6 +169,7 @@ impl PdfService {
                         }
                     }
                     Request::Open(path, reply) => {
+                        if reply.is_closed() { continue; }
                         let result = (|| {
                             let engine = pdfium.as_ref().map_err(Clone::clone)?;
                             let bytes = std::fs::read(&path).map_err(|e| e.to_string())?;
@@ -165,7 +180,7 @@ impl PdfService {
                             sessions.insert(id, (EditSession::new(bytes, info.pages.len()), info.clone()));
                             documents.insert(id, std::rc::Rc::new(document)); Ok(info)
                         })();
-                        let _ = reply.send(result);
+                        if let Err(Ok(info)) = reply.send(result) { documents.remove(&info.id); sessions.remove(&info.id); }
                     },
                     Request::Render(id, page, width, reply) => {
                         if reply.is_closed() { continue; }
@@ -519,6 +534,91 @@ mod tests {
     }
     fn print_snapshot(service: &PdfService, id: u64, revision: u64) -> TestPrintSnapshot {
         TestPrintSnapshot { service: service.clone(), info: call(service, |reply| Request::BeginPrint(id, revision, reply)).unwrap() }
+    }
+    struct UnreadPrintCleanup { service: PdfService, document: u64, tokens: Vec<u64> }
+    impl Drop for UnreadPrintCleanup {
+        fn drop(&mut self) {
+            for token in &self.tokens {
+                let (tx, rx) = oneshot::channel();
+                if self.service.sender.send(Request::EndPrint(*token, tx)).is_ok() { let _ = rx.blocking_recv(); }
+            }
+            let (tx, rx) = oneshot::channel();
+            if self.service.sender.send(Request::Close(self.document, tx)).is_ok() { let _ = rx.blocking_recv(); }
+        }
+    }
+    #[test]
+    fn print_unread_successful_replies_release_snapshot_capacity_when_receivers_are_dropped() {
+        let _print_lock = print_test_lock();
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let service = PdfService::start(root.join("resources/pdfium/bin/pdfium.dll"));
+        let info = call(&service, |reply| Request::Open(root.join("resources/welcome.pdf"), reply)).unwrap();
+        let bootstrap = print_snapshot(&service, info.id, info.revision);
+        let first_token = bootstrap.token + 1;
+        drop(bootstrap);
+        let mut cleanup = UnreadPrintCleanup { service: service.clone(), document: info.id, tokens: Vec::new() };
+        for index in 0..4 {
+            let (tx, rx) = oneshot::channel();
+            service.sender.send(Request::BeginPrint(info.id, info.revision, tx)).unwrap();
+            call(&service, |reply| Request::Properties(info.id, info.revision, reply)).unwrap();
+            assert!(!rx.is_empty(), "The worker barrier must establish that the print reply was already sent");
+            cleanup.tokens.push(first_token + index);
+            drop(rx);
+            call(&service, |reply| Request::Properties(info.id, info.revision, reply)).unwrap();
+        }
+        let available = call(&service, |reply| Request::BeginPrint(info.id, info.revision, reply));
+        assert!(available.is_ok(), "Dropped unread replies retained print capacity: {}", available.as_ref().err().map(String::as_str).unwrap_or(""));
+        let available = TestPrintSnapshot { service: service.clone(), info: available.unwrap() };
+        assert!(!service.print_render_blocking(available.token, 0, 100, 100).unwrap().bgra.is_empty());
+        drop(available);
+    }
+    #[test]
+    fn open_canceled_before_worker_processing_never_retains_an_unreachable_document() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let service = PdfService::start(root.join("resources/pdfium/bin/pdfium.dll"));
+        let folder = tempfile::tempdir().unwrap(); let path = folder.path().join("canceled-open.pdf");
+        let source = std::fs::read(root.join("resources/welcome.pdf")).unwrap(); std::fs::write(&path, &source).unwrap();
+        let (tx, rx) = oneshot::channel(); drop(rx);
+        service.sender.send(Request::Open(path.clone(), tx)).unwrap();
+        // The probe follows Open on the same FIFO and observes only this test's unique path.
+        let retained = call(&service, |reply| Request::OpenDocumentsForPath(path.clone(), reply)).unwrap();
+        for id in &retained {
+            assert_eq!(call(&service, |reply| Request::Properties(*id, 0, reply)).unwrap().page_count, 6);
+            call(&service, |reply| Request::Close(*id, reply)).unwrap();
+        }
+        assert_eq!(std::fs::read(&path).unwrap(), source);
+        assert!(retained.is_empty(), "A canceled Open retained {} unreachable document(s)", retained.len());
+    }
+    #[test]
+    fn print_snapshot_lease_survives_thread_handoff_source_close_and_releases_on_completion_or_unwind() {
+        let _print_lock = print_test_lock();
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")); let service = PdfService::start(root.join("resources/pdfium/bin/pdfium.dll"));
+        let reusable = call(&service, |reply| Request::Open(root.join("resources/welcome.pdf"), reply)).unwrap();
+        for unwind in [false, true] {
+            let info = call(&service, |reply| Request::Open(root.join("resources/welcome.pdf"), reply)).unwrap();
+            let snapshot = call(&service, |reply| Request::BeginPrint(info.id, info.revision, reply)).unwrap(); let token = snapshot.token;
+            let expected = service.print_render_blocking(token, 0, 100, 100).unwrap().bgra;
+            let (ready, started) = std::sync::mpsc::channel(); let (finish, wait) = std::sync::mpsc::channel(); let worker = service.clone();
+            let thread = std::thread::spawn(move || {
+                let snapshot = snapshot;
+                ready.send(()).unwrap(); wait.recv().unwrap();
+                let rendered = worker.print_render_blocking(snapshot.token, 0, 100, 100).unwrap().bgra;
+                if unwind { panic!("Exercise snapshot lease cleanup during spool-thread unwind"); }
+                rendered
+            });
+            started.recv().unwrap();
+            call(&service, |reply| Request::Close(info.id, reply)).unwrap();
+            assert_eq!(service.print_render_blocking(token, 0, 100, 100).unwrap().bgra, expected);
+            let held = (0..3).map(|_| print_snapshot(&service, reusable.id, 0)).collect::<Vec<_>>();
+            assert!(call(&service, |reply| Request::BeginPrint(reusable.id, 0, reply)).err().unwrap().contains("another print job"), "The active spool lease must retain its admission slot");
+            finish.send(()).unwrap(); let result = thread.join();
+            if unwind { assert!(result.is_err()); } else { assert_eq!(result.unwrap(), expected); }
+            call(&service, |reply| Request::Properties(reusable.id, 0, reply)).unwrap();
+            assert!(service.print_render_blocking(token, 0, 100, 100).err().unwrap().contains("ended"));
+            let replacement = print_snapshot(&service, reusable.id, 0);
+            assert!(call(&service, |reply| Request::BeginPrint(reusable.id, 0, reply)).err().unwrap().contains("another print job"));
+            drop(replacement); drop(held);
+        }
+        call(&service, |reply| Request::Close(reusable.id, reply)).unwrap();
     }
     #[test]
     fn print_snapshot_admission_limit_and_guard_cleanup_preserve_worker_capacity() {

@@ -77,6 +77,7 @@ pub async fn print_document(app: tauri::AppHandle, service: State<'_, PdfService
     let worker = service.inner().clone();
     let (sender, receiver) = tokio::sync::oneshot::channel();
     let spawn = std::thread::Builder::new().name("pdf-print".into()).spawn(move || {
+        let snapshot = snapshot;
         let _reservation = reservation;
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| printing::print(hwnd, &snapshot.name, snapshot.pages, current_page, cancel, |page, width, height| worker.print_render_blocking(token, page, width, height))))
             .unwrap_or_else(|_| Err("The print worker stopped unexpectedly.".into()));
