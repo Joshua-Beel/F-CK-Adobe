@@ -34,6 +34,9 @@ impl Drop for PrintSnapshotInfo {
 }
 pub struct PrintBitmap { pub width: u32, pub height: u32, pub bgra: Vec<u8> }
 type Reply<T> = oneshot::Sender<Result<T, String>>;
+#[cfg(test)]
+#[derive(Default, Debug)]
+struct RenderWork { dequeued: usize, skipped_closed: usize, rendered: usize }
 enum UnclaimedReply { Document(u64), Password(u64) }
 struct ReplyLease<T> { value: Option<T>, cleanup: Option<UnclaimedReply>, sender: mpsc::Sender<Request> }
 impl<T> ReplyLease<T> {
@@ -54,6 +57,10 @@ impl<T> Drop for ReplyLease<T> {
     }
 }
 enum Request {
+    #[cfg(test)]
+    BacklogGate(mpsc::Receiver<Vec<Request>>, Reply<()>),
+    #[cfg(test)]
+    RenderWorkForDocument(u64, Reply<RenderWork>),
     #[cfg(test)]
     OpenDocumentsForPath(PathBuf, Reply<Vec<u64>>),
     #[cfg(test)]
@@ -77,6 +84,38 @@ enum Request {
     Split(u64, u64, usize, PathBuf, Reply<crate::split::SplitOutput>),
     CheckCombine(CombineSource, CombineSource, Reply<()>),
     Combine(CombineSource, CombineSource, PathBuf, Reply<ReplyLease<SavedCopy>>),
+}
+#[derive(Default)]
+struct RequestQueue { deferred: VecDeque<Request>, cleanup_overtakes: usize }
+impl RequestQueue {
+    fn next(&mut self, receiver: &mpsc::Receiver<Request>) -> Result<Request, mpsc::RecvError> {
+        // Only viewer renders may be overtaken. Every other command preserves its FIFO boundary.
+        // Two cleanup overtakes allow Close + EndPrint together while guaranteeing render progress.
+        const WINDOW: usize = 32;
+        const MAX_CLEANUP_OVERTAKES: usize = 2;
+        if self.deferred.is_empty() { self.deferred.push_back(receiver.recv()?); }
+        if matches!(self.deferred.front(), Some(Request::Render(..))) && self.cleanup_overtakes < MAX_CLEANUP_OVERTAKES {
+            let mut index = 1;
+            while index < WINDOW {
+                if index == self.deferred.len() {
+                    match receiver.try_recv() {
+                        Ok(request) => self.deferred.push_back(request),
+                        Err(_) => break,
+                    }
+                }
+                match &self.deferred[index] {
+                    Request::Render(..) => index += 1,
+                    Request::Close(..) | Request::EndPrint(..) => {
+                        self.cleanup_overtakes += 1;
+                        return Ok(self.deferred.remove(index).expect("The cleanup index is buffered"));
+                    }
+                    _ => break,
+                }
+            }
+        }
+        self.cleanup_overtakes = 0;
+        Ok(self.deferred.pop_front().expect("A request was received before dispatch"))
+    }
 }
 #[derive(Clone)]
 pub struct PdfService { sender: mpsc::Sender<Request> }
@@ -115,7 +154,10 @@ impl PdfService {
             let mut next_request = 1;
             let mut print_snapshots = HashMap::<u64, (std::rc::Rc<PdfDocument<'_>>, Vec<crate::editor::PageSpec>)>::new();
             let mut next_print = 1;
-            while let Ok(request) = receiver.recv() {
+            #[cfg(test)]
+            let mut render_work = HashMap::<u64, RenderWork>::new();
+            let mut requests = RequestQueue::default();
+            while let Ok(request) = requests.next(&receiver) {
                 let request = match request {
                     Request::BeginOpen(path, reply) => {
                         if reply.is_closed() { continue; }
@@ -127,6 +169,15 @@ impl PdfService {
                     other => other,
                 };
                 match request {
+                    #[cfg(test)]
+                    Request::BacklogGate(release, reply) => {
+                        let _ = reply.send(Ok(()));
+                        if let Ok(batch) = release.recv_timeout(std::time::Duration::from_secs(5)) {
+                            for request in batch.into_iter().rev() { requests.deferred.push_front(request); }
+                        }
+                    }
+                    #[cfg(test)]
+                    Request::RenderWorkForDocument(id, reply) => { let _ = reply.send(Ok(render_work.remove(&id).unwrap_or_default())); }
                     #[cfg(test)]
                     Request::OpenDocumentsForPath(path, reply) => {
                         let ids = sessions.iter().filter_map(|(id, (_, info))| (PathBuf::from(&info.path) == path).then_some(*id)).collect();
@@ -214,7 +265,13 @@ impl PdfService {
                         if let Err(Ok(info)) = reply.send(result) { documents.remove(&info.id); sessions.remove(&info.id); }
                     },
                     Request::Render(id, page, width, reply) => {
-                        if reply.is_closed() { continue; }
+                        #[cfg(test)]
+                        { render_work.entry(id).or_default().dequeued += 1; }
+                        if reply.is_closed() {
+                            #[cfg(test)]
+                            { render_work.entry(id).or_default().skipped_closed += 1; }
+                            continue;
+                        }
                         let width = width.clamp(64, 3000);
                         let key = (id, page, width);
                         let result = if let Some(bytes) = cache.get(key) { Ok(bytes) } else {
@@ -222,6 +279,8 @@ impl PdfService {
                                 let document = documents.get(&id).ok_or("Document is closed")?;
                                 let spec = sessions.get(&id).ok_or("Document is closed")?.0.plan.get(page as usize).ok_or("Page is out of range")?;
                                 let image = with_planned_page(document, spec, |page| {
+                                    #[cfg(test)]
+                                    { render_work.entry(id).or_default().rendered += 1; }
                                     let bitmap = page.render_with_config(&PdfRenderConfig::new().set_target_width(width).set_maximum_height(5000)).map_err(|e| e.to_string())?;
                                     bitmap.as_image().map_err(|e| e.to_string())
                                 })?;
@@ -559,7 +618,7 @@ mod tests {
     macro_rules! accepted_reply_values {
         ($($value:ty),* $(,)?) => { $(impl TestReplyValue for $value { type Accepted = Self; fn accept(self) -> Self { self } })* };
     }
-    accepted_reply_values!((), Vec<u8>, Vec<u64>, String, DocumentInfo, SavedCopy, OpenResult, PrintSnapshotInfo, PrintBitmap, BookmarkList, crate::document_properties::DocumentProperties, crate::text_geometry::PageTextGeometry, crate::split::SplitOutput);
+    accepted_reply_values!((), Vec<u8>, Vec<u64>, String, DocumentInfo, SavedCopy, OpenResult, PrintSnapshotInfo, PrintBitmap, BookmarkList, RenderWork, crate::document_properties::DocumentProperties, crate::text_geometry::PageTextGeometry, crate::split::SplitOutput);
     fn call<T: TestReplyValue>(service: &PdfService, request: impl FnOnce(Reply<T>) -> Request) -> Result<T::Accepted, String> {
         let (tx, rx) = oneshot::channel(); service.sender.send(request(tx)).unwrap(); rx.blocking_recv().unwrap().map(TestReplyValue::accept)
     }
@@ -576,6 +635,161 @@ mod tests {
     }
     fn print_snapshot(service: &PdfService, id: u64, revision: u64) -> TestPrintSnapshot {
         TestPrintSnapshot { service: service.clone(), info: call(service, |reply| Request::BeginPrint(id, revision, reply)).unwrap() }
+    }
+    fn scheduler_render(id: u64) -> Request { let (reply, _) = oneshot::channel(); Request::Render(id, 0, 64, reply) }
+    fn scheduler_cleanup(id: u64, print: bool) -> Request {
+        let (reply, _) = oneshot::channel();
+        if print { Request::EndPrint(id, reply) } else { Request::Close(id, reply) }
+    }
+    #[test]
+    fn worker_scheduler_preserves_every_nonrender_barrier_and_cleanup_order() {
+        let first = CombineSource { id: 1, revision: 0 }; let second = CombineSource { id: 2, revision: 0 };
+        let (tx, _) = oneshot::channel();
+        let (begin_tx, _) = oneshot::channel(); let (print_tx, _) = oneshot::channel();
+        let (save_tx, _) = oneshot::channel(); let (combine_tx, _) = oneshot::channel();
+        let (text_tx, _) = oneshot::channel(); let (open_tx, _) = oneshot::channel();
+        let (crop_tx, _) = oneshot::channel(); let (split_tx, _) = oneshot::channel();
+        for barrier in [Request::Edit(1, PageEdit::Undo, tx), Request::BeginPrint(1, 0, begin_tx),
+            Request::PrintRender(1, 0, 64, 64, print_tx), Request::Save(1, None, PathBuf::new(), save_tx),
+            Request::Combine(first, second, PathBuf::new(), combine_tx), Request::Text(1, 0, 0, text_tx),
+            Request::Open(PathBuf::new(), open_tx), Request::Crop(1, 0, 0, CropRect { x: 0.0, y: 0.0, width: 1.0, height: 1.0 }, crop_tx),
+            Request::Split(1, 0, 1, PathBuf::new(), split_tx)] {
+            let (sender, receiver) = mpsc::channel();
+            sender.send(scheduler_render(10)).unwrap(); sender.send(barrier).unwrap();
+            sender.send(scheduler_cleanup(20, false)).unwrap(); sender.send(scheduler_cleanup(21, true)).unwrap();
+            let mut queue = RequestQueue::default();
+            assert!(matches!(queue.next(&receiver).unwrap(), Request::Render(10, ..)));
+            assert!(!matches!(queue.next(&receiver).unwrap(), Request::Render(..) | Request::Close(..) | Request::EndPrint(..)));
+            assert!(matches!(queue.next(&receiver).unwrap(), Request::Close(20, ..)));
+            assert!(matches!(queue.next(&receiver).unwrap(), Request::EndPrint(21, ..)));
+        }
+    }
+    #[test]
+    fn worker_scheduler_window_is_bounded_and_render_stream_cannot_starve() {
+        let (sender, receiver) = mpsc::channel();
+        for id in 0..32 { sender.send(scheduler_render(id)).unwrap(); }
+        sender.send(scheduler_cleanup(99, false)).unwrap();
+        let mut queue = RequestQueue::default();
+        assert!(matches!(queue.next(&receiver).unwrap(), Request::Render(0, ..)));
+        assert_eq!(queue.deferred.len(), 31);
+        assert!(matches!(queue.next(&receiver).unwrap(), Request::Close(99, ..)));
+        assert_eq!(queue.deferred.len(), 31);
+        for id in 100..110 { sender.send(scheduler_cleanup(id, false)).unwrap(); }
+        assert!(matches!(queue.next(&receiver).unwrap(), Request::Close(100, ..)));
+        assert!(matches!(queue.next(&receiver).unwrap(), Request::Render(1, ..)), "Two cleanup overtakes must be followed by ordinary render progress");
+        let (sender, receiver) = mpsc::channel();
+        for id in 0..100 { sender.send(scheduler_render(id)).unwrap(); }
+        drop(sender);
+        let mut queue = RequestQueue::default();
+        for expected in 0..100 {
+            assert!(matches!(queue.next(&receiver).unwrap(), Request::Render(id, ..) if id == expected));
+            assert!(queue.deferred.len() < 32);
+        }
+        assert!(queue.next(&receiver).is_err());
+    }
+    #[test]
+    fn worker_scheduler_fifo_control_discriminates_the_cleanup_regression() {
+        let (sender, receiver) = mpsc::channel();
+        let mut fifo = VecDeque::new();
+        for id in 0..8 { fifo.push_back(scheduler_render(id)); }
+        fifo.push_back(scheduler_cleanup(99, false)); fifo.push_back(scheduler_cleanup(100, true));
+        let before_close = fifo.iter().take_while(|request| !matches!(request, Request::Close(..))).filter(|request| matches!(request, Request::Render(..))).count();
+        assert_eq!(before_close, 8, "FIFO control must reproduce eight render dispatches before Close");
+        let mut queue = RequestQueue { deferred: fifo, cleanup_overtakes: 0 };
+        assert!(matches!(queue.next(&receiver).unwrap(), Request::Close(99, ..)));
+        assert!(matches!(queue.next(&receiver).unwrap(), Request::EndPrint(100, ..)));
+        drop(sender);
+    }
+    fn wait_probe_marker(receiver: &mut oneshot::Receiver<Result<(), String>>, deadline: std::time::Instant) -> Option<std::time::Instant> {
+        loop {
+            match receiver.try_recv() {
+                Ok(result) => { result.unwrap(); return Some(std::time::Instant::now()); }
+                Err(oneshot::error::TryRecvError::Closed) => panic!("The worker stopped before its backlog marker reply"),
+                Err(oneshot::error::TryRecvError::Empty) => {
+                    if std::time::Instant::now() >= deadline { return None; }
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                }
+            }
+        }
+    }
+    #[test]
+    fn worker_cleanup_passes_queued_live_viewer_renders_without_rendering_closed_document() {
+        let _print_lock = print_test_lock();
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let service = PdfService::start(root.join("resources/pdfium/bin/pdfium.dll"));
+        let info = call(&service, |reply| Request::Open(root.join("resources/welcome.pdf"), reply)).unwrap();
+        let snapshot = print_snapshot(&service, info.id, info.revision);
+        let _cleanup = UnreadPrintCleanup { service: service.clone(), document: info.id, tokens: vec![snapshot.token] };
+        let (release, gate) = mpsc::channel();
+        call(&service, |reply| Request::BacklogGate(gate, reply)).unwrap();
+        let mut responses = Vec::new();
+        let mut batch = Vec::new();
+        for index in 0..8 {
+            let (tx, rx) = oneshot::channel();
+            responses.push(rx);
+            batch.push(Request::Render(info.id, 0, 64 + index * 64, tx));
+        }
+        let (close_tx, close_rx) = oneshot::channel();
+        batch.push(Request::Close(info.id, close_tx));
+        let (end_tx, end_rx) = oneshot::channel();
+        batch.push(Request::EndPrint(snapshot.token, end_tx));
+        release.send(batch).unwrap();
+        close_rx.blocking_recv().unwrap().unwrap();
+        end_rx.blocking_recv().unwrap().unwrap();
+        let results: Vec<_> = responses.into_iter().map(|rx| rx.blocking_recv().unwrap()).collect();
+        let work = call(&service, |reply| Request::RenderWorkForDocument(info.id, reply)).unwrap();
+        assert_eq!(work.dequeued, 8);
+        assert_eq!(work.skipped_closed, 0, "Viewer replies remain live; cleanup must prevent obsolete engine work");
+        assert_eq!(work.rendered, 0, "Queued live viewer renders delayed cleanup and rendered a document being closed");
+        assert!(results.iter().all(|result| result.as_ref().err().is_some_and(|error| error.contains("closed"))));
+        assert!(service.print_render_blocking(snapshot.token, 0, 64, 64).err().unwrap().contains("ended"));
+        assert!(call(&service, |reply| Request::Properties(info.id, info.revision, reply)).err().unwrap().contains("closed"));
+    }
+    #[test]
+    #[ignore = "Manual bounded backlog measurement; no timing regression assertion"]
+    fn worker_backlog_probe_measures_close_release_and_live_reply_retention() {
+        let _print_lock = print_test_lock();
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")); let path = root.join("../test-corpus/synthetic-scan-98.pdf");
+        let source = std::fs::read(&path).unwrap(); let service = PdfService::start(root.join("resources/pdfium/bin/pdfium.dll"));
+        for (mode, count, preclosed) in [("baseline", 0, false), ("live_unread", 8, false), ("preclosed_receivers", 8, true)] {
+            let experiment_start = std::time::Instant::now(); let deadline = experiment_start + std::time::Duration::from_secs(30);
+            let info = call(&service, |reply| Request::Open(path.clone(), reply)).unwrap();
+            let snapshot = call(&service, |reply| Request::BeginPrint(info.id, info.revision, reply)).unwrap();
+            let _cleanup = UnreadPrintCleanup { service: service.clone(), document: info.id, tokens: vec![snapshot.token] };
+            let mut responses = Vec::new();
+            for index in 0..count {
+                let (tx, rx) = oneshot::channel();
+                if preclosed { drop(rx); } else { responses.push(rx); }
+                service.sender.send(Request::Render(info.id, 0, 2048 + index * 64, tx)).unwrap();
+            }
+            let close_enqueued = std::time::Instant::now(); let (close_tx, mut close_rx) = oneshot::channel();
+            service.sender.send(Request::Close(info.id, close_tx)).unwrap();
+            let release_enqueued = std::time::Instant::now(); let (release_tx, mut release_rx) = oneshot::channel();
+            service.sender.send(Request::EndPrint(snapshot.token, release_tx)).unwrap();
+            let closed = wait_probe_marker(&mut close_rx, deadline); let released = wait_probe_marker(&mut release_rx, deadline);
+            if closed.is_none() || released.is_none() {
+                drop(responses);
+                println!("backlog mode={mode} source_bytes={} requests={count} soft_budget_exceeded=true; pending receivers dropped to skip remaining work", source.len());
+                continue;
+            }
+            let mut retained_png_bytes = 0usize;
+            let mut closed_errors = 0usize;
+            for receiver in responses {
+                match receiver.blocking_recv().unwrap() {
+                    Ok(bytes) => retained_png_bytes += bytes.len(),
+                    Err(error) => { assert!(error.contains("closed")); closed_errors += 1; }
+                }
+            }
+            let work = call(&service, |reply| Request::RenderWorkForDocument(info.id, reply)).unwrap();
+            println!("backlog mode={mode} source_bytes={} requests={count} widths=2048..2496 step=64 page=0 close_ms={:.3} release_ms={:.3} elapsed_ms={:.3} retained_png_bytes={retained_png_bytes} closed_errors={closed_errors} dequeued={} skipped_closed={} rendered={}", source.len(), closed.unwrap().duration_since(close_enqueued).as_secs_f64() * 1000.0, released.unwrap().duration_since(release_enqueued).as_secs_f64() * 1000.0, experiment_start.elapsed().as_secs_f64() * 1000.0, work.dequeued, work.skipped_closed, work.rendered);
+            assert_eq!(work.dequeued, count as usize);
+            assert_eq!(work.skipped_closed, if preclosed { count as usize } else { 0 });
+            assert_eq!(work.rendered + closed_errors, if preclosed { 0 } else { count as usize });
+            if mode != "live_unread" { assert_eq!(retained_png_bytes, 0); }
+            assert!(service.print_render_blocking(snapshot.token, 0, 64, 64).err().unwrap().contains("ended"));
+            assert!(call(&service, |reply| Request::Properties(info.id, info.revision, reply)).err().unwrap().contains("closed"));
+        }
+        assert_eq!(std::fs::read(path).unwrap(), source);
     }
     struct UnreadPrintCleanup { service: PdfService, document: u64, tokens: Vec<u64> }
     impl Drop for UnreadPrintCleanup {

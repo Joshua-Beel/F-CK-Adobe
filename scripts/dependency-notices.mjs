@@ -1,9 +1,8 @@
 import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
-import { spawnSync } from 'node:child_process';
-import { homedir } from 'node:os';
 import { dirname, join, relative, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { checkedSourceArchiveEntries, offlineCargoMetadata } from './mpl-source-archives.mjs';
 
 const hash = bytes => createHash('sha256').update(bytes).digest('hex');
 const slash = path => path.replaceAll('\\', '/');
@@ -58,10 +57,9 @@ export function runtimeCandidates(metadata) {
 }
 
 export function collectInventory(root) {
-  const cargo = process.env.CARGO ?? join(homedir(), '.cargo', 'bin', process.platform === 'win32' ? 'cargo.exe' : 'cargo');
-  const result = spawnSync(cargo, ['metadata', '--offline', '--locked', '--filter-platform', 'x86_64-pc-windows-msvc', '--format-version', '1', '--manifest-path', 'src-tauri/Cargo.toml'], { cwd: root, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024, windowsHide: true });
-  if (result.error || result.status !== 0) throw new Error(`Offline Cargo metadata failed. First populate the cache with cargo fetch --locked --target x86_64-pc-windows-msvc --manifest-path src-tauri/Cargo.toml. ${result.error?.message ?? result.stderr}`);
-  const metadata = JSON.parse(result.stdout);
+  const metadata = offlineCargoMetadata(root);
+  const sourceArchives = checkedSourceArchiveEntries(root, metadata);
+  const sourceArchiveByPackage = new Map(sourceArchives.map(archive => [`${archive.name}@${archive.version}`, archive]));
   const candidates = runtimeCandidates(metadata);
   const resolved = new Set(metadata.resolve.nodes.map(node => node.id));
   const records = [];
@@ -83,7 +81,8 @@ export function collectInventory(root) {
         files.push({ path: relativeLicense, sha256: hash(bytes), text: bytes.toString('utf8') });
       }
     }
-    records.push({ ecosystem: 'cargo', name: pkg.name, version: pkg.version, license: pkg.license ?? null, source: pkg.source, scope: candidates.has(pkg.id) ? 'runtime-candidate' : 'build-or-auxiliary', files });
+    const sourceArchive = sourceArchiveByPackage.get(`${pkg.name}@${pkg.version}`);
+    records.push({ ecosystem: 'cargo', name: pkg.name, version: pkg.version, license: pkg.license ?? null, source: pkg.source, scope: candidates.has(pkg.id) ? 'runtime-candidate' : 'build-or-auxiliary', ...(sourceArchive ? { sourceArchive } : {}), files });
   }
   const lock = JSON.parse(readFileSync(join(root, 'package-lock.json'), 'utf8'));
   for (const [path, entry] of Object.entries(lock.packages)) {
@@ -105,19 +104,20 @@ export function collectInventory(root) {
     const issues = [];
     if (!record.license) issues.push({ package: packageName, issue: 'missing-license-expression' });
     if (!record.files.length) issues.push({ package: packageName, issue: 'no-local-notice-file-found' });
-    if (record.license?.includes('MPL-2.0')) issues.push({ package: packageName, issue: 'source-availability-review-open', scope: record.scope });
+    if (record.license?.includes('MPL-2.0') && !record.sourceArchive) issues.push({ package: packageName, issue: 'source-availability-review-open', scope: record.scope });
     return issues;
   });
   const inventory = {
     schema: 1,
     target: 'x86_64-pc-windows-msvc',
-    coverage: 'Conservative resolved Cargo Windows graph, including build/auxiliary packages, plus non-development npm lock entries. Runtime-candidate is not proof of linked code. PDFium notices are packaged separately. This collection does not resolve source-availability obligations or the app license.',
-    inputHashes: Object.fromEntries(['src-tauri/Cargo.lock', 'src-tauri/Cargo.toml', 'package-lock.json', 'package.json', 'scripts/notice-supplements/manifest.json'].map(path => [path, hash(normalizeLines(readFileSync(join(root, path), 'utf8')))])),
+    coverage: 'Conservative resolved Cargo Windows graph, including build/auxiliary packages, plus non-development npm lock entries. Runtime-candidate is not proof of linked code. PDFium notices are packaged separately. Five exact MPL-2.0 crate source archives are packaged with verified locations and hashes; this collection does not determine the app license or complete release licensing review.',
+    inputHashes: Object.fromEntries(['src-tauri/Cargo.lock', 'src-tauri/Cargo.toml', 'package-lock.json', 'package.json', 'scripts/notice-supplements/manifest.json', 'scripts/mpl-source-archives.manifest.json'].map(path => [path, hash(normalizeLines(readFileSync(join(root, path), 'utf8')))])),
     issues,
     packages: records.map(({ files, ...record }) => ({ ...record, notices: files.map(({ text, ...file }) => file) })),
   };
-  const text = ['THIRD-PARTY DEPENDENCY NOTICES', '', inventory.coverage, '', 'Unresolved collection/review items:', ...issues.map(issue => `- ${issue.package}: ${issue.issue}`), '', ...records.flatMap(record => [
+  const text = ['THIRD-PARTY DEPENDENCY NOTICES', '', inventory.coverage, '', 'Unresolved collection/review items:', ...(issues.length ? issues.map(issue => `- ${issue.package}: ${issue.issue}`) : ['- None recorded by this notice collection.']), '', ...records.flatMap(record => [
     '='.repeat(78), `${record.ecosystem}: ${record.name} ${record.version}`, `Declared license: ${record.license ?? 'UNKNOWN'}`, `Scope: ${record.scope}`, `Source: ${record.source ?? 'UNKNOWN'}`, '',
+    ...(record.sourceArchive ? [`Packaged source archive: ${record.sourceArchive.installedResourcePath} (relative to the application's resource directory)`, `Packaged source repository path: ${record.sourceArchive.repositoryPath}`, `Official source archive: ${record.sourceArchive.url}`, `Source archive SHA-256: ${record.sourceArchive.sha256}`, ''] : []),
     ...(record.files.length ? record.files.flatMap(file => [`--- ${file.path} (SHA-256 ${file.sha256}) ---`, ...(file.provenance ? [`Upstream: ${file.provenance.url}`, `Published crate commit: ${file.provenance.crateCommit}`, `Source evidence: ${file.provenance.evidence}`] : []), file.text, '']) : ['No standalone license/notice file was found in the installed package.', '']),
   ])].join('\n');
   return { inventory, text };

@@ -1,10 +1,10 @@
 # Dependency license inventory
 
-This inventory covers the current Windows x64 source tree and the locally extracted v0.2.4 draft installer. It identifies notice-packaging work; it does not mark the app's licensing review complete. Versions below come from the lockfiles and installed package manifests, not requested version ranges.
+This inventory covers the current Windows x64 source tree, the locally extracted v0.2.4 draft installer, and a fresh local unsigned debug installer extraction. It identifies notice-packaging work; it does not mark the app's licensing review complete. Versions below come from the lockfiles and installed package manifests, not requested version ranges.
 
 ## What is packaged today
 
-`src-tauri/tauri.conf.json` explicitly includes the PDFium DLL, its top-level `LICENSE`, all files under `resources/pdfium/licenses/`, and the welcome PDF. The extracted draft installer contains that PDFium license and all 15 upstream notice files. The bundle configuration does not include a general Rust/frontend third-party notice collection. JavaScript license comments exist in the current `dist` output, but that is not evidence that every full notice is included or available to users.
+`src-tauri/tauri.conf.json` explicitly includes the PDFium DLL, its top-level `LICENSE`, all files under `resources/pdfium/licenses/`, the generated Rust/frontend third-party notice collection, and five exact MPL source archives. The extracted draft installer contains the older PDFium notice set. A fresh local unsigned debug installer extraction matched the generated inventory, full notices, source-archive manifest, and all five archive hashes. That checks bundled resources only; it does not verify installation, signed-release contents, notice interaction, or complete licensing review.
 
 The PDFium distribution is Chromium build **151.0.7881.0**, pinned by `scripts/setup-pdfium.ps1`. Its local `args.gn` says Windows x64, standalone, V8 disabled, XFA disabled. Keep its complete upstream notice set rather than deriving a new list from the wrapper crate's license:
 
@@ -59,8 +59,8 @@ Examples that a notice generator must retain accurately:
 
 | Package(s) | Declared expression / local evidence |
 | --- | --- |
-| `cssparser` 0.36.0, `dtoa-short` 0.3.5, `selectors` 0.36.1, `option-ext` 0.2.0 | MPL-2.0; still reachable after the procedural-macro exclusion. The first three occur through `dom_query`/CSS parsing; `option-ext` is a normal dependency of `dirs-sys`. Source-availability treatment remains an open release-review item. |
-| `cssparser-macros` 0.6.1 | MPL-2.0; procedural-macro package, classify separately from shipped runtime code. |
+| `cssparser` 0.36.0, `dtoa-short` 0.3.5, `selectors` 0.36.1, `option-ext` 0.2.0 | MPL-2.0; still reachable after the procedural-macro exclusion. The first three occur through `dom_query`/CSS parsing; `option-ext` is a normal dependency of `dirs-sys`. Their exact `.crate` archives are bundled under `resources/third-party-sources/` with Cargo.lock SHA-256 values and official crates.io URLs in the source manifest and generated notices. |
+| `cssparser-macros` 0.6.1 | MPL-2.0; procedural-macro package, classified separately from shipped runtime code. Its exact source archive is packaged with the same verification. |
 | `ring` 0.17.14 | Apache-2.0 AND ISC. Its root `LICENSE` refers to `LICENSE-BoringSSL`, `LICENSE-other-bits`, and `src/polyfill/once_cell/LICENSE-APACHE` / `LICENSE-MIT`; copying the small root file alone loses the referenced texts. |
 | `brotli` 8.0.4 | BSD-3-Clause AND MIT |
 | `dpi` 0.1.2 | Apache-2.0 AND MIT |
@@ -79,21 +79,24 @@ This table highlights exceptions; it is not the complete transitive package list
 
 Twelve missing local notices were resolved using published crate commits and official upstream license files. `scripts/notice-supplements/manifest.json` records exact commits, provenance URLs and SHA-256 hashes. Offline generation verifies those inputs. Explicitly running `scripts/fetch-notice-supplements.mjs --fetch` retrieves the recorded files and rejects unexpected hashes.
 
+`scripts/mpl-source-archives.manifest.json` pins `cssparser` 0.36.0, `cssparser-macros` 0.6.1, `dtoa-short` 0.3.5, `option-ext` 0.2.0, and `selectors` 0.36.1 to their Cargo.lock SHA-256 values and official crates.io archive URLs. `scripts/mpl-source-archives.mjs` verifies every cached archive hash and every extracted source file before copying the archives and a resource manifest to `src-tauri/resources/third-party-sources/`. It fails closed for a missing, tampered, stale, lock-mismatched, or source-mismatched archive without network access. The local cache comparison found no changed or missing source files; Cargo's generated `.cargo-ok` marker is excluded from that comparison.
+
 The generated files are included in Tauri resources and available through **Menu > Third-party notices** in the source build. The installer script checks freshness before building. Existing PDFium notices remain separately packaged.
 
 To regenerate after a dependency change:
 
 ```powershell
 cargo fetch --locked --target x86_64-pc-windows-msvc --manifest-path src-tauri/Cargo.toml
+node scripts/mpl-source-archives.mjs
+node scripts/mpl-source-archives.mjs --check
 node scripts/dependency-notices.mjs
 node scripts/dependency-notices.mjs --check
 ```
 
 ## Remaining release checks
 
-1. Resolve the five recorded MPL source-availability review entries for the exact shipped versions. Record source archive locations/checksums and local modifications. Notice collection alone does not settle these requirements.
-2. Extract a newly built installer and compare the packaged index and notice files against the generated manifest; check the installed app's notice entry. The old draft's PDFium contents do not verify this expanded collection.
-3. Record the WebView2 bootstrapper/distribution version and its associated terms separately. The config downloads the bootstrapper; this inventory did not inspect that payload. The app's own redistribution license is also unresolved: the root has no `LICENSE` file and its Cargo package has no license field. Joshua owns that choice.
+1. Extract a newly built signed release installer and compare the packaged index, notices, source archives, and manifest against these resources; check the installed app's notice entry. The fresh unsigned debug extraction does not establish those facts.
+2. Record the WebView2 bootstrapper/distribution version and its associated terms separately. The config downloads the bootstrapper; this inventory did not inspect that payload. The app's own redistribution license is also unresolved: the root has no `LICENSE` file and its Cargo package has no license field. Joshua owns that choice.
 
 ## Reproducing the metadata read
 
@@ -101,4 +104,4 @@ node scripts/dependency-notices.mjs --check
 cargo metadata --offline --locked --filter-platform x86_64-pc-windows-msvc --format-version 1 --manifest-path src-tauri/Cargo.toml
 ```
 
-The initial inventory used local lockfiles, installed dependency notices and the extracted v0.2.4 draft's PDFium directory. The later supplement collection fetched the recorded upstream license files. Generated-notice checks establish reproducibility, not complete release-license review.
+The initial inventory used local lockfiles, installed dependency notices and the extracted v0.2.4 draft's PDFium directory. The later supplement collection fetched the recorded upstream license files. The MPL archive collection compared all five official cached archives to their extracted Cargo source trees, and the fresh unsigned debug installer extraction hash-checked all five archives plus both notice resources. These checks establish reproducibility and resource inclusion, not complete release-license review.

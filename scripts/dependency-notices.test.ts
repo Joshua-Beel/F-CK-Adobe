@@ -43,14 +43,19 @@ it('keeps build edges and procedural macro descendants outside runtime candidate
   expect([...runtimeCandidates(metadata)]).toEqual(['runtime']);
 });
 
-it('bundles the index and full notices while preserving explicit coverage gaps', () => {
+it('bundles notices and exact MPL source archives without changing included license text', () => {
   const config = JSON.parse(readFileSync('src-tauri/tauri.conf.json', 'utf8'));
   expect(config.bundle.resources).toContain('resources/third-party-licenses/inventory.json');
   expect(config.bundle.resources).toContain('resources/third-party-licenses/THIRD-PARTY-NOTICES.txt');
+  expect(config.bundle.resources).toContain('resources/third-party-sources/*');
   const inventory = JSON.parse(readFileSync('src-tauri/resources/third-party-licenses/inventory.json', 'utf8'));
   const notices = readFileSync('src-tauri/resources/third-party-licenses/THIRD-PARTY-NOTICES.txt', 'utf8');
+  const sourceManifest = JSON.parse(readFileSync('src-tauri/resources/third-party-sources/MANIFEST.json', 'utf8'));
   expect(inventory.packages.find(pkg => pkg.name === 'lucide-react').notices.length).toBeGreaterThan(0);
   expect(notices).toContain('Cole Bemis');
   expect(notices).toContain('src/polyfill/once_cell/LICENSE-APACHE');
-  expect(inventory.issues.some(issue => issue.issue === 'source-availability-review-open')).toBe(true);
+  expect(sourceManifest.archives).toHaveLength(5);
+  const cssparser = inventory.packages.find(pkg => pkg.ecosystem === 'cargo' && pkg.name === 'cssparser' && pkg.version === '0.36.0');
+  expect(cssparser.sourceArchive.installedResourcePath).toBe('resources/third-party-sources/cssparser-0.36.0.crate');
+  expect(notices).toContain("Packaged source archive: resources/third-party-sources/cssparser-0.36.0.crate (relative to the application's resource directory)");
 });

@@ -1,41 +1,16 @@
 {
   "schema": 1,
   "target": "x86_64-pc-windows-msvc",
-  "coverage": "Conservative resolved Cargo Windows graph, including build/auxiliary packages, plus non-development npm lock entries. Runtime-candidate is not proof of linked code. PDFium notices are packaged separately. This collection does not resolve source-availability obligations or the app license.",
+  "coverage": "Conservative resolved Cargo Windows graph, including build/auxiliary packages, plus non-development npm lock entries. Runtime-candidate is not proof of linked code. PDFium notices are packaged separately. Five exact MPL-2.0 crate source archives are packaged with verified locations and hashes; this collection does not determine the app license or complete release licensing review.",
   "inputHashes": {
     "src-tauri/Cargo.lock": "b49fdff269244b1242d6ed09753119855fbb20e2a70317782f652ab75129219f",
     "src-tauri/Cargo.toml": "4ba9d92b8b23a24f7cd28dad4c867e2545c7f9437a56821ad2a49180b42a59b5",
     "package-lock.json": "b05d585c1995dcbb236c3cc934f901aefa71d853535e5894d37a1ec3179701ee",
     "package.json": "84f616b520599e836b4d066725af3ce1b74216155e53d6cf9a16a8f23886543a",
-    "scripts/notice-supplements/manifest.json": "f0700cbb9d20d43f42d709852e7961194d22937a41bf1fad5063e27f5fae2121"
+    "scripts/notice-supplements/manifest.json": "f0700cbb9d20d43f42d709852e7961194d22937a41bf1fad5063e27f5fae2121",
+    "scripts/mpl-source-archives.manifest.json": "d5575a6facde7afb4f4faae54009bb776da8b0d1410c68de1915c7a46a73e915"
   },
-  "issues": [
-    {
-      "package": "cargo:cssparser-macros@0.6.1",
-      "issue": "source-availability-review-open",
-      "scope": "build-or-auxiliary"
-    },
-    {
-      "package": "cargo:cssparser@0.36.0",
-      "issue": "source-availability-review-open",
-      "scope": "runtime-candidate"
-    },
-    {
-      "package": "cargo:dtoa-short@0.3.5",
-      "issue": "source-availability-review-open",
-      "scope": "runtime-candidate"
-    },
-    {
-      "package": "cargo:option-ext@0.2.0",
-      "issue": "source-availability-review-open",
-      "scope": "runtime-candidate"
-    },
-    {
-      "package": "cargo:selectors@0.36.1",
-      "issue": "source-availability-review-open",
-      "scope": "runtime-candidate"
-    }
-  ],
+  "issues": [],
   "packages": [
     {
       "ecosystem": "cargo",
@@ -893,6 +868,14 @@
       "license": "MPL-2.0",
       "source": "registry+https://github.com/rust-lang/crates.io-index",
       "scope": "build-or-auxiliary",
+      "sourceArchive": {
+        "name": "cssparser-macros",
+        "version": "0.6.1",
+        "sha256": "13b588ba4ac1a99f7f2964d24b3d896ddc6bf847ee3855dbd4366f058cfcd331",
+        "url": "https://static.crates.io/crates/cssparser-macros/cssparser-macros-0.6.1.crate",
+        "repositoryPath": "src-tauri/resources/third-party-sources/cssparser-macros-0.6.1.crate",
+        "installedResourcePath": "resources/third-party-sources/cssparser-macros-0.6.1.crate"
+      },
       "notices": [
         {
           "path": "LICENSE",
@@ -907,6 +890,14 @@
       "license": "MPL-2.0",
       "source": "registry+https://github.com/rust-lang/crates.io-index",
       "scope": "runtime-candidate",
+      "sourceArchive": {
+        "name": "cssparser",
+        "version": "0.36.0",
+        "sha256": "dae61cf9c0abb83bd659dab65b7e4e38d8236824c85f0f804f173567bda257d2",
+        "url": "https://static.crates.io/crates/cssparser/cssparser-0.36.0.crate",
+        "repositoryPath": "src-tauri/resources/third-party-sources/cssparser-0.36.0.crate",
+        "installedResourcePath": "resources/third-party-sources/cssparser-0.36.0.crate"
+      },
       "notices": [
         {
           "path": "LICENSE",
@@ -1231,6 +1222,14 @@
       "license": "MPL-2.0",
       "source": "registry+https://github.com/rust-lang/crates.io-index",
       "scope": "runtime-candidate",
+      "sourceArchive": {
+        "name": "dtoa-short",
+        "version": "0.3.5",
+        "sha256": "cd1511a7b6a56299bd043a9c167a6d2bfb37bf84a6dfceaba651168adfb43c87",
+        "url": "https://static.crates.io/crates/dtoa-short/dtoa-short-0.3.5.crate",
+        "repositoryPath": "src-tauri/resources/third-party-sources/dtoa-short-0.3.5.crate",
+        "installedResourcePath": "resources/third-party-sources/dtoa-short-0.3.5.crate"
+      },
       "notices": [
         {
           "path": "LICENSE",
@@ -2873,6 +2872,14 @@
       "license": "MPL-2.0",
       "source": "registry+https://github.com/rust-lang/crates.io-index",
       "scope": "runtime-candidate",
+      "sourceArchive": {
+        "name": "option-ext",
+        "version": "0.2.0",
+        "sha256": "04744f49eae99ab78e0d5c0b603ab218f515ea8cfe5a456d7629ad883a3b6e7d",
+        "url": "https://static.crates.io/crates/option-ext/option-ext-0.2.0.crate",
+        "repositoryPath": "src-tauri/resources/third-party-sources/option-ext-0.2.0.crate",
+        "installedResourcePath": "resources/third-party-sources/option-ext-0.2.0.crate"
+      },
       "notices": [
         {
           "path": "LICENSE.txt",
@@ -3719,6 +3726,14 @@
       "license": "MPL-2.0",
       "source": "registry+https://github.com/rust-lang/crates.io-index",
       "scope": "runtime-candidate",
+      "sourceArchive": {
+        "name": "selectors",
+        "version": "0.36.1",
+        "sha256": "c5d9c0c92a92d33f08817311cf3f2c29a3538a8240e94a6a3c622ce652d7e00c",
+        "url": "https://static.crates.io/crates/selectors/selectors-0.36.1.crate",
+        "repositoryPath": "src-tauri/resources/third-party-sources/selectors-0.36.1.crate",
+        "installedResourcePath": "resources/third-party-sources/selectors-0.36.1.crate"
+      },
       "notices": [
         {
           "path": "upstream-supplement/stylo-635e1a19d029-MPL-2.0.txt",
