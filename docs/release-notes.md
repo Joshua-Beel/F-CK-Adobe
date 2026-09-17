@@ -1,4 +1,9 @@
-## 0.2.3
+## 0.2.4
+
+- Verifies the actual application extracted from the signed installer, rather than Tauri's restored unsigned build file.
+- Includes embedded-text search, case matching, selectable excerpts, and links to matching pages.
+
+## 0.2.3 (unreleased)
 
 - Runs installer signature verification directly in PowerShell 7 on GitHub Actions.
 - Includes embedded-text search and the Windows signing argument fix described below.

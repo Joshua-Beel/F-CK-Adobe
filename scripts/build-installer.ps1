@@ -24,7 +24,15 @@ if ($LASTEXITCODE -ne 0) { throw 'Installer build failed.' }
 if ($AzureSigning) {
     $version = (Get-Content -LiteralPath 'src-tauri/tauri.conf.json' -Raw -Encoding UTF8 | ConvertFrom-Json).version
     $installer = "src-tauri/target/release/bundle/nsis/PDF Workstation_${version}_x64-setup.exe"
-    & "$PSScriptRoot/verify-windows-signatures.ps1" -Paths @('src-tauri/target/release/pdf-workstation.exe', $installer)
+    & "$PSScriptRoot/verify-windows-signatures.ps1" -Paths @($installer)
+    $extractor = Get-Command 7z -ErrorAction Stop
+    $verificationDirectory = Join-Path $projectRoot ("src-tauri/target/signature-checks/" + [Guid]::NewGuid().ToString('N'))
+    New-Item -ItemType Directory -Path $verificationDirectory -Force | Out-Null
+    & $extractor.Source e $installer "-o$verificationDirectory" -r -y 'pdf-workstation.exe'
+    if ($LASTEXITCODE -ne 0) { throw 'Could not extract the packaged application for signature verification.' }
+    $packagedApplication = Join-Path $verificationDirectory 'pdf-workstation.exe'
+    if (-not (Test-Path -LiteralPath $packagedApplication -PathType Leaf)) { throw 'The installer does not contain the expected application executable.' }
+    & "$PSScriptRoot/verify-windows-signatures.ps1" -Paths @($packagedApplication)
 }
 node scripts/release-manifest.mjs
 if ($LASTEXITCODE -ne 0) { throw 'Update manifest generation failed.' }
