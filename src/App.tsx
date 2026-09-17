@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { Undo2, Redo2 } from 'lucide-react';
 import { ArrowDownToLine, ArrowUpRight, Bookmark, ChevronDown, ChevronLeft, ChevronRight, ChevronsUpDown, CircleHelp, Combine, File, FileCheck2, FileImage, FileOutput, FilePenLine, FilePlus2, Files, FolderOpen, Hand, Highlighter, Home, LayoutGrid, List, Maximize, Menu, MessageSquare, Minus, MoreHorizontal, MousePointer2, PanelLeftClose, Pencil, Plus, Printer, RotateCw, Save, ScanLine, Search, ShieldCheck, Signature, SlidersHorizontal, Star, Sun, Type, X, ZoomIn, ZoomOut, type LucideIcon } from 'lucide-react';
-import { closeDocument, native, openDocument, reopenDocument, editPages, saveCopy } from './bridge';
+import { closeDocument, native, openDocument, reopenDocument, editPages, saveCopy, type OpenResult } from './bridge';
 import { clampPage, toolGroups, type DocumentInfo, type PageEdit } from './model';
 import Viewer from './Viewer';
 import Organizer from './Organizer';
@@ -11,6 +11,7 @@ import Updates from './Updates';
 import SearchPanel from './SearchPanel';
 import BookmarksPanel from './BookmarksPanel';
 import PageText from './PageText';
+import PasswordDialog from './PasswordDialog';
 import { readPreferences, savePreferences } from './preferences';
 import { readRecentFiles, saveRecentFiles, rememberFile } from './recentFiles';
 import s from './Workspace.module.css';
@@ -32,6 +33,7 @@ export default function App() {
   const [searchOpen, setSearchOpen] = useState(false);
   const [bookmarksOpen, setBookmarksOpen] = useState(false);
   const [pageTextOpen, setPageTextOpen] = useState(false);
+  const [passwordRequest, setPasswordRequest] = useState<{ challenge: Extract<OpenResult, { status: 'password_required' }>; organize: boolean } | null>(null);
   useEffect(() => { if (searchOpen) setBookmarksOpen(false); }, [searchOpen]);
   const [menu, setMenu] = useState(false);
   const [updatesOpen, setUpdatesOpen] = useState(false);
@@ -65,12 +67,19 @@ export default function App() {
   }, []);
   const doc = documents.find(d => d.id === active);
   const activate = (id: number) => { if (busy) return; setActive(id); setView('document'); setPage(0); setTarget(v => ({ page: 0, token: v.token + 1 })); };
+  const opened = (info: DocumentInfo, organize: boolean) => {
+    setDocuments(list => [...list, info]); setRecentFiles(list => rememberFile(list, info)); setOrganizing(organize);
+    setActive(info.id); setView('document'); setPage(0); setTarget(value => ({ page: 0, token: value.token + 1 }));
+  };
+  const acceptOpen = (result: OpenResult | null, organize: boolean) => {
+    if (result?.status === 'opened') opened(result.document, organize);
+    else if (result?.status === 'password_required') setPasswordRequest({ challenge: result, organize });
+  };
   const open = useCallback(async (example = false, organize = false) => {
     if (busy) return;
     setBusy(true); setError(''); setMenu(false);
     try {
-      const info = await openDocument(example);
-      if (info) { setDocuments(list => [...list, info]); setRecentFiles(list => rememberFile(list, info)); setOrganizing(organize); activate(info.id); }
+      acceptOpen(await openDocument(example), organize);
     } catch (e) { setError(String(e)); } finally { setBusy(false); }
   }, [busy]);
   const reopen = async (path: string) => {
@@ -79,8 +88,7 @@ export default function App() {
     if (existing) { activate(existing.id); return; }
     setBusy(true); setError('');
     try {
-      const info = await reopenDocument(path);
-      setDocuments(list => [...list, info]); setRecentFiles(list => rememberFile(list, info)); setOrganizing(false); activate(info.id);
+      acceptOpen(await reopenDocument(path), false);
     } catch (e) { setError(`Could not reopen this file. It may have moved or been deleted. ${String(e)}`); }
     finally { setBusy(false); }
   };
@@ -111,7 +119,8 @@ export default function App() {
   const go = (value: number) => { if (doc) { const next = clampPage(value, doc.pages.length); setPage(next); setTarget(v => ({ page: next, token: v.token + 1 })); } };
   useEffect(() => {
     const listener = (event: KeyboardEvent) => {
-      if (updatesOpen || pageTextOpen) return;
+      if (updatesOpen || pageTextOpen || passwordRequest || pendingClose !== null) return;
+      if ((event.target as HTMLElement | null)?.closest?.('dialog')) return;
       if (event.ctrlKey && event.key.toLowerCase() === 'o') { event.preventDefault(); void open(); }
       if (event.ctrlKey && event.key.toLowerCase() === 'f' && doc) { event.preventDefault(); setView('document'); setOrganizing(false); setSearchOpen(true); return; }
       if (event.key === 'Escape' && searchOpen) { setSearchOpen(false); return; }
@@ -151,6 +160,7 @@ export default function App() {
     {menu && <div className={s.menuPopover}><button onClick={() => void open()}>Open… <kbd>Ctrl+O</kbd></button><button onClick={() => void open(true)}>Open sample PDF</button><button disabled={!doc || busy} onClick={() => { setMenu(false); void save(); }}>Save a copy… <kbd>Ctrl+S</kbd></button><button onClick={() => { setMenu(false); launchOrganizer(); }}>Organize pages</button><hr /><button onClick={() => { setDark(v => !v); setMenu(false); }}>Switch to {dark ? 'light' : 'dark'} theme</button><button disabled={busy} onClick={() => { setMenu(false); setUpdatesOpen(true); }}>Check for updates…</button><button onClick={() => { setNotice('PDF viewing, embedded-text search, and Organize Pages are available. Rotate, reorder, delete, extract, undo/redo, and save a new copy. Text editing, OCR, forms, and signatures are not implemented yet.'); setMenu(false); }}>About this build</button></div>}
     {updatesOpen && <Updates dirty={documents.some(document => document.dirty)} busy={busy} setBusy={setBusy} close={() => setUpdatesOpen(false)} />}
     {pageTextOpen && doc && <PageText key={`${doc.id}-${doc.revision}-${page}`} document={doc} page={page} close={() => setPageTextOpen(false)} />}
+    {passwordRequest && <PasswordDialog key={passwordRequest.challenge.request_id} challenge={passwordRequest.challenge} onOpened={info => { opened(info, passwordRequest.organize); setPasswordRequest(null); }} onClose={() => setPasswordRequest(null)} />}
     <div className={s.globalbar}>
       <nav className={s.primaryNav}><button className={toolsOpen && view !== 'home' ? s.selectedNav : ''} onClick={() => view === 'document' ? setToolsOpen(v => !v) : setView('tools')}>All tools</button><button disabled>Edit</button><button disabled>Convert</button><button disabled>E-sign</button></nav>
       <div className={s.globalActions}><IconButton icon={Search} label="Find text" disabled={!doc || busy} active={searchOpen} onClick={() => { setView('document'); setOrganizing(false); setSearchOpen(v => !v); }} /><span className={s.divider} /><IconButton icon={Undo2} label="Undo" disabled={busy || !doc?.can_undo} onClick={() => void edit({ kind: 'undo' })} /><IconButton icon={Redo2} label="Redo" disabled={busy || !doc?.can_redo} onClick={() => void edit({ kind: 'redo' })} /><IconButton icon={Save} label="Save a copy" disabled={busy || !doc} onClick={() => void save()} /><IconButton icon={Printer} label="Print" disabled /><IconButton icon={Sun} label="Toggle theme" onClick={() => setDark(v => !v)} /><IconButton icon={CircleHelp} label="Build information" onClick={() => setNotice('Organize Pages and document search are available. Other tools marked unavailable are planned for later milestones. Save a Copy writes a new file and preserves your original.')} /><button className={s.openButton} onClick={() => void open()} disabled={busy}><FolderOpen size={16} /> {busy ? 'Working…' : 'Open a file'}</button></div>

@@ -5,15 +5,19 @@ use service::{DocumentInfo, PdfService};
 use tauri::{Manager, State};
 
 #[tauri::command]
-async fn open_document(app: tauri::AppHandle, service: State<'_, PdfService>) -> Result<Option<DocumentInfo>, String> {
+async fn open_document(app: tauri::AppHandle, service: State<'_, PdfService>) -> Result<Option<service::OpenResult>, String> {
     let window = app.get_webview_window("main").ok_or("Application window is unavailable")?;
     let path = tauri::async_runtime::spawn_blocking(move || rfd::FileDialog::new().set_parent(&window).add_filter("PDF documents", &["pdf"]).pick_file()).await.map_err(|e| e.to_string())?;
-    match path { Some(path) => service.open(path).await.map(Some), None => Ok(None) }
+    match path { Some(path) => service.begin_open(path).await.map(Some), None => Ok(None) }
 }
 #[tauri::command]
-async fn reopen_document(service: State<'_, PdfService>, path: String) -> Result<DocumentInfo, String> {
-    service.open(std::path::PathBuf::from(path)).await
+async fn reopen_document(service: State<'_, PdfService>, path: String) -> Result<service::OpenResult, String> {
+    service.begin_open(std::path::PathBuf::from(path)).await
 }
+#[tauri::command]
+async fn unlock_document(service: State<'_, PdfService>, request_id: u64, password: String) -> Result<service::OpenResult, String> { service.unlock(request_id, password).await }
+#[tauri::command]
+async fn cancel_password_request(service: State<'_, PdfService>, request_id: u64) -> Result<(), String> { service.cancel_password(request_id).await }
 #[tauri::command]
 async fn open_example(app: tauri::AppHandle, service: State<'_, PdfService>) -> Result<DocumentInfo, String> {
     service.open(app.path().resource_dir().map_err(|e| e.to_string())?.join("resources/welcome.pdf")).await
@@ -48,6 +52,6 @@ fn main() {
         let library = app.path().resource_dir()?.join("resources/pdfium/bin/pdfium.dll");
         app.manage(PdfService::start(library));
         Ok(())
-    }).invoke_handler(tauri::generate_handler![open_document, reopen_document, open_example, render_page, close_document, edit_pages, save_copy, page_text, document_bookmarks])
+    }).invoke_handler(tauri::generate_handler![open_document, reopen_document, open_example, render_page, close_document, edit_pages, save_copy, page_text, document_bookmarks, unlock_document, cancel_password_request])
       .run(tauri::generate_context!()).expect("Desktop application failed");
 }

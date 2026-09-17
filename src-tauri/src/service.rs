@@ -14,9 +14,18 @@ pub struct SavedCopy { path: String, document: DocumentInfo }
 pub struct BookmarkInfo { title: String, page: Option<usize>, depth: usize }
 #[derive(Serialize)]
 pub struct BookmarkList { items: Vec<BookmarkInfo>, truncated: bool }
+#[derive(Serialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum OpenResult {
+    Opened { document: DocumentInfo },
+    PasswordRequired { request_id: u64, name: String, incorrect: bool },
+}
 type Reply<T> = oneshot::Sender<Result<T, String>>;
 enum Request {
     Open(PathBuf, Reply<DocumentInfo>),
+    BeginOpen(PathBuf, Reply<OpenResult>),
+    Unlock(u64, String, Reply<OpenResult>),
+    CancelPassword(u64, Reply<()>),
     Render(u64, u16, i32, Reply<Vec<u8>>),
     Text(u64, u16, u64, Reply<String>),
     Bookmarks(u64, u64, Reply<BookmarkList>),
@@ -56,16 +65,53 @@ impl PdfService {
             let mut sessions = HashMap::<u64, (EditSession, DocumentInfo)>::new();
             let mut cache = Cache { entries: VecDeque::new(), weight: 0 };
             let mut next_id = 1;
+            let mut pending = HashMap::<u64, PathBuf>::new();
+            let mut next_request = 1;
             while let Ok(request) = receiver.recv() {
+                let request = match request {
+                    Request::BeginOpen(path, reply) => {
+                        if reply.is_closed() { continue; }
+                        if pending.len() >= 8 { let _ = reply.send(Err("Close an existing password prompt before opening another PDF.".into())); continue; }
+                        let request_id = next_request; next_request += 1;
+                        pending.insert(request_id, path);
+                        Request::Unlock(request_id, String::new(), reply)
+                    }
+                    other => other,
+                };
                 match request {
+                    Request::BeginOpen(_, _) => unreachable!(),
+                    Request::CancelPassword(id, reply) => { pending.remove(&id); let _ = reply.send(Ok(())); }
+                    Request::Unlock(request_id, password, reply) => {
+                        if reply.is_closed() { pending.remove(&request_id); continue; }
+                        let result = (|| {
+                            let path = pending.get(&request_id).ok_or("Password request expired. Open the PDF again.")?.clone();
+                            let engine = pdfium.as_ref().map_err(Clone::clone)?;
+                            if password.contains('\0') { return Err("Passwords cannot contain a null character.".into()); }
+                            let bytes = std::fs::read(&path).map_err(|e| e.to_string())?;
+                            let document = match engine.load_pdf_from_byte_vec(bytes.clone(), Some(&password)) {
+                                Ok(document) => document,
+                                Err(PdfiumError::PdfiumLibraryInternalError(PdfiumInternalError::PasswordError)) => return Ok(OpenResult::PasswordRequired { request_id, name: path.file_name().unwrap_or_default().to_string_lossy().into_owned(), incorrect: !password.is_empty() }),
+                                Err(error) => return Err(format!("Unable to open PDF: {error}")),
+                            };
+                            let pages = page_sizes(&document)?;
+                            let id = next_id; next_id += 1;
+                            let info = DocumentInfo { id, name: path.file_name().unwrap_or_default().to_string_lossy().into_owned(), path: path.to_string_lossy().into_owned(), pages, revision: 0, dirty: false, can_undo: false, can_redo: false };
+                            sessions.insert(id, (EditSession::new(bytes, info.pages.len()), info.clone()));
+                            documents.insert(id, document);
+                            Ok(OpenResult::Opened { document: info })
+                        })();
+                        if !matches!(&result, Ok(OpenResult::PasswordRequired { .. })) { pending.remove(&request_id); }
+                        if let Err(result) = reply.send(result) {
+                            pending.remove(&request_id);
+                            if let Ok(OpenResult::Opened { document }) = result { documents.remove(&document.id); sessions.remove(&document.id); }
+                        }
+                    }
                     Request::Open(path, reply) => {
                         let result = (|| {
                             let engine = pdfium.as_ref().map_err(Clone::clone)?;
                             let bytes = std::fs::read(&path).map_err(|e| e.to_string())?;
-                            let document = engine.load_pdf_from_byte_vec(bytes.clone(), None).map_err(|e| format!("Unable to open PDF (password-protected files are not supported yet): {e}"))?;
-                            let pages: Vec<_> = document.pages().iter().map(|p| PageSize { width: p.width().value, height: p.height().value }).collect();
-                            if pages.is_empty() { return Err("This PDF has no pages.".into()); }
-                            if pages.iter().any(|p| !p.width.is_finite() || !p.height.is_finite() || p.width <= 0.0 || p.height <= 0.0) { return Err("Invalid PDF page dimensions.".into()); }
+                            let document = engine.load_pdf_from_byte_vec(bytes.clone(), None).map_err(|e| format!("Unable to open PDF: {e}"))?;
+                            let pages = page_sizes(&document)?;
                             let id = next_id; next_id += 1;
                             let info = DocumentInfo { id, name: path.file_name().unwrap_or_default().to_string_lossy().into_owned(), path: path.to_string_lossy().into_owned(), pages, revision: 0, dirty: false, can_undo: false, can_redo: false };
                             sessions.insert(id, (EditSession::new(bytes, info.pages.len()), info.clone()));
@@ -167,6 +213,15 @@ impl PdfService {
     pub async fn open(&self, path: PathBuf) -> Result<DocumentInfo, String> {
         let (tx, rx) = oneshot::channel(); self.sender.send(Request::Open(path, tx)).map_err(|e| e.to_string())?; rx.await.map_err(|e| e.to_string())?
     }
+    pub async fn begin_open(&self, path: PathBuf) -> Result<OpenResult, String> {
+        let (tx, rx) = oneshot::channel(); self.sender.send(Request::BeginOpen(path, tx)).map_err(|e| e.to_string())?; rx.await.map_err(|e| e.to_string())?
+    }
+    pub async fn unlock(&self, id: u64, password: String) -> Result<OpenResult, String> {
+        let (tx, rx) = oneshot::channel(); self.sender.send(Request::Unlock(id, password, tx)).map_err(|e| e.to_string())?; rx.await.map_err(|e| e.to_string())?
+    }
+    pub async fn cancel_password(&self, id: u64) -> Result<(), String> {
+        let (tx, rx) = oneshot::channel(); self.sender.send(Request::CancelPassword(id, tx)).map_err(|e| e.to_string())?; rx.await.map_err(|e| e.to_string())?
+    }
     pub async fn render(&self, id: u64, page: u16, width: i32) -> Result<Vec<u8>, String> {
         let (tx, rx) = oneshot::channel(); self.sender.send(Request::Render(id, page, width, tx)).map_err(|e| e.to_string())?; rx.await.map_err(|e| e.to_string())?
     }
@@ -187,6 +242,18 @@ impl PdfService {
     }
 }
 
+fn page_sizes(document: &PdfDocument<'_>) -> Result<Vec<PageSize>, String> {
+    let pages = document.pages();
+    if pages.is_empty() { return Err("This PDF has no pages.".into()); }
+    if pages.len() > u16::MAX as i32 + 1 { return Err("This PDF exceeds the supported limit of 65,536 pages.".into()); }
+    (0..pages.len()).map(|index| {
+        let page = pages.get(index).map_err(|error| format!("Unable to read page {}: {error}", index + 1))?;
+        let size = PageSize { width: page.width().value, height: page.height().value };
+        if !size.width.is_finite() || !size.height.is_finite() || size.width <= 0.0 || size.height <= 0.0 { return Err(format!("Invalid dimensions on page {}.", index + 1)); }
+        Ok(size)
+    }).collect()
+}
+
 fn current_info(session: &EditSession, original: &DocumentInfo) -> DocumentInfo {
     let mut info = original.clone();
     info.pages = session.plan.iter().map(|page| {
@@ -199,6 +266,61 @@ fn current_info(session: &EditSession, original: &DocumentInfo) -> DocumentInfo 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn encrypted_open_retries_cancels_and_keeps_edits_blocked() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let folder = tempfile::tempdir().unwrap();
+        let service = PdfService::start(root.join("resources/pdfium/bin/pdfium.dll"));
+        for user_password in ["test password", ""] {
+            let mut pdf = lopdf::Document::load(root.join("resources/welcome.pdf")).unwrap();
+            pdf.trailer.set("ID", vec![lopdf::Object::string_literal("password-test-id"), lopdf::Object::string_literal("password-test-id")]);
+            let state = lopdf::EncryptionState::try_from(lopdf::EncryptionVersion::V2 { document: &pdf, owner_password: "owner password", user_password, key_length: 128, permissions: lopdf::Permissions::all() }).unwrap();
+            pdf.encrypt(&state).unwrap();
+            let path = folder.path().join(if user_password.is_empty() { "empty.pdf" } else { "locked.pdf" });
+            pdf.save(&path).unwrap();
+            let source = std::fs::read(&path).unwrap();
+            let (tx, rx) = oneshot::channel(); service.sender.send(Request::BeginOpen(path.clone(), tx)).unwrap();
+            let result = rx.blocking_recv().unwrap().unwrap();
+            let info = if user_password.is_empty() {
+                match result { OpenResult::Opened { document } => document, _ => panic!("Empty password should open") }
+            } else {
+                let request_id = match result { OpenResult::PasswordRequired { request_id, incorrect, .. } => { assert!(!incorrect); request_id }, _ => panic!("Expected password challenge") };
+                for wrong in ["wrong", ""] {
+                    let (tx, rx) = oneshot::channel(); service.sender.send(Request::Unlock(request_id, wrong.into(), tx)).unwrap();
+                    assert!(matches!(rx.blocking_recv().unwrap().unwrap(), OpenResult::PasswordRequired { .. }));
+                }
+                let (tx, rx) = oneshot::channel(); service.sender.send(Request::Unlock(request_id, user_password.into(), tx)).unwrap();
+                let opened = match rx.blocking_recv().unwrap().unwrap() { OpenResult::Opened { document } => document, _ => panic!("Correct password failed") };
+                let (tx, rx) = oneshot::channel(); service.sender.send(Request::Unlock(request_id, user_password.into(), tx)).unwrap(); assert!(rx.blocking_recv().unwrap().is_err());
+                let (tx, rx) = oneshot::channel(); service.sender.send(Request::BeginOpen(path.clone(), tx)).unwrap();
+                let cancelled = match rx.blocking_recv().unwrap().unwrap() { OpenResult::PasswordRequired { request_id, .. } => request_id, _ => panic!("Expected challenge") };
+                let (tx, rx) = oneshot::channel(); service.sender.send(Request::CancelPassword(cancelled, tx)).unwrap(); rx.blocking_recv().unwrap().unwrap();
+                let (tx, rx) = oneshot::channel(); service.sender.send(Request::Unlock(cancelled, user_password.into(), tx)).unwrap(); assert!(rx.blocking_recv().unwrap().is_err());
+                opened
+            };
+            assert_eq!(info.pages.len(), 6);
+            let (tx, rx) = oneshot::channel(); service.sender.send(Request::Render(info.id, 0, 100, tx)).unwrap(); assert!(!rx.blocking_recv().unwrap().unwrap().is_empty());
+            let (tx, rx) = oneshot::channel(); service.sender.send(Request::Edit(info.id, PageEdit::Rotate { pages: vec![0], clockwise: true }, tx)).unwrap(); assert!(rx.blocking_recv().unwrap().is_err());
+            let output = folder.path().join("must-not-export.pdf");
+            let (tx, rx) = oneshot::channel(); service.sender.send(Request::Save(info.id, None, output.clone(), tx)).unwrap(); assert!(rx.blocking_recv().unwrap().is_err()); assert!(!output.exists());
+            assert_eq!(std::fs::read(&path).unwrap(), source);
+            let (tx, rx) = oneshot::channel(); service.sender.send(Request::Close(info.id, tx)).unwrap(); rx.blocking_recv().unwrap().unwrap();
+        }
+    }
+    #[test]
+    fn malformed_middle_page_is_rejected_instead_of_silently_truncated() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let folder = tempfile::tempdir().unwrap();
+        let mut pdf = lopdf::Document::load(root.join("resources/welcome.pdf")).unwrap();
+        let middle = pdf.get_pages()[&2];
+        pdf.objects.insert(middle, lopdf::Object::Null);
+        let path = folder.path().join("broken-page.pdf"); pdf.save(&path).unwrap();
+        let service = PdfService::start(root.join("resources/pdfium/bin/pdfium.dll"));
+        let (tx, rx) = oneshot::channel(); service.sender.send(Request::BeginOpen(path.clone(), tx)).unwrap();
+        assert!(rx.blocking_recv().unwrap().err().unwrap().contains("page 2"));
+        let (tx, rx) = oneshot::channel(); service.sender.send(Request::Open(path, tx)).unwrap();
+        assert!(rx.blocking_recv().unwrap().err().unwrap().contains("page 2"));
+    }
     #[test]
     fn bookmarks_include_nested_destinations_and_disable_external_actions() {
         use lopdf::{dictionary, Object};

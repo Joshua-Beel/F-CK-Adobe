@@ -20,6 +20,7 @@ pub enum PageEdit {
 
 pub struct EditSession {
     pub source: Vec<u8>,
+    source_page_count: usize,
     pub plan: Vec<PageSpec>,
     undo: Vec<Vec<PageSpec>>,
     redo: Vec<Vec<PageSpec>>,
@@ -30,12 +31,20 @@ pub struct EditSession {
 impl EditSession {
     pub fn new(source: Vec<u8>, count: usize) -> Self {
         let plan: Vec<_> = (0..count).map(|source| PageSpec { source, turns: 0 }).collect();
-        Self { source, saved: plan.clone(), plan, undo: Vec::new(), redo: Vec::new(), revision: 0 }
+        Self { source, source_page_count: count, saved: plan.clone(), plan, undo: Vec::new(), redo: Vec::new(), revision: 0 }
     }
     pub fn dirty(&self) -> bool { self.plan != self.saved }
     pub fn can_undo(&self) -> bool { !self.undo.is_empty() }
     pub fn can_redo(&self) -> bool { !self.redo.is_empty() }
     pub fn mark_saved(&mut self) { self.saved = self.plan.clone(); }
+    fn load_source(&self) -> Result<Document, String> {
+        let document = Document::load_mem(&self.source).map_err(|e| e.to_string())?;
+        if document.is_encrypted() || document.encryption_state.is_some() { return Err("Encrypted PDFs cannot be edited in this build.".into()); }
+        if document.get_pages().len() != self.source_page_count {
+            return Err("The PDF engines disagree about the source page count. Editing and export are blocked to preserve the document.".into());
+        }
+        Ok(document)
+    }
 
     pub fn apply(&mut self, edit: PageEdit) -> Result<(), String> {
         match edit {
@@ -51,7 +60,7 @@ impl EditSession {
                 let mut next = self.plan.clone();
                 let structural = !matches!(&edit, PageEdit::Rotate { .. });
                 let removal = matches!(&edit, PageEdit::Delete { .. });
-                check_supported(&Document::load_mem(&self.source).map_err(|e| e.to_string())?, structural, removal)?;
+                check_supported(&self.load_source()?, structural, removal)?;
                 match edit {
                     PageEdit::Rotate { pages, clockwise } => {
                         for index in validate_selection(&pages, next.len())? {
@@ -86,7 +95,7 @@ impl EditSession {
             }
             None => self.plan.clone(),
         };
-        let mut document = Document::load_mem(&self.source).map_err(|e| e.to_string())?;
+        let mut document = self.load_source()?;
         let original: Vec<_> = document.get_pages().values().copied().collect();
         if plan.iter().any(|p| p.source >= original.len()) { return Err("Source page mapping is invalid.".into()); }
         let structural = plan.len() != original.len() || plan.iter().enumerate().any(|(i, p)| p.source != i);
@@ -219,6 +228,20 @@ mod tests {
             assert!(output.get_dictionary(*id).unwrap().has(b"Resources"));
             assert_eq!(inherited(&output, *id, b"Rotate").unwrap().unwrap().as_i64().unwrap(), 90);
         }
+    }
+    #[test]
+    fn parser_page_count_disagreement_blocks_edits_and_export() {
+        for count in [5, 7] {
+            let mut session = EditSession::new(sample(), count);
+            let original = session.plan.clone();
+            assert!(session.apply(PageEdit::Rotate { pages: vec![0], clockwise: true }).unwrap_err().contains("disagree"));
+            assert!(session.export(None).unwrap_err().contains("disagree"));
+            assert!(session.export(Some(&[0])).unwrap_err().contains("disagree"));
+            assert_eq!(session.plan, original); assert_eq!(session.revision, 0); assert!(!session.can_undo());
+        }
+        let mut valid = EditSession::new(sample(), 6);
+        valid.apply(PageEdit::Delete { pages: vec![0] }).unwrap();
+        assert_eq!(Document::load_mem(&valid.export(None).unwrap()).unwrap().get_pages().len(), 5);
     }
     #[test]
     fn extreme_rotations_export_without_overflow() {

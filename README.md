@@ -15,6 +15,7 @@ Version 0.2.0 has a signed update package, but no Windows publisher signature. T
 ## What works
 
 - **Reading:** open PDFs in tabs, scroll through pages, pan, jump to a page, zoom from 10% to 400%, or fit the page to the window width.
+- **Passwords (source build):** enter a PDF's opening password, retry it, or cancel. Passwords are not saved. Encrypted PDFs remain read-only, including files with an empty opening password.
 - **Page text (source build):** open the current page's embedded text, select any portion or all of it, and copy with Ctrl+C. Reading order depends on the PDF; scanned images still need OCR.
 - **Bookmarks (source build):** browse up to 1,000 embedded bookmarks with nested indentation and jump to supported internal page destinations. Unsupported actions stay disabled; destination zoom/position and bookmark editing are not implemented.
 - **Search (source build):** Ctrl+F searches embedded PDF text, with optional case matching, selectable excerpts with highlighted matches, and next/previous matching-page navigation. Search follows page edits; scans need OCR first. Results show one excerpt per matching page, up to 500 pages.
@@ -41,11 +42,11 @@ Your PDFs stay on your computer. There's no document upload service or telemetry
 
 ## What's still missing
 
-Text and image editing, text selection directly on PDF pages, printing, OCR, signatures, and redaction aren't ready yet. Search excerpts can be selected and copied, but matches aren't highlighted on the page yet. Unavailable tools are disabled in the interface. Password-protected PDFs aren't supported yet.
+Text and image editing, text selection directly on PDF pages, printing, OCR, signatures, and redaction aren't ready yet. Search excerpts can be selected and copied, but matches aren't highlighted on the page yet. Unavailable tools are disabled in the interface.
 
 Saving currently means writing a new copy. You can't overwrite an existing file or save changes back to the original. Some page operations are also blocked on signed PDFs, forms, tagged documents, or files with bookmarks and annotations. The [Organize Pages guide](docs/tools/organize-pages.md) explains those limits.
 
-Next up are the remaining reading basics: text selection on pages, search highlighting, printing, and passwords. There's also more testing to do with real documents. The generated 98-page scan and 1,500-page text file are useful test cases, but they don't tell us how every large PDF will behave. The full list is in [Known gaps](docs/gaps.md).
+Next up are the remaining reading basics: text selection on pages, search highlighting, and printing. There's also more testing to do with real documents. The generated 98-page scan and 1,500-page text file are useful test cases, but they don't tell us how every large PDF will behave. The full list is in [Known gaps](docs/gaps.md).
 
 ## Run from source
 
@@ -87,6 +88,7 @@ For more background, see the [architecture notes](docs/decisions.md), [PDFium do
 
 ## Recent changes
 
+- Parallel password and review work added opening-password prompts with retry/cancel, transient passwords, and cleanup after canceled opens. Encrypted files remain read-only, including empty-password files that lopdf automatically decrypts. Fixed silently truncated malformed PDFs, blocked edits/export when PDF engines disagree on the source page count, limited opening to the IPC-supported 65,536 pages, and disabled background shortcuts inside confirmation dialogs. Added interrupted-update/retry tests. All 43 frontend/release tests, 14 native tests and the production build pass. Native password interaction and the installer upgrade remain unverified. See [review findings](docs/review-findings.md) for remaining risks; these source changes are newer than the 0.2.4 draft.
 - Recent files and stars now persist locally, capped at 50 entries. Clicking a saved entry reopens it or activates its existing tab; missing files show an error. Clear file history removes saved locations without deleting PDFs. Tests cover invalid storage, duplicate entries, app remounts, reopening and missing files. All 33 frontend/release tests, 11 native tests and the production build pass. Native restart verification remains pending; this feature is newer than the 0.2.4 draft.
 - Added next/previous matching-page controls and highlighted literal matches in search excerpts. Navigation wraps through the available results and resets when the query or case option changes. New tests cover navigation, delayed results after Stop, and the 500-page result limit; all 29 frontend/release tests and the production build pass. Highlighting on rendered pages and native desktop verification remain pending. This change is newer than the 0.2.4 draft.
 - Added Move to page in Organize Pages: choose one page, enter its final position, and move it using the existing undoable operation. Invalid positions are rejected and failed moves preserve selection. Fixed Shift+click selecting nonexistent pages after deletion. All 26 frontend/release tests and the production build pass; native desktop interaction with the new controls remains unverified. These changes are newer than the 0.2.4 draft.

@@ -28,7 +28,7 @@ it('refreshes metadata and keeps stars without storing contents or unsaved edits
   expect(saveRecentFiles(result)).toBe(true); expect(readRecentFiles()).toEqual(result);
 });
 it('persists stars across app remounts, reopens history and reuses an existing tab', async () => {
-  saveRecentFiles([file]); vi.mocked(reopenDocument).mockResolvedValue(document);
+  saveRecentFiles([file]); vi.mocked(reopenDocument).mockResolvedValue({ status: 'opened', document });
   let ui!: ReactTestRenderer;
   await act(async () => { ui = create(<App />); });
   act(() => ui.root.findByProps({ 'aria-label': 'Star one.pdf' }).props.onClick());
