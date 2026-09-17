@@ -24,7 +24,7 @@ export function visiblePages(offsets: number[], pages: PageSize[], scale: number
 export const toolGroups = [
   { name: 'Create & edit', tools: ['Create a PDF', 'Combine files', 'Organize pages', 'Edit a PDF', 'Export a PDF', 'Scan & OCR', 'Rich media'] },
   { name: 'Review', tools: ['Comment', 'Add a stamp', 'Compare files', 'Measure', 'Export package', 'Comment round-trip'] },
-  { name: 'Forms & signatures', tools: ['Fill & sign', 'Prepare a form', 'Use a certificate'] },
+  { name: 'Forms & signatures', tools: ['Fill forms', 'Prepare a form', 'Use a certificate'] },
   { name: 'Protect & standardize', tools: ['Protect a PDF', 'Redact a PDF', 'PDF standards', 'Compress a PDF', 'Print preview', 'Prepare for accessibility'] },
   { name: 'Customize', tools: ['Create custom tool', 'Use guided actions', 'Add search index'] }
 ];

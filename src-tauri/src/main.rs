@@ -8,6 +8,7 @@ mod text_geometry;
 mod split;
 mod combine;
 mod comments;
+mod forms;
 use service::{DocumentInfo, PdfService};
 use tauri::{Manager, State};
 
@@ -119,12 +120,25 @@ async fn replace_pages_copy(app: tauri::AppHandle, service: State<'_, PdfService
     match path { Some(path) => service.replace_pages_copy(target, donor, start, count, path).await.map(Some), None => Ok(None) }
 }
 
+#[tauri::command]
+async fn document_form_fields(service: State<'_, PdfService>, id: u64, revision: u64) -> Result<forms::FormFields, String> {
+    service.form_fields(id, revision).await
+}
+
+#[tauri::command]
+async fn fill_form_copy(app: tauri::AppHandle, service: State<'_, PdfService>, id: u64, revision: u64, values: Vec<forms::FieldValue>) -> Result<Option<service::SavedCopy>, String> {
+    service.check_form_copy(id, revision, values.clone()).await?;
+    let window = app.get_webview_window("main").ok_or("Application window is unavailable")?;
+    let path = tauri::async_runtime::spawn_blocking(move || rfd::FileDialog::new().set_parent(&window).set_title("Save filled form as a new PDF").add_filter("PDF documents", &["pdf"]).set_file_name("filled-form.pdf").save_file()).await.map_err(|error| error.to_string())?;
+    match path { Some(path) => service.fill_form_copy(id, revision, values, path).await.map(Some), None => Ok(None) }
+}
+
 fn main() {
     tauri::Builder::default().plugin(tauri_plugin_updater::Builder::new().build()).setup(|app| {
         let library = app.path().resource_dir()?.join("resources/pdfium/bin/pdfium.dll");
         app.manage(PdfService::start(library));
         app.manage(print_commands::PrintJobs::default());
         Ok(())
-    }).invoke_handler(tauri::generate_handler![open_document, reopen_document, open_example, render_page, close_document, edit_pages, crop_page, create_comment, update_comment, delete_comment, document_comments, document_annotations, create_highlight, create_text_highlight, update_highlight, delete_highlight, save_copy, split_document, combine_documents, insert_pages_copy, replace_pages_copy, page_text, page_text_geometry, document_bookmarks, document_properties, dependency_notices, unlock_document, cancel_password_request, print_commands::print_document, print_commands::cancel_print])
+    }).invoke_handler(tauri::generate_handler![document_form_fields, fill_form_copy, open_document, reopen_document, open_example, render_page, close_document, edit_pages, crop_page, create_comment, update_comment, delete_comment, document_comments, document_annotations, create_highlight, create_text_highlight, update_highlight, delete_highlight, save_copy, split_document, combine_documents, insert_pages_copy, replace_pages_copy, page_text, page_text_geometry, document_bookmarks, document_properties, dependency_notices, unlock_document, cancel_password_request, print_commands::print_document, print_commands::cancel_print])
       .run(tauri::generate_context!()).expect("Desktop application failed");
 }

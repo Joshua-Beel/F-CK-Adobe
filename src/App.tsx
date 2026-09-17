@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { Undo2, Redo2 } from 'lucide-react';
 import { ArrowDownToLine, ArrowUpRight, Bookmark, ChevronDown, ChevronLeft, ChevronRight, ChevronsUpDown, CircleHelp, Combine, File, FileCheck2, FileImage, FileOutput, FilePenLine, FilePlus2, Files, FolderOpen, Hand, Highlighter, Home, LayoutGrid, List, Maximize, Menu, MessageSquare, Minus, MoreHorizontal, MousePointer2, PanelLeftClose, Pencil, Plus, Printer, RotateCw, Save, ScanLine, Search, ShieldCheck, Signature, SlidersHorizontal, Star, Sun, Type, X, ZoomIn, ZoomOut, type LucideIcon } from 'lucide-react';
-import { closeDocument, native, openDocument, reopenDocument, editPages, saveCopy, splitDocument, cropPage, combineDocuments, insertPagesCopy, replacePagesCopy, documentAnnotations, createComment, updateComment, deleteComment, createHighlight, createTextHighlight, updateHighlight, deleteHighlight, type Annotation, type CommentRect, type DocumentAnnotations, type OpenResult, type SplitOutput, type SavedCopy } from './bridge';
+import { closeDocument, native, openDocument, reopenDocument, editPages, saveCopy, splitDocument, cropPage, combineDocuments, insertPagesCopy, replacePagesCopy, documentFormFields, fillFormCopy, documentAnnotations, createComment, updateComment, deleteComment, createHighlight, createTextHighlight, updateHighlight, deleteHighlight, type Annotation, type CommentRect, type DocumentAnnotations, type DocumentFormFields, type OpenResult, type SplitOutput, type SavedCopy } from './bridge';
 import { clampPage, toolGroups, type DocumentInfo, type PageEdit } from './model';
 import Viewer from './Viewer';
 import Organizer from './Organizer';
@@ -18,6 +18,7 @@ import DependencyNotices from './DependencyNotices';
 import CombineDialog from './CombineDialog';
 import InsertPagesDialog from './InsertPagesDialog';
 import ReplacePagesDialog from './ReplacePagesDialog';
+import FillFormsDialog from './FillFormsDialog';
 import CommentsPanel from './CommentsPanel';
 import CommentEditor, { type AnnotationDraft } from './CommentEditor';
 import type { TextHighlightSelection, TextHighlightSelectionSource } from './textHighlightSelection';
@@ -25,11 +26,12 @@ import { readPreferences, savePreferences } from './preferences';
 import { readRecentFiles, saveRecentFiles, rememberFile } from './recentFiles';
 import s from './Workspace.module.css';
 
-const icons: Record<string, LucideIcon> = { 'Create a PDF': FilePlus2, 'Combine files': Combine, 'Organize pages': LayoutGrid, 'Edit a PDF': FilePenLine, 'Export a PDF': FileOutput, 'Scan & OCR': ScanLine, 'Fill & sign': Signature, 'Protect a PDF': ShieldCheck, 'Comment': MessageSquare, 'Compress a PDF': ArrowDownToLine };
+const icons: Record<string, LucideIcon> = { 'Create a PDF': FilePlus2, 'Combine files': Combine, 'Organize pages': LayoutGrid, 'Edit a PDF': FilePenLine, 'Export a PDF': FileOutput, 'Scan & OCR': ScanLine, 'Fill forms': Signature, 'Protect a PDF': ShieldCheck, 'Comment': MessageSquare, 'Compress a PDF': ArrowDownToLine };
 function IconButton({ icon: Icon, label, onClick, onPointerDown, disabled = false, active = false }: { icon: LucideIcon; label: string; onClick?: () => void; onPointerDown?: () => void; disabled?: boolean; active?: boolean }) {
   return <button className={`${s.iconButton} ${active ? s.activeIcon : ''}`} aria-label={label} title={disabled && !onClick ? `${label} — not implemented yet` : label} onPointerDown={onPointerDown} onClick={onClick} disabled={disabled}><Icon size={19} strokeWidth={1.7} /></button>;
 }
 type AnnotationsLoad = { request: string; annotations: DocumentAnnotations | null; error: string };
+type FormsLoad = { request: string; fields: DocumentFormFields | null; error: string };
 
 export default function App() {
   const [preferences] = useState(readPreferences);
@@ -66,6 +68,8 @@ export default function App() {
   const [combineOpen, setCombineOpen] = useState(false);
   const [insertOpen, setInsertOpen] = useState(false);
   const [replaceOpen, setReplaceOpen] = useState(false);
+  const [formsOpen, setFormsOpen] = useState(false);
+  const [formsLoad, setFormsLoad] = useState<FormsLoad>({ request: '', fields: null, error: '' });
   const [replaceRange, setReplaceRange] = useState({ start: 0, count: 1 });
   const [commentsOpen, setCommentsOpen] = useState(false);
   const [commentMode, setCommentMode] = useState(false);
@@ -97,7 +101,7 @@ export default function App() {
   const receiveSearch = useCallback((search: ActiveSearch | null) => setActiveSearch(search), []);
   const closeSearch = useCallback(() => { setSearchOpen(false); setActiveSearch(null); }, []);
   useEffect(() => { setActiveSearch(null); }, [active, doc?.revision, organizing, searchOpen]);
-  useEffect(() => { setCommentMode(false); setHighlightMode(false); setCommentsOpen(false); setCommentEditor(null); }, [active]);
+  useEffect(() => { setCommentMode(false); setHighlightMode(false); setCommentsOpen(false); setCommentEditor(null); setFormsOpen(false); }, [active]);
   useEffect(() => { retainedTextHighlightSelection.current = null; pointerTextHighlightSelection.current = null; setTextHighlightSelection(null); }, [active, doc?.revision, hand, commentMode, highlightMode]);
   const annotationsNeeded = commentMode || highlightMode || commentsOpen || commentEditor !== null || textHighlightSelection !== null;
   const annotationsRequest = doc ? `${doc.id}:${doc.revision}` : '';
@@ -112,6 +116,18 @@ export default function App() {
     return () => { disposed = true; };
   }, [annotationsNeeded, annotationsRequest, doc?.id, doc?.revision]);
   const annotations = annotationsLoad.request === annotationsRequest ? annotationsLoad.annotations : null;
+  const formsRequest = doc ? `${doc.id}:${doc.revision}` : '';
+  useEffect(() => {
+    if (!doc || !formsOpen) { setFormsLoad({ request: '', fields: null, error: '' }); return; }
+    let disposed = false;
+    setFormsLoad({ request: formsRequest, fields: null, error: '' });
+    documentFormFields(doc.id, doc.revision).then(value => {
+      if (disposed || value.documentId !== doc.id || value.revision !== doc.revision) return;
+      setFormsLoad({ request: formsRequest, fields: value, error: '' });
+    }).catch(reason => { if (!disposed) setFormsLoad({ request: formsRequest, fields: null, error: String(reason) }); });
+    return () => { disposed = true; };
+  }, [doc?.id, doc?.revision, formsOpen, formsRequest]);
+  const formFields = formsLoad.request === formsRequest ? formsLoad.fields : null;
   const activate = (id: number) => {
     if (busy || closingDocument.current !== null) return;
     const document = documents.find(item => item.id === id);
@@ -293,11 +309,28 @@ export default function App() {
       return result;
     } finally { setBusy(false); }
   };
+  const fillForms = async (id: number, revision: number, values: { fieldId: string; value: string }[]): Promise<SavedCopy | null> => {
+    if (busy || closingDocument.current !== null) throw new Error('The workspace is not ready to fill this form.');
+    const source = documents.find(document => document.id === id);
+    if (!source || source.revision !== revision) throw new Error('This PDF changed. Reload its fields and try again.');
+    if (!values.length || values.some(value => !value.fieldId)) throw new Error('Change at least one field before saving a new copy.');
+    if (new Set(values.map(value => value.fieldId)).size !== values.length) throw new Error('This form contains duplicate field updates. Reload it and try again.');
+    setBusy(true); setError(''); setNotice('');
+    try {
+      const result = await fillFormCopy(id, revision, values);
+      if (result) opened(result.document, false);
+      return result;
+    } finally { setBusy(false); }
+  };
   const launchOrganizer = () => { if (busy || closingDocument.current !== null) return; if (doc) { setOrganizing(true); setView('document'); } else void open(false, true); };
   const launchCombine = () => {
     if (busy || closingDocument.current !== null) return;
     if (documents.length < 2) { setNotice('Open two PDFs to combine them.'); return; }
     setMenu(false); setOrganizing(false); setView('document'); setCombineOpen(true);
+  };
+  const launchForms = () => {
+    if (!doc || busy || closingDocument.current !== null) return;
+    setMenu(false); setOrganizing(false); closeSearch(); setBookmarksOpen(false); setFormsOpen(true);
   };
   const launchInsert = () => {
     if (busy || closingDocument.current !== null) return;
@@ -343,11 +376,12 @@ export default function App() {
   const changeZoom = (value: number) => { setFit(false); setZoom(Math.max(10, Math.min(400, value))); };
   const toolRow = (name: string, index: number) => {
     const Icon = icons[name] || FileCheck2;
-    const available = name === 'Organize pages' || name === 'Combine files' || name === 'Comment';
+    const available = name === 'Organize pages' || name === 'Combine files' || name === 'Comment' || name === 'Fill forms';
     const combine = name === 'Combine files';
     const comment = name === 'Comment';
-    const disabled = busy || !available || (combine && documents.length < 2) || (comment && !doc);
-    return <button key={name} className={s.toolRow} disabled={disabled} onClick={combine ? launchCombine : comment ? launchCommentMode : launchOrganizer} title={combine && documents.length < 2 ? 'Open two PDFs to combine them' : comment && !doc ? 'Open a PDF to comment' : available ? name : `${name} — planned, not implemented yet`}><span className={s.toolIcon} style={{ color: ['#7361b3', '#277bb4', '#239576', '#bc6b25'][index % 4] }}><Icon size={21} strokeWidth={1.7} /></span><span>{name}</span></button>;
+    const forms = name === 'Fill forms';
+    const disabled = busy || !available || (combine && documents.length < 2) || ((comment || forms) && !doc);
+    return <button key={name} className={s.toolRow} disabled={disabled} onClick={combine ? launchCombine : comment ? launchCommentMode : forms ? launchForms : launchOrganizer} title={combine && documents.length < 2 ? 'Open two PDFs to combine them' : (comment || forms) && !doc ? 'Open a PDF first' : forms ? 'Fill existing text fields' : available ? name : `${name} — planned, not implemented yet`}><span className={s.toolIcon} style={{ color: ['#7361b3', '#277bb4', '#239576', '#bc6b25'][index % 4] }}><Icon size={21} strokeWidth={1.7} /></span><span>{name}</span></button>;
   };
   return <div className={`${s.app} ${dark ? s.dark : ''}`}>
     <header className={s.tabbar}>
@@ -366,7 +400,7 @@ export default function App() {
       <button onClick={() => { setDark(v => !v); setMenu(false); }}>Switch to {dark ? 'light' : 'dark'} theme</button>
       <button disabled={busy} onClick={() => { setMenu(false); setUpdatesOpen(true); }}>Check for updates…</button>
       <button disabled={busy} onClick={() => { setMenu(false); setNoticesOpen(true); }}>Third-party notices…</button>
-      <button onClick={() => { setNotice('PDF viewing, embedded-text search, Combine Files, and Organize Pages are available. Rotate, reorder, delete, extract, undo/redo, and save a new copy. Text editing, OCR, forms, and signatures are not implemented yet.'); setMenu(false); }}>About this build</button>
+      <button onClick={() => { setNotice('PDF viewing, embedded-text search, Combine Files, Organize Pages, and filling a strict subset of existing plain text fields are available. Rotate, reorder, delete, extract, undo/redo, and save a new copy. Text editing, OCR, and signatures are not implemented yet.'); setMenu(false); }}>About this build</button>
     </div>}
     {updatesOpen && <Updates dirty={documents.some(document => document.dirty)} busy={busy} setBusy={setBusy} close={() => setUpdatesOpen(false)} />}
     {pageTextOpen && doc && <PageText key={`${doc.id}-${doc.revision}-${page}`} document={doc} page={page} close={() => setPageTextOpen(false)} />}
@@ -377,6 +411,7 @@ export default function App() {
     {combineOpen && <CombineDialog documents={documents} activeId={active} busy={busy} combine={combine} close={() => setCombineOpen(false)} />}
     {insertOpen && <InsertPagesDialog documents={documents} activeId={active} busy={busy} insert={insert} close={() => setInsertOpen(false)} />}
     {replaceOpen && <ReplacePagesDialog documents={documents} activeId={active} initialRange={replaceRange} busy={busy} replace={replace} close={() => setReplaceOpen(false)} />}
+    {formsOpen && doc && <FillFormsDialog key={`${doc.id}:${doc.revision}`} document={doc} formFields={formFields} error={formsLoad.request === formsRequest ? formsLoad.error : ''} busy={busy} fill={fillForms} close={() => setFormsOpen(false)} />}
     {commentEditor && doc && <CommentEditor key={`${doc.id}:${doc.revision}:${commentEditor.kind === 'edit' ? commentEditor.annotation.id : 'new'}`} draft={commentEditor} busy={busy} save={contents => commentEditor.kind === 'create-text-highlight'
       ? mutateAnnotation(current => createTextHighlight(current.id, current.revision, commentEditor.page, commentEditor.start, commentEditor.end, contents))
       : commentEditor.kind === 'create' ? commentEditor.type === 'note' ? mutateAnnotation(current => createComment(current.id, current.revision, commentEditor.page, commentEditor.rect, contents || '')) : mutateAnnotation(current => createHighlight(current.id, current.revision, commentEditor.page, commentEditor.rect, contents))
@@ -391,16 +426,16 @@ export default function App() {
       {view === 'home' ? <>
         <aside className={s.homeSidebar}><h2>Home</h2>{['Recent', 'Starred'].map(item => <button key={item} className={section === item ? s.sidebarSelected : ''} onClick={() => setSection(item)}>{item === 'Recent' ? <Home size={18} /> : <Star size={18} />}{item}</button>)}<div className={s.sidebarCaption}>FILES</div><button onClick={() => void open()}><FolderOpen size={18} /> Your computer</button><div className={s.sidebarBottom}><ShieldCheck size={16} /><span>Local files. Yours to keep.</span></div></aside>
         <section className={s.homeContent}><div className={s.homeHeading}><div><p className={s.eyebrow}>YOUR WORKSPACE</p><h1>Work with your PDFs.</h1></div><button className={s.outlineButton} onClick={() => setView('tools')}>See all tools <ArrowUpRight size={16} /></button></div>
-          <div className={s.quickCards}>{['Edit a PDF', 'Export a PDF', 'Combine files', 'Fill & sign'].map((name, i) => { const Icon = icons[name]; return <div className={s.quickCard} key={name}><span style={{ color: ['#7260b4', '#2c80b2', '#25876b', '#b86a25'][i] }}><Icon size={29} strokeWidth={1.5} /></span><h3>{name}</h3><p>{['Update text and images.', 'Convert to another format.', 'Bring documents together.', 'Complete your paperwork.'][i]}</p><span className={s.planned}>{name === 'Combine files' ? 'Available with two open PDFs' : 'Planned'}</span></div>; })}</div>
+          <div className={s.quickCards}>{['Edit a PDF', 'Export a PDF', 'Combine files', 'Fill forms'].map((name, i) => { const Icon = icons[name]; return <div className={s.quickCard} key={name}><span style={{ color: ['#7260b4', '#2c80b2', '#25876b', '#b86a25'][i] }}><Icon size={29} strokeWidth={1.5} /></span><h3>{name}</h3><p>{['Update text and images.', 'Convert to another format.', 'Bring documents together.', 'Fill supported existing text fields.'][i]}</p><span className={s.planned}>{name === 'Combine files' ? 'Available with two open PDFs' : name === 'Fill forms' ? 'Available with an open PDF' : 'Planned'}</span></div>; })}</div>
           <div className={s.recentHeader}><h2>{section}</h2><div className={s.recentControls}><button className={s.textButton} disabled={!recentFiles.length} onClick={() => setRecentFiles([])}>Clear file history</button><label className={s.search}><Search size={16} /><input aria-label="Search recent files" placeholder="Search your files" value={query} onChange={e => setQuery(e.target.value)} /></label><IconButton icon={List} label="List view" active /></div></div>
           <div className={s.tableHeading}><span>NAME</span><span>LOCATION</span><span>PAGES</span><span /></div>
           {listed.map(file => <div className={s.fileRow} key={file.path}><button disabled={busy} onClick={() => void reopen(file.path)}><FileImage size={25} /><span>{file.name}<small>PDF document</small></span></button><span title={file.path}>This computer</span><span>{file.pages}</span><IconButton icon={Star} label={`${file.starred ? 'Unstar' : 'Star'} ${file.name}`} active={file.starred} onClick={() => setRecentFiles(list => list.map(item => item.path === file.path ? { ...item, starred: !item.starred } : item))} /></div>)}
           {!listed.length && <div className={s.empty}><div className={s.emptyIcon}><Files size={36} strokeWidth={1.25} /></div><h3>{query ? 'No matching files' : section === 'Starred' ? 'Keep important files close' : 'Your documents start here'}</h3><p>{query ? 'Try another file name.' : section === 'Starred' ? 'Star an open file to find it here.' : 'Open a PDF from your computer to start reading.'}</p>{!query && section !== 'Starred' && <><button className={s.openButton} onClick={() => void open()} disabled={busy}>Open a file</button><button className={s.textButton} onClick={() => void open(true)} disabled={busy}>Explore a sample PDF <ChevronRight size={15} /></button></>}</div>}
           <p className={s.foundationNote}>Viewer + Organize Pages · More tools are in development{!native ? ' · Browser preview' : ''}</p>
         </section>
-      </> : view === 'tools' ? <section className={s.toolsCatalog}><div className={s.catalogHeading}><div><p className={s.eyebrow}>THE COMPLETE WORKSPACE</p><h1>All tools</h1><p>Combine Files and Organize Pages are ready. Other advanced tools are planned for later milestones.</p></div><label className={s.search}><Search size={16} /><input aria-label="Search tools" placeholder="Find a tool" value={query} onChange={e => setQuery(e.target.value)} /></label></div>{toolGroups.map(group => <section key={group.name}><h2>{group.name}</h2><div className={s.catalogGrid}>{group.tools.filter(name => name.toLowerCase().includes(query.toLowerCase())).map((name, i) => <div className={s.catalogCard} key={name}>{toolRow(name, i)}<span className={s.planned}>{name === 'Organize pages' || name === 'Combine files' ? 'Available' : 'Not available yet'}</span></div>)}</div></section>)}</section> : doc ? <>
-        {toolsOpen && <aside className={s.toolsPanel}><div className={s.panelHeading}><h2>All tools</h2><IconButton icon={PanelLeftClose} label="Collapse all tools" onClick={() => setToolsOpen(false)} /></div>{['Export a PDF', 'Edit a PDF', 'Create a PDF', 'Combine files', 'Organize pages', 'Comment', 'Fill & sign', 'Scan & OCR', 'Protect a PDF', 'Compress a PDF'].map(toolRow)}<button className={s.textButton} onClick={() => setView('tools')}>View all tools <ChevronRight size={15} /></button><div className={s.panelNote}>Combine Files and Organize Pages are available. More tools are in development.</div></aside>}
-        {organizing ? <Organizer key={doc.id} document={doc} currentPage={page} busy={busy} edit={edit} save={save} split={split} crop={crop} insert={launchInsert} replace={launchReplace} close={() => setOrganizing(false)} /> : <div className={s.documentArea}><Viewer key={`${doc.id}-${doc.revision}`} document={doc} zoom={zoom} fit={fit} target={target} onPage={trackPage} hand={hand} search={activeSearch} annotations={annotations?.status === 'supported' ? annotations.annotations : []} commentMode={commentMode} highlightMode={highlightMode} annotationAvailable={annotations?.status === 'supported'} annotationInteractive={commentMode && !hand && !highlightMode} onCommentCreate={beginComment} onHighlightCreate={beginHighlight} onAnnotationSelect={selectAnnotation} onTextSelection={receiveTextHighlightSelection} /><div className={s.quickToolbar}><IconButton icon={MousePointer2} label="Select text on page" active={!hand && !commentMode && !highlightMode} onClick={() => { setHand(false); setCommentMode(false); setHighlightMode(false); }} /><IconButton icon={Highlighter} label="Highlight selected text" disabled={busy || !textHighlightSelection || annotations?.status !== 'supported'} onPointerDown={captureTextHighlightSelection} onClick={beginTextHighlight} /><IconButton icon={Hand} label="Pan document" active={hand} onClick={() => { setHand(true); setCommentMode(false); setHighlightMode(false); }} /><IconButton icon={Type} label="Read and copy page text" onClick={() => setPageTextOpen(true)} /><span className={s.horizontalDivider} /><IconButton icon={MessageSquare} label="Add comment" active={commentMode} disabled={busy} onClick={launchCommentMode} /><IconButton icon={Highlighter} label="Add area highlight" active={highlightMode} disabled={busy} onClick={launchHighlightMode} /><IconButton icon={Pencil} label="Draw" disabled /><IconButton icon={Type} label="Fill in text" disabled /><IconButton icon={Signature} label="Add signature" disabled /><span className={s.horizontalDivider} /><IconButton icon={MoreHorizontal} label="Customize quick tools" disabled /></div></div>}
+      </> : view === 'tools' ? <section className={s.toolsCatalog}><div className={s.catalogHeading}><div><p className={s.eyebrow}>THE COMPLETE WORKSPACE</p><h1>All tools</h1><p>Combine Files, Organize Pages, and Fill forms are ready. Other advanced tools are planned for later milestones.</p></div><label className={s.search}><Search size={16} /><input aria-label="Search tools" placeholder="Find a tool" value={query} onChange={e => setQuery(e.target.value)} /></label></div>{toolGroups.map(group => <section key={group.name}><h2>{group.name}</h2><div className={s.catalogGrid}>{group.tools.filter(name => name.toLowerCase().includes(query.toLowerCase())).map((name, i) => <div className={s.catalogCard} key={name}>{toolRow(name, i)}<span className={s.planned}>{name === 'Organize pages' || name === 'Combine files' || name === 'Fill forms' ? 'Available' : 'Not available yet'}</span></div>)}</div></section>)}</section> : doc ? <>
+        {toolsOpen && <aside className={s.toolsPanel}><div className={s.panelHeading}><h2>All tools</h2><IconButton icon={PanelLeftClose} label="Collapse all tools" onClick={() => setToolsOpen(false)} /></div>{['Export a PDF', 'Edit a PDF', 'Create a PDF', 'Combine files', 'Organize pages', 'Comment', 'Fill forms', 'Scan & OCR', 'Protect a PDF', 'Compress a PDF'].map(toolRow)}<button className={s.textButton} onClick={() => setView('tools')}>View all tools <ChevronRight size={15} /></button><div className={s.panelNote}>Combine Files, Organize Pages, and Fill forms are available. More tools are in development.</div></aside>}
+        {organizing ? <Organizer key={doc.id} document={doc} currentPage={page} busy={busy} edit={edit} save={save} split={split} crop={crop} insert={launchInsert} replace={launchReplace} close={() => setOrganizing(false)} /> : <div className={s.documentArea}><Viewer key={`${doc.id}-${doc.revision}`} document={doc} zoom={zoom} fit={fit} target={target} onPage={trackPage} hand={hand} search={activeSearch} annotations={annotations?.status === 'supported' ? annotations.annotations : []} commentMode={commentMode} highlightMode={highlightMode} annotationAvailable={annotations?.status === 'supported'} annotationInteractive={commentMode && !hand && !highlightMode} onCommentCreate={beginComment} onHighlightCreate={beginHighlight} onAnnotationSelect={selectAnnotation} onTextSelection={receiveTextHighlightSelection} /><div className={s.quickToolbar}><IconButton icon={MousePointer2} label="Select text on page" active={!hand && !commentMode && !highlightMode} onClick={() => { setHand(false); setCommentMode(false); setHighlightMode(false); }} /><IconButton icon={Highlighter} label="Highlight selected text" disabled={busy || !textHighlightSelection || annotations?.status !== 'supported'} onPointerDown={captureTextHighlightSelection} onClick={beginTextHighlight} /><IconButton icon={Hand} label="Pan document" active={hand} onClick={() => { setHand(true); setCommentMode(false); setHighlightMode(false); }} /><IconButton icon={Type} label="Read and copy page text" onClick={() => setPageTextOpen(true)} /><span className={s.horizontalDivider} /><IconButton icon={MessageSquare} label="Add comment" active={commentMode} disabled={busy} onClick={launchCommentMode} /><IconButton icon={Highlighter} label="Add area highlight" active={highlightMode} disabled={busy} onClick={launchHighlightMode} /><IconButton icon={Pencil} label="Draw" disabled /><IconButton icon={Type} label="Fill existing text fields" disabled={busy} onClick={launchForms} /><IconButton icon={Signature} label="Add signature" disabled /><span className={s.horizontalDivider} /><IconButton icon={MoreHorizontal} label="Customize quick tools" disabled /></div></div>}
         {!organizing && commentsOpen && doc && <CommentsPanel key={`${doc.id}-${doc.revision}`} document={doc} page={page} annotations={annotations} error={annotationsLoad.request === annotationsRequest ? annotationsLoad.error : ''} selectedId={commentEditor?.kind === 'edit' ? commentEditor.annotation.id : null} onAddComment={addCommentOnCurrentPage} onAddHighlight={addHighlightOnCurrentPage} onSelect={selectAnnotation} close={() => setCommentsOpen(false)} />}
         {!organizing && bookmarksOpen && <BookmarksPanel key={`${doc.id}-${doc.revision}`} document={doc} go={go} close={() => setBookmarksOpen(false)} />}
         {!organizing && searchOpen && !bookmarksOpen && <SearchPanel key={`${doc.id}-${doc.revision}`} document={doc} go={go} close={closeSearch} onHighlights={receiveSearch} />}

@@ -79,6 +79,9 @@ enum Request {
     TextGeometry(u64, u16, u64, Reply<crate::text_geometry::PageTextGeometry>),
     Bookmarks(u64, u64, Reply<BookmarkList>),
     Properties(u64, u64, Reply<crate::document_properties::DocumentProperties>),
+    FormFields(u64, u64, Reply<crate::forms::FormFields>),
+    CheckFormCopy(u64, u64, Vec<crate::forms::FieldValue>, Reply<()>),
+    FillFormCopy(u64, u64, Vec<crate::forms::FieldValue>, PathBuf, Reply<ReplyLease<SavedCopy>>),
     Close(u64, Reply<()>),
     Edit(u64, PageEdit, Reply<DocumentInfo>),
     Crop(u64, u16, u64, CropRect, Reply<DocumentInfo>),
@@ -504,6 +507,58 @@ impl PdfService {
                         })();
                         let _ = reply.send(result);
                     }
+                    Request::FormFields(id, revision, reply) => {
+                        if reply.is_closed() { continue; }
+                        let result = (|| {
+                            let (session, _) = sessions.get(&id).ok_or("Document is closed")?;
+                            if session.revision != revision { return Err("Document changed. Refresh the form field list.".into()); }
+                            Ok(crate::forms::FormDocument::query(session, id))
+                        })();
+                        let _ = reply.send(result);
+                    }
+                    Request::CheckFormCopy(id, revision, values, reply) => {
+                        if reply.is_closed() { continue; }
+                        let result = (|| {
+                            let (session, _) = sessions.get(&id).ok_or("Document is closed")?;
+                            if session.revision != revision { return Err("Document changed. Refresh the form field list.".into()); }
+                            crate::forms::FormDocument::parse(session)?.prepare(&values).map(|_| ())
+                        })();
+                        let _ = reply.send(result);
+                    }
+                    Request::FillFormCopy(id, revision, values, path, reply) => {
+                        if reply.is_closed() { continue; }
+                        let result = (|| {
+                            let (session, original) = sessions.get(&id).ok_or("Document is closed")?;
+                            if session.revision != revision { return Err("Document changed. Refresh the form field list.".into()); }
+                            if path == PathBuf::from(&original.path) { return Err("Choose a new filename to preserve the source PDF.".into()); }
+                            let form = crate::forms::FormDocument::parse(session)?;
+                            let expected = form.pages;
+                            let (bytes, fields) = form.prepare(&values)?;
+                            let checked = crate::forms::FormDocument::query(&EditSession::new(bytes.clone(), expected), 0);
+                            if checked.status != "supported" || checked.fields.len() != fields.len() || checked.fields.iter().zip(&fields).any(|(actual, expected)| actual.name != expected.name || actual.value != expected.value || actual.page != expected.page) { return Err("Filled form field and appearance validation failed.".into()); }
+                            let engine = pdfium.as_ref().map_err(Clone::clone)?;
+                            let document = engine.load_pdf_from_byte_vec(bytes.clone(), None).map_err(|error| format!("Filled PDF could not be opened: {error}"))?;
+                            let pages = page_sizes(&document)?;
+                            if pages.len() != expected { return Err("Filled PDF page count validation failed.".into()); }
+                            let engine_fields = document.form().ok_or("Filled PDF form could not be read by the rendering engine.")?.field_values(document.pages());
+                            if !filled_values_agree(&fields, &engine_fields) { return Err("Filled PDF values disagree with the rendering engine.".into()); }
+                            for index in 0..document.pages().len() {
+                                let page = document.pages().get(index).map_err(|error| format!("Filled PDF page could not be read: {error}"))?;
+                                let bitmap = page.render_with_config(&PdfRenderConfig::new().set_target_width(64).set_maximum_height(64)).map_err(|error| format!("Filled PDF page could not be rendered: {error}"))?;
+                                if bitmap.width() <= 0 || bitmap.height() <= 0 { return Err("Filled PDF has an invalid bitmap.".into()); }
+                                if reply.is_closed() { return Err("Fill form was canceled.".into()); }
+                            }
+                            if reply.is_closed() { return Err("Fill form was canceled.".into()); }
+                            write_new_file(&path, &bytes)?;
+                            let id = next_id; next_id += 1;
+                            let info = DocumentInfo { id, name: path.file_name().unwrap_or_default().to_string_lossy().into_owned(), path: path.to_string_lossy().into_owned(), pages, revision: 0, dirty: false, can_undo: false, can_redo: false };
+                            sessions.insert(id, (EditSession::new(bytes, info.pages.len()), info.clone()));
+                            documents.insert(id, std::rc::Rc::new(document));
+                            Ok(SavedCopy { path: path.to_string_lossy().into_owned(), document: info })
+                        })();
+                        let result = result.map(|saved| { let cleanup = UnclaimedReply::Document(saved.document.id); ReplyLease::new(saved, cleanup, resource_cleanup.clone()) });
+                        if let Err(Ok(saved)) = reply.send(result) { documents.remove(&saved.document.id); sessions.remove(&saved.document.id); }
+                    }
                     Request::CheckCombine(first, second, reply) => {
                         if reply.is_closed() { continue; }
                         let result = combine_sessions(&sessions, first, second).and_then(|(first, second)| crate::combine::validate_sources(first, second).map(|_| ()));
@@ -619,6 +674,15 @@ impl PdfService {
     }
     pub async fn properties(&self, id: u64, revision: u64) -> Result<crate::document_properties::DocumentProperties, String> {
         let (tx, rx) = oneshot::channel(); self.sender.send(Request::Properties(id, revision, tx)).map_err(|e| e.to_string())?; rx.await.map_err(|e| e.to_string())?
+    }
+    pub async fn form_fields(&self, id: u64, revision: u64) -> Result<crate::forms::FormFields, String> {
+        let (tx, rx) = oneshot::channel(); self.sender.send(Request::FormFields(id, revision, tx)).map_err(|error| error.to_string())?; rx.await.map_err(|error| error.to_string())?
+    }
+    pub async fn check_form_copy(&self, id: u64, revision: u64, values: Vec<crate::forms::FieldValue>) -> Result<(), String> {
+        let (tx, rx) = oneshot::channel(); self.sender.send(Request::CheckFormCopy(id, revision, values, tx)).map_err(|error| error.to_string())?; rx.await.map_err(|error| error.to_string())?
+    }
+    pub async fn fill_form_copy(&self, id: u64, revision: u64, values: Vec<crate::forms::FieldValue>, path: PathBuf) -> Result<SavedCopy, String> {
+        let (tx, rx) = oneshot::channel(); self.sender.send(Request::FillFormCopy(id, revision, values, path, tx)).map_err(|error| error.to_string())?; rx.await.map_err(|error| error.to_string())?.map(ReplyLease::accept)
     }
     pub async fn edit(&self, id: u64, edit: PageEdit) -> Result<DocumentInfo, String> {
         let (tx, rx) = oneshot::channel(); self.sender.send(Request::Edit(id, edit, tx)).map_err(|e| e.to_string())?; rx.await.map_err(|e| e.to_string())?
@@ -741,6 +805,10 @@ fn print_dimensions(width: f32, height: f32, max_width: u32, max_height: u32) ->
     Ok((output_width, output_height))
 }
 
+fn filled_values_agree(fields: &[crate::forms::FormField], engine_fields: &HashMap<String, Option<String>>) -> bool {
+    engine_fields.len() == fields.len() && fields.iter().all(|field| engine_fields.get(&field.name).is_some_and(|value| value.as_deref().unwrap_or("") == field.value))
+}
+
 fn page_sizes(document: &PdfDocument<'_>) -> Result<Vec<PageSize>, String> {
     let pages = document.pages();
     if pages.is_empty() { return Err("This PDF has no pages.".into()); }
@@ -823,9 +891,89 @@ mod tests {
     macro_rules! accepted_reply_values {
         ($($value:ty),* $(,)?) => { $(impl TestReplyValue for $value { type Accepted = Self; fn accept(self) -> Self { self } })* };
     }
-    accepted_reply_values!((), Vec<u8>, Vec<u64>, String, DocumentInfo, SavedCopy, OpenResult, PrintSnapshotInfo, PrintBitmap, BookmarkList, RenderWork, crate::document_properties::DocumentProperties, crate::text_geometry::PageTextGeometry, crate::split::SplitOutput, crate::comments::CommentList, crate::comments::AnnotationList);
+    accepted_reply_values!((), Vec<u8>, Vec<u64>, String, DocumentInfo, SavedCopy, OpenResult, PrintSnapshotInfo, PrintBitmap, BookmarkList, RenderWork, crate::document_properties::DocumentProperties, crate::text_geometry::PageTextGeometry, crate::split::SplitOutput, crate::comments::CommentList, crate::comments::AnnotationList, crate::forms::FormFields);
     fn call<T: TestReplyValue>(service: &PdfService, request: impl FnOnce(Reply<T>) -> Request) -> Result<T::Accepted, String> {
         let (tx, rx) = oneshot::channel(); service.sender.send(request(tx)).unwrap(); rx.blocking_recv().unwrap().map(TestReplyValue::accept)
+    }
+    #[test]
+    fn forms_empty_values_require_an_actual_named_engine_field() {
+        let expected = vec![crate::forms::FormField {field_id:"opaque".into(),name:"Name".into(),page:0,value:String::new(),max_length:None}];
+        assert!(filled_values_agree(&expected,&HashMap::from([("Name".into(),None)])), "PDFium's present empty field is valid");
+        assert!(filled_values_agree(&expected,&HashMap::from([("Name".into(),Some(String::new()))])));
+        assert!(!filled_values_agree(&expected,&HashMap::from([("Unknown".into(),None)])), "An unrelated empty field cannot substitute for the missing canonical name");
+        assert!(!filled_values_agree(&expected,&HashMap::new()));
+        assert!(!filled_values_agree(&expected,&HashMap::from([("Name".into(),Some("wrong".into()))])));
+    }
+    #[test]
+    fn forms_reportlab_engine_crops_rotations_values_print_and_source_preservation() {
+        let _print_lock = print_test_lock();
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")); let service = PdfService::start(root.join("resources/pdfium/bin/pdfium.dll")); let folder = tempfile::tempdir().unwrap();
+        for (rotation, inherited) in [0, 90, 180, 270].into_iter().flat_map(|rotation| [false,true].map(|inherited| (rotation,inherited))) {
+            let mut document = lopdf::Document::load_mem(include_bytes!("../tests/fixtures/reportlab-plain-fields.pdf")).unwrap();
+            let page = *document.get_pages().values().next().unwrap(); let owner = if inherited { document.get_dictionary(page).unwrap().get(b"Parent").unwrap().as_reference().unwrap() } else {page};
+            if inherited { let leaf = document.get_dictionary_mut(page).unwrap(); leaf.remove(b"Rotate"); leaf.remove(b"CropBox"); }
+            let page_dict = document.get_dictionary_mut(owner).unwrap();
+            page_dict.set("Rotate", rotation); page_dict.set("CropBox", vec![30.into(),500.into(),350.into(),760.into()]);
+            let mut bytes = Vec::new(); document.save_to(&mut bytes).unwrap(); let source_path = folder.path().join(format!("source-{rotation}-{inherited}.pdf")); std::fs::write(&source_path, &bytes).unwrap();
+            let source = call(&service, |reply| Request::Open(source_path.clone(), reply)).unwrap(); let before = comments_png(&service, source.id, 0, 640); let snapshot = print_snapshot(&service, source.id, 0);
+            let before_print = call(&service, |reply| Request::PrintRender(snapshot.token, 0, 640, 640, reply)).unwrap();
+            let query = call(&service, |reply| Request::FormFields(source.id, 0, reply)).unwrap(); assert_eq!(query.status, "supported"); assert_eq!(query.fields.len(), 2); assert_eq!(query.fields[0].page, 0);
+            let values = query.fields.iter().enumerate().map(|(index, field)| crate::forms::FieldValue { field_id:field.field_id.clone(), value: if index == 0 { "Changed gjpqy".into() } else { "Portland".into() } }).collect::<Vec<_>>();
+            call(&service, |reply| Request::CheckFormCopy(source.id, 0, values.clone(), reply)).unwrap();
+            let output_path = folder.path().join(format!("filled-{rotation}-{inherited}.pdf")); let output = call(&service, |reply| Request::FillFormCopy(source.id, 0, values, output_path.clone(), reply)).unwrap();
+            assert_eq!(output.document.revision, 0); assert!(!output.document.dirty); assert!(!output.document.can_undo); assert_eq!(output.document.pages[0].width, source.pages[0].width); assert_eq!(output.document.pages[0].height, source.pages[0].height);
+            let after = comments_png(&service, output.document.id, 0, 640); assert_eq!(after.dimensions(), before.dimensions());
+            let mut changed = 0; let mut outside_changed = 0; let mut ink = 0;
+            for (x,y,pixel) in after.enumerate_pixels() {
+                let (nx,ny) = (x as f32 / after.width() as f32, y as f32 / after.height() as f32);
+                let (sx,sy) = match rotation { 0 => (30.0+320.0*nx,760.0-260.0*ny),90 => (30.0+320.0*ny,500.0+260.0*nx),180 => (350.0-320.0*nx,500.0+260.0*ny),_ => (350.0-320.0*ny,760.0-260.0*nx) };
+                let field = (58.0..=312.0).contains(&sx) && ((648.0..=676.0).contains(&sy) || (568.0..=598.0).contains(&sy));
+                if pixel != before.get_pixel(x,y) { changed += 1; if !field { outside_changed += 1; } }
+                if field && pixel.0.iter().all(|channel| *channel < 120) { ink += 1; }
+            }
+            assert!(changed > 300 && ink > 100, "Independent visible AP pixels for rotation {rotation}: changed {changed}, ink {ink}"); assert_eq!(outside_changed, 0, "Only field interiors may change");
+            assert_eq!(comments_png(&service, source.id, 0, 640), before); assert_eq!(std::fs::read(&source_path).unwrap(), bytes);
+            let still_old_print = call(&service, |reply| Request::PrintRender(snapshot.token, 0, 640, 640, reply)).unwrap(); assert_eq!(still_old_print.bgra, before_print.bgra);
+            let new_snapshot = print_snapshot(&service, output.document.id, 0); let filled_print = call(&service, |reply| Request::PrintRender(new_snapshot.token, 0, 640, 640, reply)).unwrap(); assert_ne!(filled_print.bgra, before_print.bgra);
+            let saved_bytes = std::fs::read(&output_path).unwrap(); let saved = lopdf::Document::load_mem(&saved_bytes).unwrap(); let saved_page = *saved.get_pages().values().next().unwrap(); for key in [b"Rotate".as_slice(), b"CropBox"] { assert_eq!(document.get_dictionary(owner).unwrap().get(key).unwrap(), saved.get_dictionary(owner).unwrap().get(key).unwrap()); } for key in [b"Contents".as_slice(), b"Resources"] { assert_eq!(document.get_dictionary(page).unwrap().get(key).unwrap(), saved.get_dictionary(saved_page).unwrap().get(key).unwrap()); }
+            let reopened = call(&service, |reply| Request::Open(output_path, reply)).unwrap(); assert_eq!(comments_png(&service, reopened.id, 0, 640), after); let readback = call(&service, |reply| Request::FormFields(reopened.id, 0, reply)).unwrap(); assert_eq!(readback.fields[0].value, "Changed gjpqy"); assert_eq!(readback.fields[1].value, "Portland");
+            if rotation == 0 { let proof = root.join("target/forms-probe"); std::fs::create_dir_all(&proof).unwrap(); std::fs::write(proof.join("filled-reportlab.pdf"), &saved_bytes).unwrap(); after.save(proof.join("filled-reportlab-pdfium.png")).unwrap(); std::fs::write(proof.join("cropped-reportlab-source.pdf"), &bytes).unwrap(); println!("Independent cross-engine output: {}", proof.join("filled-reportlab.pdf").display()); }
+            if rotation == 0 && !inherited {
+                let fields = call(&service, |reply| Request::FormFields(output.document.id,0,reply)).unwrap(); let clear = vec![crate::forms::FieldValue {field_id:fields.fields[0].field_id.clone(),value:String::new()}]; let cleared = call(&service, |reply| Request::FillFormCopy(output.document.id,0,clear,folder.path().join("cleared.pdf"),reply)).unwrap(); let empty = comments_png(&service,cleared.document.id,0,640);
+                assert!((176..216).all(|y| (64..556).all(|x| empty.get_pixel(x,y).0 == [255,255,255])), "Clearing canonical V must actually remove painted text, retaining white background"); assert_eq!(call(&service, |reply| Request::FormFields(cleared.document.id,0,reply)).unwrap().fields[0].value,""); assert_eq!(call(&service, |reply| Request::FormFields(cleared.document.id,0,reply)).unwrap().fields[1].value,"Portland"); call(&service, |reply| Request::Close(cleared.document.id,reply)).unwrap();
+            }
+            for id in [source.id,output.document.id,reopened.id] { call(&service, |reply| Request::Close(id, reply)).unwrap(); }
+        }
+    }
+    #[test]
+    fn forms_corpus_no_fields_and_appended_independent_form_preserve_every_original_page() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")); let service = PdfService::start(root.join("resources/pdfium/bin/pdfium.dll")); let folder = tempfile::tempdir().unwrap();
+        for (index, (fixture, count)) in [("resources/welcome.pdf",6usize),("../test-corpus/synthetic-scan-98.pdf",98),("../test-corpus/synthetic-text-1500.pdf",1500)].into_iter().enumerate() {
+            let original_path = root.join(fixture); let source_bytes = std::fs::read(&original_path).unwrap(); let original = call(&service, |reply| Request::Open(original_path.clone(), reply)).unwrap();
+            let query = call(&service, |reply| Request::FormFields(original.id, 0, reply)).unwrap(); assert_eq!(query.status,"supported"); assert!(query.fields.is_empty()); let absent_output = folder.path().join(format!("no-fields-{index}.pdf")); assert!(call(&service, |reply| Request::FillFormCopy(original.id, 0, vec![crate::forms::FieldValue {field_id:"unknown".into(),value:"new".into()}], absent_output.clone(), reply)).is_err()); assert!(!absent_output.exists());
+            let baseline = (0..count).map(|page| call(&service, |reply| Request::Render(original.id,page as u16,64,reply)).unwrap()).collect::<Vec<_>>();
+            let mut combined = lopdf::Document::load_mem(&source_bytes).unwrap(); let mut form = lopdf::Document::load_mem(include_bytes!("../tests/fixtures/reportlab-plain-fields.pdf")).unwrap(); form.renumber_objects_with(combined.max_id+1);
+            let form_page = *form.get_pages().values().next().unwrap(); let form_ref = form.catalog().unwrap().get(b"AcroForm").unwrap().clone(); let root_id = combined.trailer.get(b"Root").unwrap().as_reference().unwrap(); let pages_id = combined.catalog().unwrap().get(b"Pages").unwrap().as_reference().unwrap();
+            form.get_dictionary_mut(form_page).unwrap().set("Parent",pages_id); combined.objects.extend(form.objects); combined.max_id = combined.objects.keys().map(|id| id.0).max().unwrap(); combined.get_dictionary_mut(root_id).unwrap().set("AcroForm",form_ref); let page_tree = combined.get_dictionary_mut(pages_id).unwrap(); page_tree.get_mut(b"Kids").unwrap().as_array_mut().unwrap().push(lopdf::Object::Reference(form_page)); page_tree.set("Count",(count+1) as i64);
+            let appended = folder.path().join(format!("appended-{index}.pdf")); combined.save(&appended).unwrap(); let input_bytes = std::fs::read(&appended).unwrap(); let input = call(&service, |reply| Request::Open(appended.clone(), reply)).unwrap(); let query = call(&service, |reply| Request::FormFields(input.id,0,reply)).unwrap(); assert_eq!(query.status,"supported", "{}", query.reason.unwrap_or_default()); assert_eq!(query.fields.len(),2); assert!(query.fields.iter().all(|field| field.page == count));
+            let values = query.fields.iter().map(|field| crate::forms::FieldValue {field_id:field.field_id.clone(),value:if field.name=="Name" {"Corpus copy".into()} else {"Portland".into()}}).collect(); let output_path = folder.path().join(format!("filled-corpus-{index}.pdf")); let output = call(&service, |reply| Request::FillFormCopy(input.id,0,values,output_path.clone(),reply)).unwrap(); assert_eq!(output.document.pages.len(),count+1);
+            for (page, expected) in baseline.iter().enumerate() { let actual = call(&service, |reply| Request::Render(output.document.id,page as u16,64,reply)).unwrap(); assert_eq!(&actual,expected,"Preserve original corpus {index} page {page}"); assert_eq!(original.pages[page].width,output.document.pages[page].width); assert_eq!(original.pages[page].height,output.document.pages[page].height); }
+            assert_ne!(comments_png(&service,input.id,count as u16,612),comments_png(&service,output.document.id,count as u16,612)); assert_eq!(std::fs::read(&original_path).unwrap(),source_bytes); assert_eq!(std::fs::read(&appended).unwrap(),input_bytes); let unchanged = call(&service, |reply| Request::FormFields(input.id,0,reply)).unwrap(); assert_eq!(unchanged.fields[0].value,"Original");
+            let reopened = call(&service, |reply| Request::Open(output_path,reply)).unwrap(); assert_eq!(comments_png(&service,reopened.id,count as u16,612),comments_png(&service,output.document.id,count as u16,612));
+            for id in [original.id,input.id,output.document.id,reopened.id] { call(&service, |reply| Request::Close(id,reply)).unwrap(); }
+            println!("Form corpus {fixture}: {count} original pages compared at width 64 plus independently generated filled form page");
+        }
+    }
+    #[test]
+    fn forms_copy_guards_receiver_ownership_accepted_session_and_hidden_widgets() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")); let service = PdfService::start(root.join("resources/pdfium/bin/pdfium.dll")); let folder = tempfile::tempdir().unwrap(); let path = root.join("tests/fixtures/reportlab-plain-fields.pdf"); let bytes = std::fs::read(&path).unwrap(); let info = call(&service, |reply| Request::Open(path.clone(),reply)).unwrap(); let query = call(&service, |reply| Request::FormFields(info.id,0,reply)).unwrap(); let values = vec![crate::forms::FieldValue {field_id:query.fields[0].field_id.clone(),value:"Owned copy".into()}];
+        assert!(call(&service, |reply| Request::FillFormCopy(info.id,0,values.clone(),path.clone(),reply)).is_err()); assert_eq!(std::fs::read(&path).unwrap(),bytes);
+        let existing = folder.path().join("existing.pdf"); std::fs::write(&existing,b"keep existing").unwrap(); assert!(call(&service, |reply| Request::FillFormCopy(info.id,0,values.clone(),existing.clone(),reply)).is_err()); assert_eq!(std::fs::read(&existing).unwrap(),b"keep existing");
+        let preclosed = folder.path().join("preclosed.pdf"); let (tx,rx) = oneshot::channel(); drop(rx); service.sender.send(Request::FillFormCopy(info.id,0,values.clone(),preclosed.clone(),tx)).unwrap(); call(&service, |reply| Request::FormFields(info.id,0,reply)).unwrap(); assert!(!preclosed.exists());
+        let unread = folder.path().join("unread.pdf"); let (tx,rx) = oneshot::channel(); service.sender.send(Request::FillFormCopy(info.id,0,values.clone(),unread.clone(),tx)).unwrap(); call(&service, |reply| Request::FormFields(info.id,0,reply)).unwrap(); assert!(unread.exists()); drop(rx); assert!(call(&service, |reply| Request::OpenDocumentsForPath(unread.clone(),reply)).unwrap().is_empty()); let reopened = call(&service, |reply| Request::Open(unread,reply)).unwrap(); call(&service, |reply| Request::Close(reopened.id,reply)).unwrap();
+        let accepted_path = folder.path().join("accepted.pdf"); let accepted = tauri::async_runtime::block_on(service.fill_form_copy(info.id,0,values.clone(),accepted_path)).unwrap(); let accepted_id=accepted.document.id; drop(accepted); assert_eq!(call(&service, |reply| Request::FormFields(accepted_id,0,reply)).unwrap().fields[0].value,"Owned copy"); call(&service, |reply| Request::Close(accepted_id,reply)).unwrap();
+        let rotated = call(&service, |reply| Request::Edit(info.id,PageEdit::Rotate {pages:vec![0],clockwise:true},reply)).unwrap(); assert!(call(&service, |reply| Request::FormFields(info.id,0,reply)).is_err()); assert_eq!(call(&service, |reply| Request::FormFields(info.id,rotated.revision,reply)).unwrap().status,"unsupported"); let changed_output = folder.path().join("changed.pdf"); assert!(call(&service, |reply| Request::FillFormCopy(info.id,0,values.clone(),changed_output.clone(),reply)).is_err()); assert!(call(&service, |reply| Request::FillFormCopy(info.id,rotated.revision,values.clone(),changed_output.clone(),reply)).is_err()); assert!(!changed_output.exists()); let undone = call(&service, |reply| Request::Edit(info.id,PageEdit::Undo,reply)).unwrap(); assert!(!undone.dirty); assert!(undone.can_redo); let fresh = call(&service, |reply| Request::FormFields(info.id,undone.revision,reply)).unwrap(); assert_eq!(fresh.status,"supported"); let undo_output = call(&service, |reply| Request::FillFormCopy(info.id,undone.revision,values,folder.path().join("after-undo.pdf"),reply)).unwrap(); assert_eq!(call(&service, |reply| Request::FormFields(info.id,undone.revision,reply)).unwrap().fields[0].value,"Original"); let redone = call(&service, |reply| Request::Edit(info.id,PageEdit::Redo,reply)).unwrap(); assert!(redone.dirty); call(&service, |reply| Request::Close(undo_output.document.id,reply)).unwrap(); call(&service, |reply| Request::Close(info.id,reply)).unwrap(); assert!(call(&service, |reply| Request::FormFields(info.id,redone.revision,reply)).is_err()); assert!(call(&service, |reply| Request::CheckFormCopy(info.id,redone.revision,vec![],reply)).is_err());
+        let mut hidden = lopdf::Document::load_mem(&bytes).unwrap(); let page=*hidden.get_pages().values().next().unwrap(); hidden.get_dictionary_mut(page).unwrap().set("CropBox",vec![30.into(),680.into(),350.into(),760.into()]); let hidden_path=folder.path().join("hidden-source.pdf"); hidden.save(&hidden_path).unwrap(); let source=call(&service, |reply| Request::Open(hidden_path.clone(),reply)).unwrap(); let before=comments_png(&service,source.id,0,640); let fields=call(&service, |reply| Request::FormFields(source.id,0,reply)).unwrap(); assert_eq!(fields.status,"supported"); let patches=fields.fields.iter().map(|field| crate::forms::FieldValue {field_id:field.field_id.clone(),value:"Hidden stored".into()}).collect(); let output=call(&service, |reply| Request::FillFormCopy(source.id,0,patches,folder.path().join("hidden-filled.pdf"),reply)).unwrap(); assert_eq!(comments_png(&service,output.document.id,0,640),before); assert!(call(&service, |reply| Request::FormFields(output.document.id,0,reply)).unwrap().fields.iter().all(|field| field.value=="Hidden stored")); for id in [source.id,output.document.id] {call(&service, |reply| Request::Close(id,reply)).unwrap();}
     }
     struct TestPrintSnapshot { service: PdfService, info: PrintSnapshotInfo }
     impl std::ops::Deref for TestPrintSnapshot {
@@ -2606,6 +2754,8 @@ mod tests {
             assert_eq!(properties.page_count, 6); assert_eq!(properties.source_size_bytes, source.len());
             let (tx, rx) = oneshot::channel(); service.sender.send(Request::BeginPrint(info.id, 0, tx)).unwrap(); assert!(rx.blocking_recv().unwrap().is_err(), "Encrypted v{version}-{kind} must not print");
             let comments = call(&service, |reply| Request::Comments(info.id, 0, reply)).unwrap(); assert_eq!(comments.status, "unsupported"); assert!(comments.notes.is_empty());
+            assert_eq!(call(&service, |reply| Request::FormFields(info.id, 0, reply)).unwrap().status, "unsupported", "Encrypted v{version}-{kind} must not expose fillable fields");
+            let form_output = folder.path().join("must-not-fill.pdf"); assert!(call(&service, |reply| Request::FillFormCopy(info.id, 0, vec![crate::forms::FieldValue {field_id:"unknown".into(),value:"blocked".into()}], form_output.clone(), reply)).is_err()); assert!(!form_output.exists());
             assert!(call(&service, |reply| Request::Comment(info.id, 0, CommentMutation::Create(0, CropRect { x: 0.1, y: 0.1, width: 0.1, height: 0.1 }, "Blocked encrypted note".into()), reply)).is_err(), "Encrypted v{version}-{kind} must not create notes");
             assert_eq!(call(&service, |reply| Request::Annotations(info.id, 0, reply)).unwrap().status, "unsupported"); assert!(call(&service, |reply| Request::Comment(info.id, 0, CommentMutation::CreateHighlight(0, CropRect { x: 0.1, y: 0.1, width: 0.1, height: 0.1 }, None), reply)).is_err(), "Encrypted v{version}-{kind} must not create highlights");
             assert!(call(&service, |reply| Request::Comment(info.id, 0, CommentMutation::CreateTextHighlight(0, 0, 1, None), reply)).is_err(), "Encrypted v{version}-{kind} must not create text highlights");

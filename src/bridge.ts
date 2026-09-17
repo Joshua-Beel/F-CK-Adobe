@@ -36,6 +36,10 @@ export const documentBookmarks = (id: number, revision: number) => invoke<Bookma
 export const editPages = (id: number, edit: PageEdit) => invoke<DocumentInfo>('edit_pages', { id, edit });
 export type SavedCopy = { path: string; document: DocumentInfo };
 export const saveCopy = (id: number, pages?: number[]) => invoke<SavedCopy | null>('save_copy', { id, pages: pages ?? null });
+export type FormField = { fieldId: string; name: string; page: number; value: string; maxLength: number | null };
+export type DocumentFormFields = { documentId: number; revision: number; status: 'supported' | 'unsupported'; reason: string | null; input: 'printable-ascii'; valueByteLimit: number; fields: FormField[] };
+export const documentFormFields = (id: number, revision: number) => invoke<DocumentFormFields>('document_form_fields', { id, revision });
+export const fillFormCopy = (id: number, revision: number, values: { fieldId: string; value: string }[]) => invoke<SavedCopy | null>('fill_form_copy', { id, revision, values });
 export const combineDocuments = (first: { id: number; revision: number }, second: { id: number; revision: number }) => invoke<SavedCopy | null>('combine_documents', { first, second });
 export const insertPagesCopy = (target: { id: number; revision: number }, donor: { id: number; revision: number }, at: number) => invoke<SavedCopy | null>('insert_pages_copy', { target, donor, at });
 export const replacePagesCopy = (target: { id: number; revision: number }, donor: { id: number; revision: number }, start: number, count: number) => invoke<SavedCopy | null>('replace_pages_copy', { target, donor, start, count });
