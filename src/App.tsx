@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { Undo2, Redo2 } from 'lucide-react';
 import { ArrowDownToLine, ArrowUpRight, Bookmark, ChevronDown, ChevronLeft, ChevronRight, ChevronsUpDown, CircleHelp, Combine, File, FileCheck2, FileImage, FileOutput, FilePenLine, FilePlus2, Files, FolderOpen, Hand, Highlighter, Home, LayoutGrid, List, Maximize, Menu, MessageSquare, Minus, MoreHorizontal, MousePointer2, PanelLeftClose, Pencil, Plus, Printer, RotateCw, Save, ScanLine, Search, ShieldCheck, Signature, SlidersHorizontal, Star, Sun, Type, X, ZoomIn, ZoomOut, type LucideIcon } from 'lucide-react';
-import { closeDocument, native, openDocument, reopenDocument, editPages, saveCopy, splitDocument, cropPage, combineDocuments, insertPagesCopy, replacePagesCopy, type OpenResult, type SplitOutput, type SavedCopy } from './bridge';
+import { closeDocument, native, openDocument, reopenDocument, editPages, saveCopy, splitDocument, cropPage, combineDocuments, insertPagesCopy, replacePagesCopy, documentComments, createComment, updateComment, deleteComment, type CommentNote, type CommentRect, type DocumentComments, type OpenResult, type SplitOutput, type SavedCopy } from './bridge';
 import { clampPage, toolGroups, type DocumentInfo, type PageEdit } from './model';
 import Viewer from './Viewer';
 import Organizer from './Organizer';
@@ -18,6 +18,8 @@ import DependencyNotices from './DependencyNotices';
 import CombineDialog from './CombineDialog';
 import InsertPagesDialog from './InsertPagesDialog';
 import ReplacePagesDialog from './ReplacePagesDialog';
+import CommentsPanel from './CommentsPanel';
+import CommentEditor, { type CommentDraft } from './CommentEditor';
 import { readPreferences, savePreferences } from './preferences';
 import { readRecentFiles, saveRecentFiles, rememberFile } from './recentFiles';
 import s from './Workspace.module.css';
@@ -26,6 +28,7 @@ const icons: Record<string, LucideIcon> = { 'Create a PDF': FilePlus2, 'Combine 
 function IconButton({ icon: Icon, label, onClick, disabled = false, active = false }: { icon: LucideIcon; label: string; onClick?: () => void; disabled?: boolean; active?: boolean }) {
   return <button className={`${s.iconButton} ${active ? s.activeIcon : ''}`} aria-label={label} title={disabled && !onClick ? `${label} — not implemented yet` : label} onClick={onClick} disabled={disabled}><Icon size={19} strokeWidth={1.7} /></button>;
 }
+type CommentsLoad = { request: string; comments: DocumentComments | null; error: string };
 
 export default function App() {
   const [preferences] = useState(readPreferences);
@@ -63,6 +66,10 @@ export default function App() {
   const [insertOpen, setInsertOpen] = useState(false);
   const [replaceOpen, setReplaceOpen] = useState(false);
   const [replaceRange, setReplaceRange] = useState({ start: 0, count: 1 });
+  const [commentsOpen, setCommentsOpen] = useState(false);
+  const [commentMode, setCommentMode] = useState(false);
+  const [commentsLoad, setCommentsLoad] = useState<CommentsLoad>({ request: '', comments: null, error: '' });
+  const [commentEditor, setCommentEditor] = useState<CommentDraft | null>(null);
   const [pendingClose, setPendingClose] = useState<number | 'window' | null>(null);
   const closingDocument = useRef<number | null>(null);
   useEffect(() => {
@@ -85,6 +92,20 @@ export default function App() {
   const receiveSearch = useCallback((search: ActiveSearch | null) => setActiveSearch(search), []);
   const closeSearch = useCallback(() => { setSearchOpen(false); setActiveSearch(null); }, []);
   useEffect(() => { setActiveSearch(null); }, [active, doc?.revision, organizing, searchOpen]);
+  useEffect(() => { setCommentMode(false); setCommentsOpen(false); setCommentEditor(null); }, [active]);
+  const commentsNeeded = commentMode || commentsOpen || commentEditor !== null;
+  const commentsRequest = doc ? `${doc.id}:${doc.revision}` : '';
+  useEffect(() => {
+    if (!doc || !commentsNeeded) { setCommentsLoad({ request: '', comments: null, error: '' }); return; }
+    let disposed = false;
+    setCommentsLoad({ request: commentsRequest, comments: null, error: '' });
+    documentComments(doc.id, doc.revision).then(value => {
+      if (disposed || value.documentId !== doc.id || value.revision !== doc.revision) return;
+      setCommentsLoad({ request: commentsRequest, comments: value, error: '' });
+    }).catch(reason => { if (!disposed) setCommentsLoad({ request: commentsRequest, comments: null, error: String(reason) }); });
+    return () => { disposed = true; };
+  }, [commentsNeeded, commentsRequest, doc?.id, doc?.revision]);
+  const comments = commentsLoad.request === commentsRequest ? commentsLoad.comments : null;
   const activate = (id: number) => {
     if (busy || closingDocument.current !== null) return;
     const document = documents.find(item => item.id === id);
@@ -158,6 +179,34 @@ export default function App() {
     try { updateDocument(await cropPage(doc.id, cropPageIndex, doc.revision, rect)); }
     finally { setBusy(false); }
   };
+  const mutateComment = async (operation: (document: DocumentInfo) => Promise<DocumentInfo>) => {
+    const current = doc;
+    if (!current || busy || closingDocument.current !== null) throw new Error('The document is no longer ready for comments.');
+    const latestDocument = latest.current.documents.find(document => document.id === current.id);
+    if (!latestDocument || latestDocument.revision !== current.revision) throw new Error('The document changed. Reload its comments and try again.');
+    setBusy(true); setError(''); setNotice('');
+    try { updateDocument(await operation(current)); }
+    finally { setBusy(false); }
+  };
+  const beginComment = (commentPage: number, rect: CommentRect) => {
+    if (!doc || busy || comments?.status !== 'supported') return;
+    setCommentsOpen(true); setCommentEditor({ kind: 'create', page: commentPage, rect });
+  };
+  const selectComment = (note: CommentNote) => {
+    if (!doc || busy) return;
+    go(note.page); setCommentsOpen(true); setCommentEditor({ kind: 'edit', note });
+  };
+  const addCommentOnCurrentPage = () => {
+    if (!doc || busy || comments?.status !== 'supported') return;
+    setHand(false); setCommentMode(true); setCommentsOpen(false);
+  };
+  const launchComments = () => {
+    if (!doc || busy || closingDocument.current !== null) return;
+    closeSearch(); setBookmarksOpen(false); setOrganizing(false); setView('document'); setCommentsOpen(true);
+  };
+  const launchCommentMode = () => {
+    launchComments(); setHand(false); setCommentMode(true);
+  };
   const combine = async (first: { id: number; revision: number }, second: { id: number; revision: number }): Promise<SavedCopy | null> => {
     if (busy || closingDocument.current !== null) throw new Error('The workspace is not ready to combine PDFs.');
     if (first.id === second.id) throw new Error('Choose two different open PDFs.');
@@ -227,13 +276,14 @@ export default function App() {
   const go = (value: number) => { if (doc) { const next = clampPage(value, doc.pages.length); trackPage(next); setTarget(v => ({ page: next, token: v.token + 1 })); } };
   useEffect(() => {
     const listener = (event: KeyboardEvent) => {
-      if (updatesOpen || pageTextOpen || printOpen || propertiesOpen || noticesOpen || passwordRequest || pendingClose !== null || combineOpen || insertOpen || replaceOpen) return;
+      if (updatesOpen || pageTextOpen || printOpen || propertiesOpen || noticesOpen || passwordRequest || pendingClose !== null || combineOpen || insertOpen || replaceOpen || commentEditor) return;
       if ((event.target as HTMLElement | null)?.closest?.('dialog')) return;
       if (event.ctrlKey && event.key.toLowerCase() === 'o') { event.preventDefault(); void open(); }
       if (event.ctrlKey && event.key.toLowerCase() === 'f' && doc) { event.preventDefault(); setView('document'); setOrganizing(false); setSearchOpen(true); return; }
       if (event.ctrlKey && event.key.toLowerCase() === 'p' && doc) { event.preventDefault(); if (!busy) setPrintOpen(true); return; }
       if (event.ctrlKey && event.key.toLowerCase() === 'd' && doc) { event.preventDefault(); if (!busy) setPropertiesOpen(true); return; }
       if (event.key === 'Escape' && searchOpen) { closeSearch(); return; }
+      if (event.key === 'Escape' && (commentsOpen || commentMode)) { setCommentsOpen(false); setCommentMode(false); return; }
       if ((event.target as HTMLElement).matches('input,select,textarea')) return;
       if (event.key === 'F4') { event.preventDefault(); event.shiftKey ? setToolsOpen(v => !v) : setNav(v => !v); }
       if (event.ctrlKey && event.key === '2') { event.preventDefault(); setFit(true); }
@@ -246,7 +296,7 @@ export default function App() {
       if (event.key === 'PageUp') { event.preventDefault(); go(page - 1); }
       if (event.key === 'Home') { event.preventDefault(); go(0); }
       if (event.key === 'End') { event.preventDefault(); go(doc.pages.length - 1); }
-      if (event.key.toLowerCase() === 'h' && !event.ctrlKey) setHand(true);
+      if (event.key.toLowerCase() === 'h' && !event.ctrlKey) { setHand(true); setCommentMode(false); }
       if (event.ctrlKey && event.key === 'Tab') { event.preventDefault(); const i = documents.findIndex(d => d.id === active); activate(documents[(i + 1) % documents.length].id); }
       if (event.ctrlKey && event.key.toLowerCase() === 'w') { event.preventDefault(); void close(doc.id); }
     };
@@ -256,10 +306,11 @@ export default function App() {
   const changeZoom = (value: number) => { setFit(false); setZoom(Math.max(10, Math.min(400, value))); };
   const toolRow = (name: string, index: number) => {
     const Icon = icons[name] || FileCheck2;
-    const available = name === 'Organize pages' || name === 'Combine files';
+    const available = name === 'Organize pages' || name === 'Combine files' || name === 'Comment';
     const combine = name === 'Combine files';
-    const disabled = busy || !available || (combine && documents.length < 2);
-    return <button key={name} className={s.toolRow} disabled={disabled} onClick={combine ? launchCombine : launchOrganizer} title={combine && documents.length < 2 ? 'Open two PDFs to combine them' : available ? name : `${name} — planned, not implemented yet`}><span className={s.toolIcon} style={{ color: ['#7361b3', '#277bb4', '#239576', '#bc6b25'][index % 4] }}><Icon size={21} strokeWidth={1.7} /></span><span>{name}</span></button>;
+    const comment = name === 'Comment';
+    const disabled = busy || !available || (combine && documents.length < 2) || (comment && !doc);
+    return <button key={name} className={s.toolRow} disabled={disabled} onClick={combine ? launchCombine : comment ? launchCommentMode : launchOrganizer} title={combine && documents.length < 2 ? 'Open two PDFs to combine them' : comment && !doc ? 'Open a PDF to comment' : available ? name : `${name} — planned, not implemented yet`}><span className={s.toolIcon} style={{ color: ['#7361b3', '#277bb4', '#239576', '#bc6b25'][index % 4] }}><Icon size={21} strokeWidth={1.7} /></span><span>{name}</span></button>;
   };
   return <div className={`${s.app} ${dark ? s.dark : ''}`}>
     <header className={s.tabbar}>
@@ -289,6 +340,7 @@ export default function App() {
     {combineOpen && <CombineDialog documents={documents} activeId={active} busy={busy} combine={combine} close={() => setCombineOpen(false)} />}
     {insertOpen && <InsertPagesDialog documents={documents} activeId={active} busy={busy} insert={insert} close={() => setInsertOpen(false)} />}
     {replaceOpen && <ReplacePagesDialog documents={documents} activeId={active} initialRange={replaceRange} busy={busy} replace={replace} close={() => setReplaceOpen(false)} />}
+    {commentEditor && doc && <CommentEditor key={`${doc.id}:${doc.revision}:${commentEditor.kind === 'edit' ? commentEditor.note.id : 'new'}`} draft={commentEditor} busy={busy} save={contents => commentEditor.kind === 'create' ? mutateComment(current => createComment(current.id, current.revision, commentEditor.page, commentEditor.rect, contents)) : mutateComment(current => updateComment(current.id, current.revision, commentEditor.note.id, contents))} remove={commentEditor.kind === 'edit' ? () => mutateComment(current => deleteComment(current.id, current.revision, commentEditor.note.id)) : undefined} close={() => setCommentEditor(null)} />}
     <div className={s.globalbar}>
       <nav className={s.primaryNav}><button className={toolsOpen && view !== 'home' ? s.selectedNav : ''} onClick={() => view === 'document' ? setToolsOpen(v => !v) : setView('tools')}>All tools</button><button disabled>Edit</button><button disabled>Convert</button><button disabled>E-sign</button></nav>
       <div className={s.globalActions}><IconButton icon={Search} label="Find text" disabled={!doc || busy} active={searchOpen} onClick={() => { setView('document'); setOrganizing(false); searchOpen ? closeSearch() : setSearchOpen(true); }} /><span className={s.divider} /><IconButton icon={Undo2} label="Undo" disabled={busy || !doc?.can_undo} onClick={() => void edit({ kind: 'undo' })} /><IconButton icon={Redo2} label="Redo" disabled={busy || !doc?.can_redo} onClick={() => void edit({ kind: 'redo' })} /><IconButton icon={Save} label="Save a copy" disabled={busy || !doc} onClick={() => void save()} /><IconButton icon={Printer} label="Print" disabled={busy || !doc} onClick={() => setPrintOpen(true)} /><IconButton icon={Sun} label="Toggle theme" onClick={() => setDark(v => !v)} /><IconButton icon={CircleHelp} label="Build information" onClick={() => setNotice('Organize Pages and document search are available. Other tools marked unavailable are planned for later milestones. Save a Copy writes a new file and preserves your original.')} /><button className={s.openButton} onClick={() => void open()} disabled={busy}><FolderOpen size={16} /> {busy ? 'Working…' : 'Open a file'}</button></div>
@@ -307,11 +359,12 @@ export default function App() {
         </section>
       </> : view === 'tools' ? <section className={s.toolsCatalog}><div className={s.catalogHeading}><div><p className={s.eyebrow}>THE COMPLETE WORKSPACE</p><h1>All tools</h1><p>Combine Files and Organize Pages are ready. Other advanced tools are planned for later milestones.</p></div><label className={s.search}><Search size={16} /><input aria-label="Search tools" placeholder="Find a tool" value={query} onChange={e => setQuery(e.target.value)} /></label></div>{toolGroups.map(group => <section key={group.name}><h2>{group.name}</h2><div className={s.catalogGrid}>{group.tools.filter(name => name.toLowerCase().includes(query.toLowerCase())).map((name, i) => <div className={s.catalogCard} key={name}>{toolRow(name, i)}<span className={s.planned}>{name === 'Organize pages' || name === 'Combine files' ? 'Available' : 'Not available yet'}</span></div>)}</div></section>)}</section> : doc ? <>
         {toolsOpen && <aside className={s.toolsPanel}><div className={s.panelHeading}><h2>All tools</h2><IconButton icon={PanelLeftClose} label="Collapse all tools" onClick={() => setToolsOpen(false)} /></div>{['Export a PDF', 'Edit a PDF', 'Create a PDF', 'Combine files', 'Organize pages', 'Comment', 'Fill & sign', 'Scan & OCR', 'Protect a PDF', 'Compress a PDF'].map(toolRow)}<button className={s.textButton} onClick={() => setView('tools')}>View all tools <ChevronRight size={15} /></button><div className={s.panelNote}>Combine Files and Organize Pages are available. More tools are in development.</div></aside>}
-        {organizing ? <Organizer key={doc.id} document={doc} currentPage={page} busy={busy} edit={edit} save={save} split={split} crop={crop} insert={launchInsert} replace={launchReplace} close={() => setOrganizing(false)} /> : <div className={s.documentArea}><Viewer key={`${doc.id}-${doc.revision}`} document={doc} zoom={zoom} fit={fit} target={target} onPage={trackPage} hand={hand} search={activeSearch} /><div className={s.quickToolbar}><IconButton icon={MousePointer2} label="Select text on page" active={!hand} onClick={() => setHand(false)} /><IconButton icon={Hand} label="Pan document" active={hand} onClick={() => setHand(true)} /><IconButton icon={Type} label="Read and copy page text" onClick={() => setPageTextOpen(true)} /><span className={s.horizontalDivider} /><IconButton icon={MessageSquare} label="Add comment" disabled /><IconButton icon={Highlighter} label="Highlight text" disabled /><IconButton icon={Pencil} label="Draw" disabled /><IconButton icon={Type} label="Fill in text" disabled /><IconButton icon={Signature} label="Add signature" disabled /><span className={s.horizontalDivider} /><IconButton icon={MoreHorizontal} label="Customize quick tools" disabled /></div></div>}
+        {organizing ? <Organizer key={doc.id} document={doc} currentPage={page} busy={busy} edit={edit} save={save} split={split} crop={crop} insert={launchInsert} replace={launchReplace} close={() => setOrganizing(false)} /> : <div className={s.documentArea}><Viewer key={`${doc.id}-${doc.revision}`} document={doc} zoom={zoom} fit={fit} target={target} onPage={trackPage} hand={hand} search={activeSearch} comments={comments?.status === 'supported' ? comments.notes : []} commentMode={commentMode} commentAvailable={comments?.status === 'supported'} onCommentCreate={beginComment} onCommentSelect={selectComment} /><div className={s.quickToolbar}><IconButton icon={MousePointer2} label="Select text on page" active={!hand && !commentMode} onClick={() => { setHand(false); setCommentMode(false); }} /><IconButton icon={Hand} label="Pan document" active={hand} onClick={() => { setHand(true); setCommentMode(false); }} /><IconButton icon={Type} label="Read and copy page text" onClick={() => setPageTextOpen(true)} /><span className={s.horizontalDivider} /><IconButton icon={MessageSquare} label="Add comment" active={commentMode} disabled={busy} onClick={launchCommentMode} /><IconButton icon={Highlighter} label="Highlight text" disabled /><IconButton icon={Pencil} label="Draw" disabled /><IconButton icon={Type} label="Fill in text" disabled /><IconButton icon={Signature} label="Add signature" disabled /><span className={s.horizontalDivider} /><IconButton icon={MoreHorizontal} label="Customize quick tools" disabled /></div></div>}
+        {!organizing && commentsOpen && doc && <CommentsPanel key={`${doc.id}-${doc.revision}`} document={doc} page={page} comments={comments} error={commentsLoad.request === commentsRequest ? commentsLoad.error : ''} selectedId={commentEditor?.kind === 'edit' ? commentEditor.note.id : null} onAdd={addCommentOnCurrentPage} onSelect={selectComment} close={() => setCommentsOpen(false)} />}
         {!organizing && bookmarksOpen && <BookmarksPanel key={`${doc.id}-${doc.revision}`} document={doc} go={go} close={() => setBookmarksOpen(false)} />}
         {!organizing && searchOpen && !bookmarksOpen && <SearchPanel key={`${doc.id}-${doc.revision}`} document={doc} go={go} close={closeSearch} onHighlights={receiveSearch} />}
         {!organizing && nav && !searchOpen && !bookmarksOpen && <aside className={s.pagesPanel}><div className={s.panelHeading}><h2>Pages</h2><IconButton icon={X} label="Close pages" onClick={() => setNav(false)} /></div><button onClick={() => setBookmarksOpen(true)}>Bookmarks</button><div className={s.pageList}>{doc.pages.map((size, i) => <button className={i === page ? s.currentPage : ''} key={i} onClick={() => go(i)}><File size={24} /><span>Page {i + 1}<small>{(size.width / 72).toFixed(1)} × {(size.height / 72).toFixed(1)} in</small></span></button>)}</div></aside>}
-        <aside className={s.rightRail}><div><IconButton icon={MessageSquare} label="Comments" disabled /><IconButton icon={Bookmark} label="Bookmarks" active={bookmarksOpen} onClick={() => { closeSearch(); setOrganizing(false); setBookmarksOpen(v => !v); }} /><IconButton icon={Files} label="Pages" active={nav && !bookmarksOpen && !searchOpen} onClick={() => { closeSearch(); setBookmarksOpen(false); setNav(v => !v); }} /></div><div className={s.pageControls}><IconButton icon={ChevronLeft} label="Previous page" disabled={page === 0} onClick={() => go(page - 1)} /><input aria-label="Page number" key={`${doc.id}-${page}`} type="number" min={1} max={doc.pages.length} defaultValue={page + 1} onKeyDown={e => { if (e.key === 'Enter') go(Number(e.currentTarget.value) - 1); }} onBlur={e => go(Number(e.currentTarget.value) - 1)} /><span className={s.pageCount}>/ {doc.pages.length}</span><IconButton icon={ChevronRight} label="Next page" disabled={page === doc.pages.length - 1} onClick={() => go(page + 1)} /><span className={s.horizontalDivider} /><IconButton icon={RotateCw} label="Rotate view" disabled /><IconButton icon={Maximize} label="Fit width" active={fit} onClick={() => setFit(true)} /><IconButton icon={ZoomIn} label="Zoom in" onClick={() => changeZoom(zoom + 25)} /><IconButton icon={ZoomOut} label="Zoom out" onClick={() => changeZoom(zoom - 25)} /></div></aside>
+        <aside className={s.rightRail}><div><IconButton icon={MessageSquare} label="Comments" active={commentsOpen} disabled={busy} onClick={() => { closeSearch(); setBookmarksOpen(false); setOrganizing(false); setCommentsOpen(value => !value); }} /><IconButton icon={Bookmark} label="Bookmarks" active={bookmarksOpen} onClick={() => { closeSearch(); setCommentsOpen(false); setOrganizing(false); setBookmarksOpen(v => !v); }} /><IconButton icon={Files} label="Pages" active={nav && !bookmarksOpen && !searchOpen} onClick={() => { closeSearch(); setCommentsOpen(false); setBookmarksOpen(false); setNav(v => !v); }} /></div><div className={s.pageControls}><IconButton icon={ChevronLeft} label="Previous page" disabled={page === 0} onClick={() => go(page - 1)} /><input aria-label="Page number" key={`${doc.id}-${page}`} type="number" min={1} max={doc.pages.length} defaultValue={page + 1} onKeyDown={e => { if (e.key === 'Enter') go(Number(e.currentTarget.value) - 1); }} onBlur={e => go(Number(e.currentTarget.value) - 1)} /><span className={s.pageCount}>/ {doc.pages.length}</span><IconButton icon={ChevronRight} label="Next page" disabled={page === doc.pages.length - 1} onClick={() => go(page + 1)} /><span className={s.horizontalDivider} /><IconButton icon={RotateCw} label="Rotate view" disabled /><IconButton icon={Maximize} label="Fit width" active={fit} onClick={() => setFit(true)} /><IconButton icon={ZoomIn} label="Zoom in" onClick={() => changeZoom(zoom + 25)} /><IconButton icon={ZoomOut} label="Zoom out" onClick={() => changeZoom(zoom - 25)} /></div></aside>
       </> : null}
     </main>
     <footer className={s.statusbar}><span>{view === 'document' && doc ? `${(doc.pages[clampPage(page, doc.pages.length)].width / 72).toFixed(2)} × ${(doc.pages[clampPage(page, doc.pages.length)].height / 72).toFixed(2)} in` : 'PDF Workstation'}</span><span>{busy ? 'Working…' : view === 'document' && doc ? `${doc.name} · ${doc.dirty ? 'Unsaved changes' : 'Source preserved'}` : 'Files stay on your computer'}</span>{view === 'document' ? <select aria-label="Zoom" value={fit ? 'fit' : zoom} onChange={e => e.target.value === 'fit' ? setFit(true) : changeZoom(Number(e.target.value))}><option value="fit">Fit width</option>{Array.from(new Set([10,25,50,75,100,125,150,200,300,400,zoom])).sort((a,b) => a-b).map(z => <option value={z} key={z}>{z}%</option>)}</select> : <span>Local workspace</span>}</footer>

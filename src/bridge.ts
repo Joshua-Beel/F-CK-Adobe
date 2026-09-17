@@ -39,6 +39,13 @@ export const saveCopy = (id: number, pages?: number[]) => invoke<SavedCopy | nul
 export const combineDocuments = (first: { id: number; revision: number }, second: { id: number; revision: number }) => invoke<SavedCopy | null>('combine_documents', { first, second });
 export const insertPagesCopy = (target: { id: number; revision: number }, donor: { id: number; revision: number }, at: number) => invoke<SavedCopy | null>('insert_pages_copy', { target, donor, at });
 export const replacePagesCopy = (target: { id: number; revision: number }, donor: { id: number; revision: number }, start: number, count: number) => invoke<SavedCopy | null>('replace_pages_copy', { target, donor, start, count });
+export type CommentRect = { x: number; y: number; width: number; height: number };
+export type CommentNote = { id: string; page: number; rect: CommentRect | null; contents: string };
+export type DocumentComments = { documentId: number; revision: number; status: 'supported' | 'unsupported'; reason: string | null; notes: CommentNote[] };
+export const documentComments = (id: number, revision: number) => invoke<DocumentComments>('document_comments', { id, revision });
+export const createComment = (id: number, revision: number, page: number, rect: CommentRect, contents: string) => invoke<DocumentInfo>('create_comment', { id, revision, page, rect, contents });
+export const updateComment = (id: number, revision: number, noteId: string, contents: string) => invoke<DocumentInfo>('update_comment', { id, revision, noteId, contents });
+export const deleteComment = (id: number, revision: number, noteId: string) => invoke<DocumentInfo>('delete_comment', { id, revision, noteId });
 export type SplitOutput = { folder: string; files: { path: string; first_page: number; last_page: number; page_count: number }[] };
 export const splitDocument = (id: number, revision: number, pagesPerFile: number) => invoke<SplitOutput | null>('split_document', { id, revision, pagesPerFile });
 export const cropPage = (id: number, page: number, revision: number, rect: { x: number; y: number; width: number; height: number }) => invoke<DocumentInfo>('crop_page', { id, page, revision, rect });

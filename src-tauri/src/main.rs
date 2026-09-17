@@ -7,6 +7,7 @@ mod document_properties;
 mod text_geometry;
 mod split;
 mod combine;
+mod comments;
 use service::{DocumentInfo, PdfService};
 use tauri::{Manager, State};
 
@@ -46,6 +47,14 @@ async fn document_bookmarks(service: State<'_, PdfService>, id: u64, revision: u
 
 #[tauri::command]
 async fn document_properties(service: State<'_, PdfService>, id: u64, revision: u64) -> Result<document_properties::DocumentProperties, String> { service.properties(id, revision).await }
+#[tauri::command]
+async fn document_comments(service: State<'_, PdfService>, id: u64, revision: u64) -> Result<comments::CommentList, String> { service.comments(id, revision).await }
+#[tauri::command]
+async fn create_comment(service: State<'_, PdfService>, id: u64, revision: u64, page: u16, rect: service::CropRect, contents: String) -> Result<DocumentInfo, String> { service.create_comment(id, revision, page, rect, contents).await }
+#[tauri::command]
+async fn update_comment(service: State<'_, PdfService>, id: u64, revision: u64, note_id: String, contents: String) -> Result<DocumentInfo, String> { service.update_comment(id, revision, note_id, contents).await }
+#[tauri::command]
+async fn delete_comment(service: State<'_, PdfService>, id: u64, revision: u64, note_id: String) -> Result<DocumentInfo, String> { service.delete_comment(id, revision, note_id).await }
 
 #[tauri::command]
 async fn dependency_notices(app: tauri::AppHandle) -> Result<String, String> {
@@ -106,6 +115,6 @@ fn main() {
         app.manage(PdfService::start(library));
         app.manage(print_commands::PrintJobs::default());
         Ok(())
-    }).invoke_handler(tauri::generate_handler![open_document, reopen_document, open_example, render_page, close_document, edit_pages, crop_page, save_copy, split_document, combine_documents, insert_pages_copy, replace_pages_copy, page_text, page_text_geometry, document_bookmarks, document_properties, dependency_notices, unlock_document, cancel_password_request, print_commands::print_document, print_commands::cancel_print])
+    }).invoke_handler(tauri::generate_handler![open_document, reopen_document, open_example, render_page, close_document, edit_pages, crop_page, create_comment, update_comment, delete_comment, document_comments, save_copy, split_document, combine_documents, insert_pages_copy, replace_pages_copy, page_text, page_text_geometry, document_bookmarks, document_properties, dependency_notices, unlock_document, cancel_password_request, print_commands::print_document, print_commands::cancel_print])
       .run(tauri::generate_context!()).expect("Desktop application failed");
 }

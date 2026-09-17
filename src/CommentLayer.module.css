@@ -1,0 +1,1 @@
+.layer{position:absolute;inset:0;z-index:4;pointer-events:none}.creating{pointer-events:auto;cursor:crosshair}.note{position:absolute;display:block;padding:0;margin:0;border:0;background:transparent;pointer-events:auto}.note:focus-visible{outline:2px solid #2865cc;outline-offset:2px;border-radius:3px}

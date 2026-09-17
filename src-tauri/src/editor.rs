@@ -6,6 +6,8 @@ const HISTORY_BUDGET: usize = 32 * 1024 * 1024;
 
 fn snapshot_bytes(snapshot: &Vec<PageSpec>) -> usize {
     std::mem::size_of::<Vec<PageSpec>>() + snapshot.capacity() * std::mem::size_of::<PageSpec>()
+        + snapshot.iter().map(|page| page.notes.capacity() * std::mem::size_of::<crate::comments::Note>()
+            + page.notes.iter().map(|note| note.id.capacity() + note.contents.capacity()).sum::<usize>()).sum::<usize>()
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -13,6 +15,7 @@ pub struct PageSpec {
     pub source: usize,
     pub turns: i32,
     pub crop: Option<CropBox>,
+    pub notes: Vec<crate::comments::Note>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -65,17 +68,68 @@ pub struct EditSession {
     history_budget: usize,
     saved: Vec<PageSpec>,
     pub revision: u64,
+    source_notes: Vec<Vec<crate::comments::Note>>,
+    comments_reason: Option<String>,
+    next_note: u64,
 }
 
 impl EditSession {
     pub fn new(source: Vec<u8>, count: usize) -> Self {
-        let plan: Vec<_> = (0..count).map(|source| PageSpec { source, turns: 0, crop: None }).collect();
-        Self { source, source_page_count: count, saved: plan.clone(), plan, undo: VecDeque::new(), redo: VecDeque::new(), history_bytes: 0, history_budget: HISTORY_BUDGET, revision: 0 }
+        let imported = Document::load_mem(&source).map_err(|error| error.to_string()).and_then(|document| crate::comments::read(&document));
+        let (source_notes, comments_reason) = match imported {
+            Ok(notes) if notes.len() == count => (notes, None),
+            Ok(_) => (vec![Vec::new(); count], Some("The PDF engines disagree about the page count.".into())),
+            Err(reason) => (vec![Vec::new(); count], Some(reason)),
+        };
+        let next_note = source_notes.iter().flatten().filter_map(|note| crate::comments::number(&note.id).ok()).max().unwrap_or(0).saturating_add(1);
+        let plan: Vec<_> = (0..count).map(|source| PageSpec { source, turns: 0, crop: None, notes: source_notes[source].clone() }).collect();
+        Self { source, source_page_count: count, saved: plan.clone(), plan, undo: VecDeque::new(), redo: VecDeque::new(), history_bytes: 0, history_budget: HISTORY_BUDGET, revision: 0, source_notes, comments_reason, next_note }
     }
     pub fn dirty(&self) -> bool { self.plan != self.saved }
     pub fn can_undo(&self) -> bool { !self.undo.is_empty() }
     pub fn can_redo(&self) -> bool { !self.redo.is_empty() }
     pub fn mark_saved(&mut self) { self.saved = self.plan.clone(); }
+    pub fn comments_reason(&self) -> Option<&str> { self.comments_reason.as_deref() }
+    pub fn proposed_comment(&self, page: Option<(usize, CropBox)>, note_id: Option<&str>, contents: Option<&str>) -> Result<Vec<PageSpec>, String> {
+        if let Some(reason) = &self.comments_reason { return Err(reason.clone()); }
+        let document = self.load_source()?; crate::comments::read(&document)?;
+        let mut next = self.plan.clone();
+        match (page, note_id, contents) {
+            (Some((page, rect)), None, Some(contents)) => {
+                crate::comments::validate_text(contents)?;
+                if self.next_note == u64::MAX { return Err("This document has exhausted its note IDs.".into()); }
+                let spec = next.get_mut(page).ok_or("Page is out of range")?;
+                let page_id = *document.get_pages().values().nth(spec.source).ok_or("Source page mapping is invalid.")?;
+                rect.validate_within(spec.crop.unwrap_or(visible_box(&document, page_id)?))?;
+                spec.notes.push(crate::comments::Note { id: crate::comments::id(self.next_note), rect, contents: contents.to_owned() });
+            }
+            (None, Some(id), contents) => {
+                let (page, position) = next.iter().enumerate().find_map(|(page, spec)| spec.notes.iter().position(|note| note.id == id).map(|position| (page, position))).ok_or("The note no longer exists. Refresh comments.")?;
+                match contents { Some(contents) => { crate::comments::validate_text(contents)?; next[page].notes[position].contents = contents.to_owned(); }, None => { next[page].notes.remove(position); } }
+            }
+            _ => return Err("Invalid comment operation.".into()),
+        }
+        crate::comments::validate_plan(&next)?; Ok(next)
+    }
+    fn notes_changed(&self, plan: &[PageSpec]) -> bool {
+        plan.iter().any(|spec| self.source_notes.get(spec.source) != Some(&spec.notes))
+    }
+    pub fn note_source(&self, plan: &[PageSpec]) -> Result<Option<Vec<u8>>, String> {
+        if !self.notes_changed(plan) { return Ok(None); }
+        let mut document = self.load_source()?; crate::comments::write(&mut document, plan)?;
+        let mut bytes = Vec::new(); document.save_to(&mut bytes).map_err(|error| error.to_string())?; Ok(Some(bytes))
+    }
+    pub fn commit_comments(&mut self, next: Vec<PageSpec>) {
+        if next == self.plan { return; }
+        self.next_note = self.next_note.max(next.iter().flat_map(|page| &page.notes).filter_map(|note| crate::comments::number(&note.id).ok()).max().unwrap_or(0).saturating_add(1));
+        self.commit_plan(next);
+    }
+    fn commit_plan(&mut self, next: Vec<PageSpec>) {
+        let previous = std::mem::replace(&mut self.plan, next);
+        self.history_bytes += snapshot_bytes(&previous); self.undo.push_back(previous);
+        self.history_bytes -= self.redo.drain(..).map(|snapshot| snapshot_bytes(&snapshot)).sum::<usize>();
+        self.trim_history(); self.revision += 1;
+    }
     fn trim_history(&mut self) {
         while self.history_bytes > self.history_budget {
             let snapshot = self.undo.pop_front().or_else(|| self.redo.pop_front()).expect("History byte count matches stored snapshots");
@@ -145,10 +199,8 @@ impl EditSession {
                     _ => unreachable!(),
                 }
                 if next == self.plan { return Ok(()); }
-                let previous = std::mem::replace(&mut self.plan, next);
-                self.history_bytes += snapshot_bytes(&previous);
-                self.undo.push_back(previous);
-                self.history_bytes -= self.redo.drain(..).map(|snapshot| snapshot_bytes(&snapshot)).sum::<usize>();
+                self.commit_plan(next);
+                return Ok(());
             }
         }
         self.trim_history();
@@ -165,6 +217,7 @@ impl EditSession {
             None => self.plan.clone(),
         };
         let mut document = self.load_source()?;
+        if self.notes_changed(&self.plan) { crate::comments::write(&mut document, &self.plan)?; }
         let original: Vec<_> = document.get_pages().values().copied().collect();
         if plan.iter().any(|p| p.source >= original.len()) { return Err("Source page mapping is invalid.".into()); }
         let structural = plan.len() != original.len() || plan.iter().enumerate().any(|(i, p)| p.source != i);
@@ -244,7 +297,7 @@ fn check_supported(document: &Document, structural: bool, removal: bool) -> Resu
     if structural && [b"AcroForm".as_slice(), b"StructTreeRoot", b"PageLabels", b"Threads"].iter().any(|key| catalog.has(key)) {
         return Err("Reordering/extraction/deletion of forms, tagged PDFs, page labels, or article threads is not supported yet. Rotation is available.".into());
     }
-    if removal && ([b"Outlines".as_slice(), b"Dests", b"Names", b"OpenAction"].iter().any(|key| catalog.has(key)) || document.get_pages().values().any(|id| document.get_dictionary(*id).is_ok_and(|page| page.has(b"Annots")))) {
+    if removal && ([b"Outlines".as_slice(), b"Dests", b"Names", b"OpenAction"].iter().any(|key| catalog.has(key)) || (document.get_pages().values().any(|id| document.get_dictionary(*id).is_ok_and(|page| page.has(b"Annots"))) && crate::comments::read(document).is_err())) {
         return Err("Deleting/extracting pages with bookmarks, destinations, attachments, actions, or annotations is not supported yet. This avoids losing or breaking their references.".into());
     }
     Ok(())
@@ -265,6 +318,19 @@ pub fn write_new_file(path: &Path, bytes: &[u8]) -> Result<(), String> {
 mod tests {
     use super::*;
     fn sample() -> Vec<u8> { std::fs::read(Path::new(env!("CARGO_MANIFEST_DIR")).join("resources/welcome.pdf")).unwrap() }
+    #[test]
+    fn comments_history_counts_string_capacity_and_evicts_without_losing_current_or_saved_notes() {
+        let mut session = EditSession::new(sample(), 6);
+        let bounds = CropBox { left: 40.0, bottom: 60.0, right: 70.0, top: 90.0 };
+        let plan = session.proposed_comment(Some((0, bounds)), None, Some(&"x".repeat(8192))).unwrap(); session.commit_comments(plan); session.mark_saved();
+        let saved = session.saved.clone(); let source = session.source.clone(); let id = session.plan[0].notes[0].id.clone();
+        assert!(snapshot_bytes(&session.plan) >= 8192 + snapshot_bytes(&vec![PageSpec { source: 0, turns: 0, crop: None, notes: Vec::new() }]));
+        session.history_budget = snapshot_bytes(&session.plan) * 2;
+        for value in 0..6 { let plan = session.proposed_comment(None, Some(&id), Some(&format!("{value}{}", "y".repeat(8191)))).unwrap(); session.commit_comments(plan); assert_history_budget(&session); }
+        assert_eq!(session.saved, saved); assert_eq!(session.source, source); assert_eq!(session.plan[0].notes[0].contents.len(), 8192);
+        session.apply(PageEdit::Undo).unwrap(); assert_history_budget(&session); session.apply(PageEdit::Redo).unwrap(); assert_history_budget(&session);
+        let plan = session.proposed_comment(None, Some(&id), Some("branch")).unwrap(); session.commit_comments(plan); assert!(!session.can_redo()); assert_history_budget(&session);
+    }
     fn assert_history_budget(session: &EditSession) {
         let allocated = session.undo.iter().chain(session.redo.iter()).map(snapshot_bytes).sum::<usize>();
         assert_eq!(session.history_bytes, allocated);
@@ -466,7 +532,7 @@ mod tests {
     fn history_accounts_for_reserved_capacity_and_both_stacks() {
         let mut session = EditSession::new(sample(), 6);
         let mut roomy = Vec::with_capacity(100);
-        roomy.push(PageSpec { source: 0, turns: 0, crop: None });
+        roomy.push(PageSpec { source: 0, turns: 0, crop: None, notes: Vec::new() });
         let roomy_bytes = snapshot_bytes(&roomy);
         assert!(roomy_bytes > std::mem::size_of::<PageSpec>() * roomy.len());
         let small = session.plan.clone();
