@@ -53,4 +53,45 @@ describe('document search', () => {
     expect(JSON.stringify(ui.toJSON())).toContain('No matching text found');
     act(() => ui.unmount());
   });
+  it('cycles matching pages, highlights literal text, and resets navigation for a new query', async () => {
+    vi.mocked(pageText).mockResolvedValue('Before <NEEDLE> after');
+    const { ui, go } = await mount('<needle>');
+    const button = (label: string) => ui.root.findAllByType('button').find(item => item.children.join('') === label)!;
+    expect(button('Next matching page').props.disabled).toBe(true);
+    await act(async () => submit(ui));
+    expect(ui.root.findAllByType('mark').map(mark => mark.children.join(''))).toEqual(['<NEEDLE>', '<NEEDLE>']);
+    for (const label of ['Next matching page', 'Next matching page', 'Next matching page', 'Previous matching page']) {
+      act(() => button(label).props.onClick());
+    }
+    expect(go.mock.calls.map(call => call[0])).toEqual([0, 1, 0, 1]);
+    expect(button('Go to page 2').props['aria-current']).toBe('location');
+    act(() => ui.root.findByProps({ maxLength: 500 }).props.onChange({ target: { value: 'different' } }));
+    expect(button('Next matching page').props.disabled).toBe(true);
+    expect(ui.root.findAllByType('mark')).toHaveLength(0);
+    act(() => ui.unmount());
+  });
+  it('keeps partial results and ignores a pending extraction after Stop', async () => {
+    let resolve!: (text: string) => void;
+    vi.mocked(pageText).mockResolvedValueOnce('needle first').mockImplementationOnce(() => new Promise(done => { resolve = done; }));
+    const { ui } = await mount();
+    await act(async () => submit(ui));
+    act(() => ui.root.findAllByType('button').find(button => button.children.join('') === 'Stop')!.props.onClick());
+    await act(async () => resolve('needle second'));
+    expect(ui.root.findAllByType('mark')).toHaveLength(1);
+    expect(JSON.stringify(ui.toJSON())).toContain('Results below may be incomplete');
+    act(() => ui.unmount());
+  });
+  it('stops extraction after 500 matching pages and allows navigation through the capped results', async () => {
+    vi.mocked(pageText).mockResolvedValue('needle');
+    let ui!: ReactTestRenderer; const go = vi.fn();
+    await act(async () => { ui = create(<SearchPanel document={{ ...document, pages: Array.from({ length: 501 }, () => document.pages[0]) }} go={go} close={vi.fn()} />); });
+    act(() => ui.root.findByProps({ maxLength: 500 }).props.onChange({ target: { value: 'needle' } }));
+    await act(async () => submit(ui));
+    expect(pageText).toHaveBeenCalledTimes(500);
+    expect(ui.root.findAllByType('mark')).toHaveLength(500);
+    expect(JSON.stringify(ui.toJSON())).toContain('first 500 matching pages');
+    act(() => ui.root.findAllByType('button').find(button => button.children.join('') === 'Previous matching page')!.props.onClick());
+    expect(go).toHaveBeenCalledWith(499);
+    act(() => ui.unmount());
+  });
 });
