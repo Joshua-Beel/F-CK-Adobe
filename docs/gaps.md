@@ -2,7 +2,7 @@
 
 ## Viewer foundation
 
-Embedded-text Find is implemented in the source build: matching pages, selectable excerpts, case matching, cancellation, and a 500-page result cap. No on-page text selection or match highlighting, password prompt, folder search, print, document properties, outlines/bookmark pane, embedded attachments, layer toggles, tags, annotations, signatures, rulers, splits, alternate page layouts, read-aloud, or drag/drop opening yet. Files currently stay open in one native worker. Recent files and stars are session-only. Organizer thumbnails are implemented, but viewer-pane thumbnails, progressive low-resolution previews, cancelable priority queues, crash isolation and auto-save recovery remain unimplemented. Native page edits now export through lopdf.
+Embedded-text Find is implemented in the source build: matching pages, selectable excerpts, case matching, cancellation, and a 500-page result cap. The bookmark pane supports nested entries and internal page destinations, capped at 1,000 entries; bookmark editing and destination zoom/position remain missing. Reading preferences persist locally, but recent files and stars are session-only. No on-page text selection or match highlighting, password prompt, folder search, print, document properties, embedded attachments, layer toggles, tags, annotations, signatures, rulers, splits, alternate page layouts, read-aloud, or drag/drop opening yet. Files currently stay open in one native worker. Organizer thumbnails are implemented, but viewer-pane thumbnails, progressive low-resolution previews, cancelable priority queues, crash isolation and auto-save recovery remain unimplemented. Native page edits now export through lopdf.
 
 ## Performance and compatibility
 

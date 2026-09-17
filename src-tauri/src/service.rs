@@ -1,4 +1,4 @@
-use std::{collections::{HashMap, VecDeque}, io::Cursor, path::PathBuf, sync::mpsc};
+use std::{collections::{HashMap, VecDeque}, io::Cursor, path::PathBuf, sync::{mpsc, OnceLock}};
 use pdfium_render::prelude::*;
 use serde::Serialize;
 use tokio::sync::oneshot;
@@ -24,7 +24,9 @@ enum Request {
     Edit(u64, PageEdit, Reply<DocumentInfo>),
     Save(u64, Option<Vec<usize>>, PathBuf, Reply<SavedCopy>),
 }
+#[derive(Clone)]
 pub struct PdfService { sender: mpsc::Sender<Request> }
+static PDF_SERVICE: OnceLock<PdfService> = OnceLock::new();
 type CacheKey = (u64, u16, i32);
 struct Cache { entries: VecDeque<(CacheKey, Vec<u8>, usize)>, weight: usize }
 impl Cache {
@@ -44,6 +46,9 @@ impl Cache {
 }
 impl PdfService {
     pub fn start(library: PathBuf) -> Self {
+        PDF_SERVICE.get_or_init(|| Self::start_worker(library)).clone()
+    }
+    fn start_worker(library: PathBuf) -> Self {
         let (sender, receiver) = mpsc::channel();
         std::thread::Builder::new().name("pdf-worker".into()).spawn(move || {
             let pdfium = Pdfium::bind_to_library(library).map(Pdfium::new).map_err(|e| format!("PDF engine could not start: {e}"));
@@ -206,7 +211,7 @@ mod tests {
         let external = pdf.new_object_id();
         pdf.objects.insert(outlines, dictionary! { "Type" => "Outlines", "First" => first, "Last" => external, "Count" => 3 }.into());
         pdf.objects.insert(first, dictionary! { "Title" => Object::string_literal("Start"), "Parent" => outlines, "Next" => external, "First" => child, "Last" => child, "Count" => 1, "Dest" => vec![Object::Reference(pages[&1]), Object::Name(b"Fit".to_vec())] }.into());
-        pdf.objects.insert(child, dictionary! { "Title" => Object::string_literal("Second page"), "Parent" => first, "Dest" => vec![Object::Reference(pages[&2]), Object::Name(b"Fit".to_vec())] }.into());
+        pdf.objects.insert(child, dictionary! { "Title" => Object::string_literal("Second page"), "Parent" => first, "A" => dictionary! { "S" => "GoTo", "D" => vec![Object::Reference(pages[&2]), Object::Name(b"Fit".to_vec())] } }.into());
         pdf.objects.insert(external, dictionary! { "Title" => Object::string_literal("External"), "Parent" => outlines, "Prev" => first, "A" => dictionary! { "S" => "URI", "URI" => Object::string_literal("https://example.com") } }.into());
         pdf.catalog_mut().unwrap().set("Outlines", outlines);
         let folder = tempfile::tempdir().unwrap();
@@ -221,6 +226,41 @@ mod tests {
         assert_eq!(result.items[1].depth, 1); assert_eq!(result.items[1].page, Some(1));
         assert_eq!(result.items[2].page, None);
         let (tx, rx) = oneshot::channel(); service.sender.send(Request::Bookmarks(info.id, 99, tx)).unwrap(); assert!(rx.blocking_recv().unwrap().is_err());
+    }
+    #[test]
+    fn bookmark_cycles_and_large_outlines_are_bounded() {
+        use lopdf::{dictionary, Object};
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let folder = tempfile::tempdir().unwrap();
+        let service = PdfService::start(root.join("resources/pdfium/bin/pdfium.dll"));
+        for (count, cycle) in [(0, false), (3, true), (1005, false)] {
+            let mut pdf = lopdf::Document::load(root.join("resources/welcome.pdf")).unwrap();
+            if count > 0 {
+                let page = pdf.get_pages()[&1];
+                let outlines = pdf.new_object_id();
+                let ids: Vec<_> = (0..count).map(|_| pdf.new_object_id()).collect();
+                pdf.objects.insert(outlines, dictionary! { "Type" => "Outlines", "First" => ids[0], "Last" => ids[count - 1], "Count" => count as i64 }.into());
+                for (index, id) in ids.iter().enumerate() {
+                    let mut entry = dictionary! { "Title" => Object::string_literal(format!("Bookmark {index}")), "Parent" => outlines, "Dest" => vec![Object::Reference(page), Object::Name(b"Fit".to_vec())] };
+                    if index > 0 { entry.set("Prev", ids[index - 1]); }
+                    if index + 1 < count { entry.set("Next", ids[index + 1]); }
+                    else if cycle { entry.set("Next", ids[0]); }
+                    pdf.objects.insert(*id, entry.into());
+                }
+                pdf.catalog_mut().unwrap().set("Outlines", outlines);
+            }
+            let path = folder.path().join(format!("outline-{count}.pdf")); pdf.save(&path).unwrap();
+            let (tx, rx) = oneshot::channel(); service.sender.send(Request::Open(path, tx)).unwrap();
+            let info = rx.blocking_recv().unwrap().unwrap();
+            let (tx, rx) = oneshot::channel(); service.sender.send(Request::Bookmarks(info.id, 0, tx)).unwrap();
+            let result = rx.blocking_recv().unwrap().unwrap();
+            assert_eq!(result.items.len(), count.min(1000));
+            assert_eq!(result.truncated, count > 1000);
+            let (tx, rx) = oneshot::channel(); service.sender.send(Request::Render(info.id, 0, 64, tx)).unwrap();
+            assert!(rx.blocking_recv().unwrap().is_ok());
+            let (tx, rx) = oneshot::channel(); service.sender.send(Request::Close(info.id, tx)).unwrap(); rx.blocking_recv().unwrap().unwrap();
+            let (tx, rx) = oneshot::channel(); service.sender.send(Request::Bookmarks(info.id, 0, tx)).unwrap(); assert!(rx.blocking_recv().unwrap().is_err());
+        }
     }
     #[test]
     fn text_follows_page_edits_and_rejects_stale_or_closed_requests() {
