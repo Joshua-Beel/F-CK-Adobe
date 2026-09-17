@@ -6,6 +6,7 @@ export async function openDocument(example = false) {
   return invoke<DocumentInfo | null>(example ? 'open_example' : 'open_document');
 }
 export const closeDocument = (id: number) => invoke<void>('close_document', { id });
+export const reopenDocument = (path: string) => invoke<DocumentInfo>('reopen_document', { path });
 export const pageText = (id: number, page: number, revision: number) => invoke<string>('page_text', { id, page, revision });
 export type BookmarkList = { items: { title: string; page: number | null; depth: number }[]; truncated: boolean };
 export const documentBookmarks = (id: number, revision: number) => invoke<BookmarkList>('document_bookmarks', { id, revision });

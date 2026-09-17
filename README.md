@@ -20,7 +20,7 @@ Version 0.2.0 has a signed update package, but no Windows publisher signature. T
 - **Search (source build):** Ctrl+F searches embedded PDF text, with optional case matching, selectable excerpts with highlighted matches, and next/previous matching-page navigation. Search follows page edits; scans need OCR first. Results show one excerpt per matching page, up to 500 pages.
 - **Organizing pages:** select thumbnails or enter a page range, rotate pages, move a page earlier or later, delete pages, and extract a selection into a new PDF. The source build can also move a selected page directly to a numbered position.
 - **Saving:** undo and redo page edits, then use **Save a Copy**. Your original stays untouched, and the app asks before closing a document with unsaved edits.
-- **Workspace:** light and dark themes and an All tools panel. The source build remembers theme, zoom, fit width, pan mode, and panel visibility across launches. Recent files and stars are still session-only.
+- **Workspace:** light and dark themes and an All tools panel. The source build remembers theme, zoom, fit width, pan mode, panel visibility, and up to 50 recent file locations with stars across launches. Clear file history removes this list without deleting PDFs. Unsaved edits are not restored after restart.
 
 Your PDFs stay on your computer. There's no document upload service or telemetry.
 
@@ -41,11 +41,11 @@ Your PDFs stay on your computer. There's no document upload service or telemetry
 
 ## What's still missing
 
-Text and image editing, text selection directly on PDF pages, printing, OCR, signatures, and redaction aren't ready yet. Search excerpts can be selected and copied, but matches aren't highlighted on the page yet. Unavailable tools are disabled in the interface. Recent files and stars don't survive a restart yet, and password-protected PDFs aren't supported.
+Text and image editing, text selection directly on PDF pages, printing, OCR, signatures, and redaction aren't ready yet. Search excerpts can be selected and copied, but matches aren't highlighted on the page yet. Unavailable tools are disabled in the interface. Password-protected PDFs aren't supported yet.
 
 Saving currently means writing a new copy. You can't overwrite an existing file or save changes back to the original. Some page operations are also blocked on signed PDFs, forms, tagged documents, or files with bookmarks and annotations. The [Organize Pages guide](docs/tools/organize-pages.md) explains those limits.
 
-Next up are the remaining reading basics: text selection on pages, search highlighting, better page navigation, and remembering recent files. There's also more testing to do with real documents. The generated 98-page scan and 1,500-page text file are useful test cases, but they don't tell us how every large PDF will behave. The full list is in [Known gaps](docs/gaps.md).
+Next up are the remaining reading basics: text selection on pages, search highlighting, printing, and passwords. There's also more testing to do with real documents. The generated 98-page scan and 1,500-page text file are useful test cases, but they don't tell us how every large PDF will behave. The full list is in [Known gaps](docs/gaps.md).
 
 ## Run from source
 
@@ -87,6 +87,7 @@ For more background, see the [architecture notes](docs/decisions.md), [PDFium do
 
 ## Recent changes
 
+- Recent files and stars now persist locally, capped at 50 entries. Clicking a saved entry reopens it or activates its existing tab; missing files show an error. Clear file history removes saved locations without deleting PDFs. Tests cover invalid storage, duplicate entries, app remounts, reopening and missing files. All 33 frontend/release tests, 11 native tests and the production build pass. Native restart verification remains pending; this feature is newer than the 0.2.4 draft.
 - Added next/previous matching-page controls and highlighted literal matches in search excerpts. Navigation wraps through the available results and resets when the query or case option changes. New tests cover navigation, delayed results after Stop, and the 500-page result limit; all 29 frontend/release tests and the production build pass. Highlighting on rendered pages and native desktop verification remain pending. This change is newer than the 0.2.4 draft.
 - Added Move to page in Organize Pages: choose one page, enter its final position, and move it using the existing undoable operation. Invalid positions are rejected and failed moves preserve selection. Fixed Shift+click selecting nonexistent pages after deletion. All 26 frontend/release tests and the production build pass; native desktop interaction with the new controls remains unverified. These changes are newer than the 0.2.4 draft.
 - Fixed an export overflow found with adversarial PDF rotation values. The regression reproduced a debug-build panic; export now normalizes the original rotation before adding the requested turn. Extreme positive and negative values round-trip correctly, and all 11 native tests pass across the existing fixtures. This source fix is newer than the 0.2.4 draft; the full review and installed-app checks remain open.

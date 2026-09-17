@@ -8,7 +8,7 @@ describe('reading preferences', () => {
   let stored: string | null;
   beforeEach(() => {
     stored = null;
-    vi.stubGlobal('window', { localStorage: { getItem: () => stored, setItem: (_key: string, value: string) => { stored = value; } }, addEventListener: vi.fn(), removeEventListener: vi.fn() });
+    vi.stubGlobal('window', { localStorage: { getItem: (key: string) => key.includes('preferences') ? stored : null, setItem: (key: string, value: string) => { if (key.includes('preferences')) stored = value; } }, addEventListener: vi.fn(), removeEventListener: vi.fn() });
   });
   afterEach(() => vi.unstubAllGlobals());
   it('persists a theme change through an actual app unmount and remount', async () => {
@@ -38,7 +38,7 @@ describe('reading preferences', () => {
     expect(savePreferences(defaultPreferences)).toBe(false);
     let ui!: ReactTestRenderer;
     await act(async () => { ui = create(<App />); });
-    expect(JSON.stringify(ui.toJSON())).toContain('reading preferences could not be saved');
+    expect(JSON.stringify(ui.toJSON())).toContain('could not be saved');
     act(() => ui.unmount());
   });
 });

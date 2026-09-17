@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { Undo2, Redo2 } from 'lucide-react';
 import { ArrowDownToLine, ArrowUpRight, Bookmark, ChevronDown, ChevronLeft, ChevronRight, ChevronsUpDown, CircleHelp, Combine, File, FileCheck2, FileImage, FileOutput, FilePenLine, FilePlus2, Files, FolderOpen, Hand, Highlighter, Home, LayoutGrid, List, Maximize, Menu, MessageSquare, Minus, MoreHorizontal, MousePointer2, PanelLeftClose, Pencil, Plus, Printer, RotateCw, Save, ScanLine, Search, ShieldCheck, Signature, SlidersHorizontal, Star, Sun, Type, X, ZoomIn, ZoomOut, type LucideIcon } from 'lucide-react';
-import { closeDocument, native, openDocument, editPages, saveCopy } from './bridge';
+import { closeDocument, native, openDocument, reopenDocument, editPages, saveCopy } from './bridge';
 import { clampPage, toolGroups, type DocumentInfo, type PageEdit } from './model';
 import Viewer from './Viewer';
 import Organizer from './Organizer';
@@ -12,6 +12,7 @@ import SearchPanel from './SearchPanel';
 import BookmarksPanel from './BookmarksPanel';
 import PageText from './PageText';
 import { readPreferences, savePreferences } from './preferences';
+import { readRecentFiles, saveRecentFiles, rememberFile } from './recentFiles';
 import s from './Workspace.module.css';
 
 const icons: Record<string, LucideIcon> = { 'Create a PDF': FilePlus2, 'Combine files': Combine, 'Organize pages': LayoutGrid, 'Edit a PDF': FilePenLine, 'Export a PDF': FileOutput, 'Scan & OCR': ScanLine, 'Fill & sign': Signature, 'Protect a PDF': ShieldCheck, 'Comment': MessageSquare, 'Compress a PDF': ArrowDownToLine };
@@ -43,12 +44,15 @@ export default function App() {
   const [hand, setHand] = useState(preferences.hand);
   const [page, setPage] = useState(0);
   const [target, setTarget] = useState({ page: 0, token: 0 });
-  const [stars, setStars] = useState<number[]>([]);
+  const [recentFiles, setRecentFiles] = useState(readRecentFiles);
   const [organizing, setOrganizing] = useState(false);
   const [pendingClose, setPendingClose] = useState<number | 'window' | null>(null);
   useEffect(() => {
     if (!savePreferences({ dark, zoom, fit, hand, toolsOpen, nav })) setNotice('Your reading preferences could not be saved. They will last for this session only.');
   }, [dark, zoom, fit, hand, toolsOpen, nav]);
+  useEffect(() => {
+    if (!saveRecentFiles(recentFiles)) setNotice('Recent files and stars could not be saved. They will last for this session only.');
+  }, [recentFiles]);
   const latest = useRef({ documents, busy });
   latest.current = { documents, busy };
   useEffect(() => {
@@ -66,9 +70,20 @@ export default function App() {
     setBusy(true); setError(''); setMenu(false);
     try {
       const info = await openDocument(example);
-      if (info) { setDocuments(list => [...list, info]); setOrganizing(organize); activate(info.id); }
+      if (info) { setDocuments(list => [...list, info]); setRecentFiles(list => rememberFile(list, info)); setOrganizing(organize); activate(info.id); }
     } catch (e) { setError(String(e)); } finally { setBusy(false); }
   }, [busy]);
+  const reopen = async (path: string) => {
+    if (busy) return;
+    const existing = documents.find(document => document.path === path);
+    if (existing) { activate(existing.id); return; }
+    setBusy(true); setError('');
+    try {
+      const info = await reopenDocument(path);
+      setDocuments(list => [...list, info]); setRecentFiles(list => rememberFile(list, info)); setOrganizing(false); activate(info.id);
+    } catch (e) { setError(`Could not reopen this file. It may have moved or been deleted. ${String(e)}`); }
+    finally { setBusy(false); }
+  };
   const close = async (id: number, discard = false) => {
     if (busy) return;
     if (!discard && documents.find(document => document.id === id)?.dirty) { setPendingClose(id); return; }
@@ -118,7 +133,7 @@ export default function App() {
     };
     window.addEventListener('keydown', listener); return () => window.removeEventListener('keydown', listener);
   });
-  const listed = documents.filter(d => d.name.toLowerCase().includes(query.toLowerCase()) && (section !== 'Starred' || stars.includes(d.id)));
+  const listed = recentFiles.filter(d => d.name.toLowerCase().includes(query.toLowerCase()) && (section !== 'Starred' || d.starred));
   const changeZoom = (value: number) => { setFit(false); setZoom(Math.max(10, Math.min(400, value))); };
   const toolRow = (name: string, index: number) => {
     const Icon = icons[name] || FileCheck2;
@@ -146,9 +161,9 @@ export default function App() {
         <aside className={s.homeSidebar}><h2>Home</h2>{['Recent', 'Starred'].map(item => <button key={item} className={section === item ? s.sidebarSelected : ''} onClick={() => setSection(item)}>{item === 'Recent' ? <Home size={18} /> : <Star size={18} />}{item}</button>)}<div className={s.sidebarCaption}>FILES</div><button onClick={() => void open()}><FolderOpen size={18} /> Your computer</button><div className={s.sidebarBottom}><ShieldCheck size={16} /><span>Local files. Yours to keep.</span></div></aside>
         <section className={s.homeContent}><div className={s.homeHeading}><div><p className={s.eyebrow}>YOUR WORKSPACE</p><h1>Work with your PDFs.</h1></div><button className={s.outlineButton} onClick={() => setView('tools')}>See all tools <ArrowUpRight size={16} /></button></div>
           <div className={s.quickCards}>{['Edit a PDF', 'Export a PDF', 'Combine files', 'Fill & sign'].map((name, i) => { const Icon = icons[name]; return <div className={s.quickCard} key={name}><span style={{ color: ['#7260b4', '#2c80b2', '#25876b', '#b86a25'][i] }}><Icon size={29} strokeWidth={1.5} /></span><h3>{name}</h3><p>{['Update text and images.', 'Convert to another format.', 'Bring documents together.', 'Complete your paperwork.'][i]}</p><span className={s.planned}>Planned</span></div>; })}</div>
-          <div className={s.recentHeader}><h2>{section}</h2><div className={s.recentControls}><label className={s.search}><Search size={16} /><input aria-label="Search open files" placeholder="Search your files" value={query} onChange={e => setQuery(e.target.value)} /></label><IconButton icon={List} label="List view" active /></div></div>
+          <div className={s.recentHeader}><h2>{section}</h2><div className={s.recentControls}><button className={s.textButton} disabled={!recentFiles.length} onClick={() => setRecentFiles([])}>Clear file history</button><label className={s.search}><Search size={16} /><input aria-label="Search recent files" placeholder="Search your files" value={query} onChange={e => setQuery(e.target.value)} /></label><IconButton icon={List} label="List view" active /></div></div>
           <div className={s.tableHeading}><span>NAME</span><span>LOCATION</span><span>PAGES</span><span /></div>
-          {listed.map(document => <div className={s.fileRow} key={document.id}><button onClick={() => activate(document.id)}><FileImage size={25} /><span>{document.name}<small>PDF document</small></span></button><span title={document.path}>This computer</span><span>{document.pages.length}</span><IconButton icon={Star} label={`Star ${document.name}`} active={stars.includes(document.id)} onClick={() => setStars(list => list.includes(document.id) ? list.filter(id => id !== document.id) : [...list, document.id])} /></div>)}
+          {listed.map(file => <div className={s.fileRow} key={file.path}><button disabled={busy} onClick={() => void reopen(file.path)}><FileImage size={25} /><span>{file.name}<small>PDF document</small></span></button><span title={file.path}>This computer</span><span>{file.pages}</span><IconButton icon={Star} label={`${file.starred ? 'Unstar' : 'Star'} ${file.name}`} active={file.starred} onClick={() => setRecentFiles(list => list.map(item => item.path === file.path ? { ...item, starred: !item.starred } : item))} /></div>)}
           {!listed.length && <div className={s.empty}><div className={s.emptyIcon}><Files size={36} strokeWidth={1.25} /></div><h3>{query ? 'No matching files' : section === 'Starred' ? 'Keep important files close' : 'Your documents start here'}</h3><p>{query ? 'Try another file name.' : section === 'Starred' ? 'Star an open file to find it here.' : 'Open a PDF from your computer to start reading.'}</p>{!query && section !== 'Starred' && <><button className={s.openButton} onClick={() => void open()} disabled={busy}>Open a file</button><button className={s.textButton} onClick={() => void open(true)} disabled={busy}>Explore a sample PDF <ChevronRight size={15} /></button></>}</div>}
           <p className={s.foundationNote}>Viewer + Organize Pages · More tools are in development{!native ? ' · Browser preview' : ''}</p>
         </section>

@@ -11,6 +11,10 @@ async fn open_document(app: tauri::AppHandle, service: State<'_, PdfService>) ->
     match path { Some(path) => service.open(path).await.map(Some), None => Ok(None) }
 }
 #[tauri::command]
+async fn reopen_document(service: State<'_, PdfService>, path: String) -> Result<DocumentInfo, String> {
+    service.open(std::path::PathBuf::from(path)).await
+}
+#[tauri::command]
 async fn open_example(app: tauri::AppHandle, service: State<'_, PdfService>) -> Result<DocumentInfo, String> {
     service.open(app.path().resource_dir().map_err(|e| e.to_string())?.join("resources/welcome.pdf")).await
 }
@@ -44,6 +48,6 @@ fn main() {
         let library = app.path().resource_dir()?.join("resources/pdfium/bin/pdfium.dll");
         app.manage(PdfService::start(library));
         Ok(())
-    }).invoke_handler(tauri::generate_handler![open_document, open_example, render_page, close_document, edit_pages, save_copy, page_text, document_bookmarks])
+    }).invoke_handler(tauri::generate_handler![open_document, reopen_document, open_example, render_page, close_document, edit_pages, save_copy, page_text, document_bookmarks])
       .run(tauri::generate_context!()).expect("Desktop application failed");
 }
