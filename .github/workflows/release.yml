@@ -44,7 +44,8 @@ jobs:
       - name: Install Azure Artifact Signing CLI
         run: cargo install artifact-signing-cli --version 0.11.0 --locked
       - name: Build publisher-signed installer and signed update manifest
-        run: npm run installer -- -AzureSigning
+        shell: pwsh
+        run: ./scripts/build-installer.ps1 -AzureSigning
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}

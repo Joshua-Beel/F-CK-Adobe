@@ -85,6 +85,7 @@ For more background, see the [architecture notes](docs/decisions.md), [PDFium do
 
 ## Recent changes
 
+- Azure signing succeeded for 0.2.2, including the installer and updater signature, but CI stopped when the Windows PowerShell child process could not load its signature-verification module. Changed CI to call the build script directly in PowerShell 7 and prepared 0.2.3. Full signature verification, publishing, and the upgrade test remain pending.
 - The 0.2.1 CI build passed tests and compilation but failed when invoking the signing tool. Fixed the signing configuration to pass the spaced application description as one argument, using Tauri's object notation. Prepared 0.2.2, including document search, for another signed build; installer and upgrade verification remain pending. The failed 0.2.1 tag is preserved.
 - Added embedded-text search to the source build, with matching-page navigation, case matching, cancellation, selectable excerpts, and protection against stale results. All 15 frontend/release and 8 native tests pass; native extraction checks every page of all three valid fixtures. Production frontend and native debug builds pass. Desktop interaction verification is pending because window automation failed to acquire reliable input. This feature is not included in the already-tagged 0.2.1 signing build.
 - Prepared 0.2.1 to exercise Azure publisher signing and the upgrade from 0.2.0. Release verification is in progress; this is not yet a verified published installer.

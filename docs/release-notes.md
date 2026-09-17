@@ -1,4 +1,9 @@
-## 0.2.2
+## 0.2.3
+
+- Runs installer signature verification directly in PowerShell 7 on GitHub Actions.
+- Includes embedded-text search and the Windows signing argument fix described below.
+
+## 0.2.2 (unreleased)
 
 - Find embedded PDF text with Ctrl+F, optional case matching, selectable excerpts, and links to matching pages.
 - Stop a search while reading; results follow the current page order after edits.
