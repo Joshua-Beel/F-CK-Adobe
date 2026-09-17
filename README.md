@@ -10,7 +10,7 @@ Download the Windows setup file from the [latest release](https://github.com/Jos
 
 For updates, use **Menu > Check for updates**. The app shows what's new and lets you choose when to install. Save any edited documents first; the app won't install an update while you have unsaved changes.
 
-Version 0.2.0 has a signed update package, but no Windows publisher signature. The next release is configured to use Joshua Beel's existing Azure signing setup. The remaining setup steps are in [Releases and signing](docs/releases.md).
+Version 0.2.0 has a signed update package, but no Windows publisher signature. The next release is configured to use Joshua Beel's existing Azure signing setup, and the required GitHub Actions secrets are saved. A signed release build still needs to be verified. See [Releases and signing](docs/releases.md).
 
 ## What works
 
@@ -83,8 +83,9 @@ For more background, see the [architecture notes](docs/decisions.md), [PDFium do
 
 ## Recent changes
 
+- Release signing uses protected repository Actions secrets and retains publisher and updater verification.
 - Rewrote this README around installing and using the app, with clearer setup instructions and less development-log clutter.
-- Connected future release builds to the existing Azure publisher profile. The build checks for valid, timestamped Joshua Beel signatures before preparing an update. Repository credentials still need to be configured; the published 0.2.0 installer hasn't changed.
+- Connected future release builds to the existing Azure publisher profile. The build checks for valid, timestamped Joshua Beel signatures before preparing an update. The published 0.2.0 installer hasn't changed.
 - Released the 0.2.0 installer and GitHub updater. Verified installation, PDF rendering, the live update check, and the downloaded installer's hash. Fixed update links to match GitHub's asset filenames. A full upgrade to a newer version still needs an end-to-end test. Details are in the [release guide](docs/releases.md).
 - Added Organize Pages, undo/redo, Save a Copy, and prompts for unsaved edits. Tests compare rotated previews with reopened saved files and check that originals remain unchanged. The latest recorded checks passed all 11 frontend/release tests and 7 Rust tests; desktop rotation and copy export were also checked. See the [tool guide](docs/tools/organize-pages.md).
 - Built the initial viewer, native PDF worker, page cache, and test fixtures. Added a standalone development build and shortcut, and fixed a Windows file-lock issue in the development watcher. Earlier checks are recorded in [Viewer foundation](docs/phase-0-status.md).
