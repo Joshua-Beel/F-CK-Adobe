@@ -7,6 +7,7 @@ import { clampPage, toolGroups, type DocumentInfo, type PageEdit } from './model
 import Viewer from './Viewer';
 import Organizer from './Organizer';
 import ConfirmDialog from './ConfirmDialog';
+import Updates from './Updates';
 import s from './Workspace.module.css';
 
 const icons: Record<string, LucideIcon> = { 'Create a PDF': FilePlus2, 'Combine files': Combine, 'Organize pages': LayoutGrid, 'Edit a PDF': FilePenLine, 'Export a PDF': FileOutput, 'Scan & OCR': ScanLine, 'Fill & sign': Signature, 'Protect a PDF': ShieldCheck, 'Comment': MessageSquare, 'Compress a PDF': ArrowDownToLine };
@@ -23,6 +24,7 @@ export default function App() {
   const [toolsOpen, setToolsOpen] = useState(true);
   const [nav, setNav] = useState(false);
   const [menu, setMenu] = useState(false);
+  const [updatesOpen, setUpdatesOpen] = useState(false);
   const [dark, setDark] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
@@ -82,6 +84,7 @@ export default function App() {
   const go = (value: number) => { if (doc) { const next = clampPage(value, doc.pages.length); setPage(next); setTarget(v => ({ page: next, token: v.token + 1 })); } };
   useEffect(() => {
     const listener = (event: KeyboardEvent) => {
+      if (updatesOpen) return;
       if (event.ctrlKey && event.key.toLowerCase() === 'o') { event.preventDefault(); void open(); }
       if ((event.target as HTMLElement).matches('input,select,textarea')) return;
       if (event.key === 'F4') { event.preventDefault(); event.shiftKey ? setToolsOpen(v => !v) : setNav(v => !v); }
@@ -116,7 +119,8 @@ export default function App() {
       <button className={s.createButton} disabled title="Create a PDF — not implemented yet"><Plus size={17} /> Create</button>
       <span className={s.windowTitle}>PDF Workstation</span>
     </header>
-    {menu && <div className={s.menuPopover}><button onClick={() => void open()}>Open… <kbd>Ctrl+O</kbd></button><button onClick={() => void open(true)}>Open sample PDF</button><button disabled={!doc || busy} onClick={() => { setMenu(false); void save(); }}>Save a copy… <kbd>Ctrl+S</kbd></button><button onClick={() => { setMenu(false); launchOrganizer(); }}>Organize pages</button><hr /><button onClick={() => { setDark(v => !v); setMenu(false); }}>Switch to {dark ? 'light' : 'dark'} theme</button><button onClick={() => { setNotice('PDF viewing and Organize Pages are available. Rotate, reorder, delete, extract, undo/redo, and save a new copy. Text editing, search, OCR, forms, and signatures are not implemented yet.'); setMenu(false); }}>About this build</button></div>}
+    {menu && <div className={s.menuPopover}><button onClick={() => void open()}>Open… <kbd>Ctrl+O</kbd></button><button onClick={() => void open(true)}>Open sample PDF</button><button disabled={!doc || busy} onClick={() => { setMenu(false); void save(); }}>Save a copy… <kbd>Ctrl+S</kbd></button><button onClick={() => { setMenu(false); launchOrganizer(); }}>Organize pages</button><hr /><button onClick={() => { setDark(v => !v); setMenu(false); }}>Switch to {dark ? 'light' : 'dark'} theme</button><button disabled={busy} onClick={() => { setMenu(false); setUpdatesOpen(true); }}>Check for updates…</button><button onClick={() => { setNotice('PDF viewing and Organize Pages are available. Rotate, reorder, delete, extract, undo/redo, and save a new copy. Text editing, search, OCR, forms, and signatures are not implemented yet.'); setMenu(false); }}>About this build</button></div>}
+    {updatesOpen && <Updates dirty={documents.some(document => document.dirty)} busy={busy} setBusy={setBusy} close={() => setUpdatesOpen(false)} />}
     <div className={s.globalbar}>
       <nav className={s.primaryNav}><button className={toolsOpen && view !== 'home' ? s.selectedNav : ''} onClick={() => view === 'document' ? setToolsOpen(v => !v) : setView('tools')}>All tools</button><button disabled>Edit</button><button disabled>Convert</button><button disabled>E-sign</button></nav>
       <div className={s.globalActions}><IconButton icon={Search} label="Find text" disabled /><span className={s.divider} /><IconButton icon={Undo2} label="Undo" disabled={busy || !doc?.can_undo} onClick={() => void edit({ kind: 'undo' })} /><IconButton icon={Redo2} label="Redo" disabled={busy || !doc?.can_redo} onClick={() => void edit({ kind: 'redo' })} /><IconButton icon={Save} label="Save a copy" disabled={busy || !doc} onClick={() => void save()} /><IconButton icon={Printer} label="Print" disabled /><IconButton icon={Sun} label="Toggle theme" onClick={() => setDark(v => !v)} /><IconButton icon={CircleHelp} label="Build information" onClick={() => setNotice('Organize Pages is available. Other tools marked unavailable are planned for later milestones. Save a Copy writes a new file and preserves your original.')} /><button className={s.openButton} onClick={() => void open()} disabled={busy}><FolderOpen size={16} /> {busy ? 'Working…' : 'Open a file'}</button></div>

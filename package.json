@@ -1,6 +1,6 @@
 {
   "name": "pdf-workstation",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "type": "module",
   "scripts": {
@@ -8,10 +8,13 @@
     "build": "tsc -b && vite build",
     "test": "vitest run",
     "tauri": "tauri",
-    "fixtures": "node scripts/create-fixtures.mjs"
+    "fixtures": "node scripts/create-fixtures.mjs",
+    "installer": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-installer.ps1",
+    "release:manifest": "node scripts/release-manifest.mjs"
   },
   "dependencies": {
     "@tauri-apps/api": "2.11.1",
+    "@tauri-apps/plugin-updater": "2.11.0",
     "lucide-react": "1.46.0",
     "react": "18.3.1",
     "react-dom": "18.3.1"
@@ -20,7 +23,9 @@
     "@tauri-apps/cli": "2.11.4",
     "@types/react": "18.3.18",
     "@types/react-dom": "18.3.5",
+    "@types/react-test-renderer": "18.3.1",
     "@vitejs/plugin-react": "4.7.0",
+    "react-test-renderer": "18.3.1",
     "typescript": "5.8.3",
     "vite": "6.4.3",
     "vitest": "3.2.4"

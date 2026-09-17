@@ -34,7 +34,7 @@ async fn save_copy(app: tauri::AppHandle, service: State<'_, PdfService>, id: u6
 }
 
 fn main() {
-    tauri::Builder::default().setup(|app| {
+    tauri::Builder::default().plugin(tauri_plugin_updater::Builder::new().build()).setup(|app| {
         let library = app.path().resource_dir()?.join("resources/pdfium/bin/pdfium.dll");
         app.manage(PdfService::start(library));
         Ok(())

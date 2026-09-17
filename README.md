@@ -4,6 +4,8 @@ Windows desktop PDF application under development. The target is the current Acr
 
 ## Run
 
+Windows installer: download the setup executable from [GitHub releases](https://github.com/Joshua-Beel/F-CK-Adobe/releases/latest). In the installed app, use **Menu > Check for updates** for signed updates. See [release instructions](docs/releases.md) for local builds, the signing-key backup, and the one-time GitHub Actions secret Joshua must configure.
+
 Use the desktop shortcut **PDF Workstation (development)**. The locally built executable is `src-tauri/target/debug/pdf-workstation.exe`. Keep its adjacent `resources` folder. It embeds the frontend and does not require Vite to run. Choose **Explore a sample PDF** or **Open a file**.
 
 Development: install Node.js, Rust MSVC, Visual Studio C++ tools, and WebView2. Run `npm ci`, `npm run fixtures`, fetch PDFium using `scripts/setup-pdfium.ps1`, then `npm run tauri -- dev`. Open a new shell after installing Rust so Cargo is on PATH.
@@ -36,6 +38,8 @@ Next: complete viewer core (text selection/search, encrypted-file prompt, bookma
 - Architecture decisions: [docs/decisions.md](docs/decisions.md).
 
 ## Recent changes
+
+- Added the 0.2.0 per-user Windows NSIS installer, bundled PDF engine, signed GitHub-release updater with release notes/progress and unsaved-document protection, and release-manifest validation. Signing keys remain outside Git. Windows Authenticode signing is not configured. Eleven frontend/release tests and seven native tests pass; the installer exits successfully and the installed app renders the bundled sample PDF.
 
 - Added the first Windows viewer foundation and current-style workspace, native worker/cache, synthetic fixtures, and viewport/rendering tests. Rust 1.98.1 was installed on the development machine. Detailed verification and remaining acceptance conditions are recorded in [docs/phase-0-status.md](docs/phase-0-status.md).
 - Built the standalone development executable and added a desktop shortcut. Verified native sample rendering and next-page navigation; the file picker opens, but automated file selection remains unverified because of desktop automation limitations.
