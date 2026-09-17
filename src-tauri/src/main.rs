@@ -4,6 +4,7 @@ mod editor;
 mod printing;
 mod print_commands;
 mod document_properties;
+mod text_geometry;
 use service::{DocumentInfo, PdfService};
 use tauri::{Manager, State};
 
@@ -36,6 +37,9 @@ async fn close_document(service: State<'_, PdfService>, id: u64) -> Result<(), S
 async fn page_text(service: State<'_, PdfService>, id: u64, page: u16, revision: u64) -> Result<String, String> { service.text(id, page, revision).await }
 
 #[tauri::command]
+async fn page_text_geometry(service: State<'_, PdfService>, id: u64, page: u16, revision: u64) -> Result<text_geometry::PageTextGeometry, String> { service.text_geometry(id, page, revision).await }
+
+#[tauri::command]
 async fn document_bookmarks(service: State<'_, PdfService>, id: u64, revision: u64) -> Result<service::BookmarkList, String> { service.bookmarks(id, revision).await }
 
 #[tauri::command]
@@ -65,6 +69,6 @@ fn main() {
         app.manage(PdfService::start(library));
         app.manage(print_commands::PrintJobs::default());
         Ok(())
-    }).invoke_handler(tauri::generate_handler![open_document, reopen_document, open_example, render_page, close_document, edit_pages, save_copy, page_text, document_bookmarks, document_properties, dependency_notices, unlock_document, cancel_password_request, print_commands::print_document, print_commands::cancel_print])
+    }).invoke_handler(tauri::generate_handler![open_document, reopen_document, open_example, render_page, close_document, edit_pages, save_copy, page_text, page_text_geometry, document_bookmarks, document_properties, dependency_notices, unlock_document, cancel_password_request, print_commands::print_document, print_commands::cancel_print])
       .run(tauri::generate_context!()).expect("Desktop application failed");
 }

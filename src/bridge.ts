@@ -25,6 +25,12 @@ export type DocumentPropertiesInfo = {
 export const documentProperties = (id: number, revision: number) => invoke<DocumentPropertiesInfo>('document_properties', { id, revision });
 export const dependencyNotices = () => invoke<string>('dependency_notices');
 export const pageText = (id: number, page: number, revision: number) => invoke<string>('page_text', { id, page, revision });
+export type PageTextGeometry = {
+  id: number; page: number; revision: number; status: 'ok' | 'unsupported'; truncated: boolean;
+  characters: { text: string; bounds: { x: number; y: number; width: number; height: number } | null; angle: number }[];
+  reason: string | null;
+};
+export const pageTextGeometry = (id: number, page: number, revision: number) => invoke<PageTextGeometry>('page_text_geometry', { id, page, revision });
 export type BookmarkList = { items: { title: string; page: number | null; depth: number }[]; truncated: boolean };
 export const documentBookmarks = (id: number, revision: number) => invoke<BookmarkList>('document_bookmarks', { id, revision });
 export const editPages = (id: number, edit: PageEdit) => invoke<DocumentInfo>('edit_pages', { id, edit });

@@ -33,6 +33,7 @@ enum Request {
     EndPrint(u64, Reply<()>),
     Render(u64, u16, i32, Reply<Vec<u8>>),
     Text(u64, u16, u64, Reply<String>),
+    TextGeometry(u64, u16, u64, Reply<crate::text_geometry::PageTextGeometry>),
     Bookmarks(u64, u64, Reply<BookmarkList>),
     Properties(u64, u64, Reply<crate::document_properties::DocumentProperties>),
     Close(u64, Reply<()>),
@@ -223,6 +224,24 @@ impl PdfService {
                         })();
                         let _ = reply.send(result);
                     }
+                    Request::TextGeometry(id, index, revision, reply) => {
+                        if reply.is_closed() { continue; }
+                        let result = (|| {
+                            let (session, _) = sessions.get(&id).ok_or("Document is closed")?;
+                            if session.revision != revision { return Err("Document changed. Select text again.".into()); }
+                            let spec = session.plan.get(index as usize).ok_or("Page is out of range")?;
+                            let document = documents.get(&id).ok_or("Document is closed")?;
+                            let mut page = document.pages().get(spec.source as i32).map_err(|error| error.to_string())?;
+                            let original = page.rotation().map_err(|error| error.to_string())?;
+                            let turns = original.as_degrees() as i32 / 90;
+                            let rotation = match (turns + spec.turns).rem_euclid(4) { 1 => PdfPageRenderRotation::Degrees90, 2 => PdfPageRenderRotation::Degrees180, 3 => PdfPageRenderRotation::Degrees270, _ => PdfPageRenderRotation::None };
+                            page.set_rotation(rotation);
+                            let geometry = crate::text_geometry::inspect(&page, id, index, revision);
+                            page.set_rotation(original);
+                            geometry
+                        })();
+                        let _ = reply.send(result);
+                    }
                     Request::Text(id, page, revision, reply) => {
                         if reply.is_closed() { continue; }
                         let result = (|| {
@@ -296,6 +315,9 @@ impl PdfService {
     pub async fn text(&self, id: u64, page: u16, revision: u64) -> Result<String, String> {
         let (tx, rx) = oneshot::channel(); self.sender.send(Request::Text(id, page, revision, tx)).map_err(|e| e.to_string())?; rx.await.map_err(|e| e.to_string())?
     }
+    pub async fn text_geometry(&self, id: u64, page: u16, revision: u64) -> Result<crate::text_geometry::PageTextGeometry, String> {
+        let (tx, rx) = oneshot::channel(); self.sender.send(Request::TextGeometry(id, page, revision, tx)).map_err(|error| error.to_string())?; rx.await.map_err(|error| error.to_string())?
+    }
     pub async fn bookmarks(&self, id: u64, revision: u64) -> Result<BookmarkList, String> {
         let (tx, rx) = oneshot::channel(); self.sender.send(Request::Bookmarks(id, revision, tx)).map_err(|e| e.to_string())?; rx.await.map_err(|e| e.to_string())?
     }
@@ -344,6 +366,124 @@ fn current_info(session: &EditSession, original: &DocumentInfo) -> DocumentInfo 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn text_geometry_preserves_spaces_generated_newlines_and_unicode() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let service = PdfService::start(root.join("resources/pdfium/bin/pdfium.dll"));
+        let folder = tempfile::tempdir().unwrap();
+        let path = folder.path().join("whitespace-unicode.pdf");
+        std::fs::write(&path, crate::text_geometry::tests::fixture(0, [1.0, 0.0, 0.0, 1.0, 100.0, 200.0], "First café\nSecond line")).unwrap();
+        let (tx, rx) = oneshot::channel(); service.sender.send(Request::Open(path, tx)).unwrap(); let info = rx.blocking_recv().unwrap().unwrap();
+        let (tx, rx) = oneshot::channel(); service.sender.send(Request::TextGeometry(info.id, 0, 0, tx)).unwrap(); let geometry = rx.blocking_recv().unwrap().unwrap();
+        assert_eq!(geometry.status, "ok", "{:?}", geometry.reason);
+        let copied = geometry.characters.iter().map(|character| character.text.as_str()).collect::<String>();
+        assert!(copied.contains("First café")); assert!(copied.contains("Second line")); assert!(copied.contains('\n'));
+        assert!(geometry.characters.iter().any(|character| character.text == "é" && character.bounds.is_some()));
+        assert!(geometry.characters.iter().filter(|character| character.text == "\r" || character.text == "\n").all(|character| character.bounds.is_none()));
+        let (tx, rx) = oneshot::channel(); service.sender.send(Request::Text(info.id, 0, 0, tx)).unwrap(); let source = rx.blocking_recv().unwrap().unwrap();
+        assert_eq!(copied, source);
+        let (tx, rx) = oneshot::channel(); service.sender.send(Request::Close(info.id, tx)).unwrap(); rx.blocking_recv().unwrap().unwrap();
+    }
+    #[test]
+    fn text_geometry_cropped_rotated_glyphs_match_actual_rendered_ink() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let service = PdfService::start(root.join("resources/pdfium/bin/pdfium.dll"));
+        let folder = tempfile::tempdir().unwrap();
+        for rotation in [0, 90, 180, 270] {
+            let path = folder.path().join(format!("ink-{rotation}.pdf"));
+            std::fs::write(&path, crate::text_geometry::tests::fixture(rotation, [1.0, 0.0, 0.0, 1.0, 100.0, 200.0], "MMMM")).unwrap();
+            let (tx, rx) = oneshot::channel(); service.sender.send(Request::Open(path, tx)).unwrap(); let info = rx.blocking_recv().unwrap().unwrap();
+            for edited in 0..4 {
+                let total = (rotation / 90 + edited) % 4;
+                let (tx, rx) = oneshot::channel(); service.sender.send(Request::Render(info.id, 0, 900, tx)).unwrap(); let before = rx.blocking_recv().unwrap().unwrap();
+                let (tx, rx) = oneshot::channel(); service.sender.send(Request::TextGeometry(info.id, 0, edited as u64, tx)).unwrap(); let geometry = rx.blocking_recv().unwrap().unwrap();
+                assert_eq!(geometry.status, "ok", "{:?}", geometry.reason);
+                assert_eq!(geometry.characters.iter().map(|character| character.text.as_str()).collect::<String>(), "MMMM");
+                assert!(geometry.characters.iter().all(|character| character.angle as i64 == total * 90));
+                let (tx, rx) = oneshot::channel(); service.sender.send(Request::Render(info.id, 0, 901, tx)).unwrap(); let after = rx.blocking_recv().unwrap().unwrap();
+                let image = image::load_from_memory(&before).unwrap().into_rgb8();
+                let after = image::load_from_memory(&after).unwrap().into_rgb8();
+                assert_eq!(image.width() < image.height(), after.width() < after.height());
+                let ink: Vec<_> = image.enumerate_pixels().filter(|(_, _, pixel)| pixel.0.iter().any(|value| *value < 100)).map(|(x, y, _)| (x as f32, y as f32)).collect();
+                assert!(!ink.is_empty());
+                let boxes: Vec<_> = geometry.characters.iter().map(|character| {
+                    let bounds = character.bounds.as_ref().unwrap();
+                    (bounds.x * image.width() as f32, bounds.y * image.height() as f32, (bounds.x + bounds.width) * image.width() as f32, (bounds.y + bounds.height) * image.height() as f32)
+                }).collect();
+                let inside = |(x, y): (f32, f32), (left, top, right, bottom): (f32, f32, f32, f32)| x >= left - 2.0 && x <= right + 2.0 && y >= top - 2.0 && y <= bottom + 2.0;
+                for bounds in &boxes { assert!(ink.iter().any(|point| inside(*point, *bounds)), "No rendered ink in mapped character: rotation {rotation}, edit {edited}"); }
+                assert!(ink.iter().all(|point| boxes.iter().any(|bounds| inside(*point, *bounds))), "Rendered ink falls outside mapped characters: rotation {rotation}, edit {edited}");
+                let after_boxes: Vec<_> = geometry.characters.iter().map(|character| {
+                    let bounds = character.bounds.as_ref().unwrap();
+                    (bounds.x * after.width() as f32, bounds.y * after.height() as f32, (bounds.x + bounds.width) * after.width() as f32, (bounds.y + bounds.height) * after.height() as f32)
+                }).collect();
+                assert!(after.enumerate_pixels().filter(|(_, _, pixel)| pixel.0.iter().any(|value| *value < 100)).all(|(x, y, _)| after_boxes.iter().any(|bounds| inside((x as f32, y as f32), *bounds))), "Geometry changed source rotation before a fresh render: rotation {rotation}, edit {edited}");
+                if edited < 3 { let (tx, rx) = oneshot::channel(); service.sender.send(Request::Edit(info.id, PageEdit::Rotate { pages: vec![0], clockwise: true }, tx)).unwrap(); rx.blocking_recv().unwrap().unwrap(); }
+            }
+            let (tx, rx) = oneshot::channel(); service.sender.send(Request::Close(info.id, tx)).unwrap(); rx.blocking_recv().unwrap().unwrap();
+        }
+    }
+    #[test]
+    fn text_geometry_unsupported_is_all_or_nothing_and_cap_is_explicit() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let service = PdfService::start(root.join("resources/pdfium/bin/pdfium.dll"));
+        let folder = tempfile::tempdir().unwrap();
+        for (index, matrix) in [[1.0, 0.0, 0.2, 1.0, 100.0, 200.0], [0.707, 0.707, -0.707, 0.707, 100.0, 200.0], [-1.0, 0.0, 0.0, 1.0, 200.0, 200.0]].into_iter().enumerate() {
+            let path = folder.path().join(format!("unsupported-{index}.pdf"));
+            std::fs::write(&path, crate::text_geometry::tests::fixture(90, matrix, "MMMM")).unwrap();
+            let (tx, rx) = oneshot::channel(); service.sender.send(Request::Open(path, tx)).unwrap(); let info = rx.blocking_recv().unwrap().unwrap();
+            let (tx, rx) = oneshot::channel(); service.sender.send(Request::Edit(info.id, PageEdit::Rotate { pages: vec![0], clockwise: true }, tx)).unwrap(); rx.blocking_recv().unwrap().unwrap();
+            let (tx, rx) = oneshot::channel(); service.sender.send(Request::TextGeometry(info.id, 0, 1, tx)).unwrap(); let geometry = rx.blocking_recv().unwrap().unwrap();
+            assert_eq!(geometry.status, "unsupported"); assert!(geometry.characters.is_empty()); assert!(geometry.reason.is_some());
+            let (tx, rx) = oneshot::channel(); service.sender.send(Request::Render(info.id, 0, 900, tx)).unwrap(); let image = image::load_from_memory(&rx.blocking_recv().unwrap().unwrap()).unwrap();
+            assert!(image.width() > image.height(), "Unsupported geometry must preserve original /Rotate90 plus editRotate90");
+            let (tx, rx) = oneshot::channel(); service.sender.send(Request::Close(info.id, tx)).unwrap(); rx.blocking_recv().unwrap().unwrap();
+        }
+        for count in [20_000, 20_001] {
+            let path = folder.path().join(format!("cap-{count}.pdf"));
+            std::fs::write(&path, crate::text_geometry::tests::fixture(0, [1.0, 0.0, 0.0, 1.0, 100.0, 200.0], &"M".repeat(count))).unwrap();
+            let (tx, rx) = oneshot::channel(); service.sender.send(Request::Open(path, tx)).unwrap(); let info = rx.blocking_recv().unwrap().unwrap();
+            let (tx, rx) = oneshot::channel(); service.sender.send(Request::TextGeometry(info.id, 0, 0, tx)).unwrap(); let geometry = rx.blocking_recv().unwrap().unwrap();
+            assert_eq!(geometry.status, "ok", "{:?}", geometry.reason); assert_eq!(geometry.truncated, count > 20_000); assert!(geometry.characters.len() <= 20_000); assert!(serde_json::to_vec(&geometry).unwrap().len() < 4_000_000);
+            let (tx, rx) = oneshot::channel(); service.sender.send(Request::Close(info.id, tx)).unwrap(); rx.blocking_recv().unwrap().unwrap();
+        }
+    }
+    #[test]
+    fn geometry_follows_edits_and_rejects_stale_invalid_and_closed_requests() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let service = PdfService::start(root.join("resources/pdfium/bin/pdfium.dll"));
+        for (fixture, count) in [("resources/welcome.pdf", 6), ("../test-corpus/synthetic-scan-98.pdf", 98), ("../test-corpus/synthetic-text-1500.pdf", 1500)] {
+            let (tx, rx) = oneshot::channel(); service.sender.send(Request::Open(root.join(fixture), tx)).unwrap();
+            let info = rx.blocking_recv().unwrap().unwrap();
+            let read = |page, revision| {
+                let (tx, rx) = oneshot::channel(); service.sender.send(Request::TextGeometry(info.id, page, revision, tx)).unwrap(); rx.blocking_recv().unwrap()
+            };
+            for page in [0, count / 2, count - 1] {
+                let geometry = read(page, 0).unwrap();
+                assert_eq!(geometry.status, "ok", "{fixture}: {:?}", geometry.reason);
+                assert!(geometry.characters.iter().map(|character| character.text.as_str()).collect::<String>().contains(&format!("Page {} of {count}", page + 1)));
+            }
+            assert!(read(count, 0).is_err());
+            for edit in [PageEdit::Move { from: 0, to: 1 }, PageEdit::Rotate { pages: vec![0], clockwise: true }, PageEdit::Delete { pages: vec![1] }] {
+                let (tx, rx) = oneshot::channel(); service.sender.send(Request::Edit(info.id, edit, tx)).unwrap(); rx.blocking_recv().unwrap().unwrap();
+            }
+            assert!(read(0, 0).is_err());
+            let geometry = read(0, 3).unwrap();
+            assert!(geometry.characters.iter().map(|character| character.text.as_str()).collect::<String>().contains(&format!("Page 2 of {count}")));
+            assert!(geometry.characters.iter().filter(|character| character.bounds.is_some()).all(|character| character.angle == 90));
+            assert!(read(count - 1, 3).is_err());
+            let (tx, rx) = oneshot::channel(); service.sender.send(Request::Close(info.id, tx)).unwrap(); rx.blocking_recv().unwrap().unwrap();
+            assert!(read(0, 3).is_err());
+        }
+        let folder = tempfile::tempdir().unwrap();
+        let path = folder.path().join("rotated.pdf");
+        std::fs::write(&path, crate::text_geometry::tests::fixture(90, [1.0, 0.0, 0.0, 1.0, 100.0, 200.0], "MMMM")).unwrap();
+        let (tx, rx) = oneshot::channel(); service.sender.send(Request::Open(path, tx)).unwrap(); let info = rx.blocking_recv().unwrap().unwrap();
+        let (tx, rx) = oneshot::channel(); service.sender.send(Request::Edit(info.id, PageEdit::Rotate { pages: vec![0], clockwise: true }, tx)).unwrap(); rx.blocking_recv().unwrap().unwrap();
+        let (tx, rx) = oneshot::channel(); service.sender.send(Request::TextGeometry(info.id, 0, 1, tx)).unwrap(); let geometry = rx.blocking_recv().unwrap().unwrap();
+        assert!(geometry.characters.iter().all(|character| character.angle == 180));
+        let (tx, rx) = oneshot::channel(); service.sender.send(Request::Close(info.id, tx)).unwrap(); rx.blocking_recv().unwrap().unwrap();
+    }
     #[test]
     fn properties_follow_current_pages_without_modifying_source_metadata() {
         use lopdf::{dictionary, Object};
