@@ -1,54 +1,90 @@
 # PDF Workstation
 
-Windows desktop PDF application under development. The target is the current Acrobat workspace, following Joshua's explicit correction to the supplied classic-2020 reference. The viewer and initial Organize Pages tools are available; this is **not a complete clone or full phase acceptance**. Product branding remains undecided; the window uses a descriptive working label.
+A Windows PDF app being built as an alternative to Acrobat, with a familiar layout and tools that work locally. PDF Workstation is the working name for now.
 
-## Run
+You can already read PDFs, rearrange pages, and save your changes to a new file. There's still plenty to build before it can replace Acrobat for everyday work.
 
-Windows installer: download the setup executable from [GitHub releases](https://github.com/Joshua-Beel/F-CK-Adobe/releases/latest). In the installed app, use **Menu > Check for updates** for signed updates. See [release instructions](docs/releases.md) for local builds, the signing-key backup, and the one-time GitHub Actions secret Joshua must configure.
+## Install
 
-Use the desktop shortcut **PDF Workstation (development)**. The locally built executable is `src-tauri/target/debug/pdf-workstation.exe`. Keep its adjacent `resources` folder. It embeds the frontend and does not require Vite to run. Choose **Explore a sample PDF** or **Open a file**.
+Download the Windows setup file from the [latest release](https://github.com/Joshua-Beel/F-CK-Adobe/releases/latest). The installer includes the PDF engine. Once installed, open a file or choose **Explore a sample PDF** to try it out.
 
-Development: install Node.js, Rust MSVC, Visual Studio C++ tools, and WebView2. Run `npm ci`, `npm run fixtures`, fetch PDFium using `scripts/setup-pdfium.ps1`, then `npm run tauri -- dev`. Open a new shell after installing Rust so Cargo is on PATH.
+For updates, use **Menu > Check for updates**. The app shows what's new and lets you choose when to install. Save any edited documents first; the app won't install an update while you have unsaved changes.
 
-Build: `npm run tauri -- build --debug --no-bundle`.
+Version 0.2.0 has a signed update package, but no Windows publisher signature. The next release is configured to use Joshua Beel's existing Azure signing setup. The remaining setup steps are in [Releases and signing](docs/releases.md).
 
-Test: `npm test` and `cargo test --manifest-path src-tauri/Cargo.toml`.
+## What works
 
-## Implemented
+- **Reading:** open PDFs in tabs, scroll through pages, pan, jump to a page, zoom from 10% to 400%, or fit the page to the window width.
+- **Organizing pages:** select thumbnails or enter a page range, rotate pages, move a page earlier or later, delete pages, and extract a selection into a new PDF.
+- **Saving:** undo and redo page edits, then use **Save a Copy**. Your original stays untouched, and the app asks before closing a document with unsaved edits.
+- **Workspace:** light and dark themes, an All tools panel, and recent files and stars for the current session.
 
-- Tauri 2 / React 18 / TypeScript / CSS Modules desktop app with a native PDFium worker.
-- Current-style global bar, document tabs, left All tools panel, floating quick tools, right navigation and zoom controls, Home, searchable tool catalog, light/dark themes.
-- Open unencrypted PDFs through a native dialog; display native-rendered PNGs; continuous scrolling; hand pan; page jump; zoom 10–400%; fit width; close tabs; in-session file listing and stars.
-- Virtualized page images with cleanup of blob URLs. Native LRU cache has a 512 MiB weighted budget including decoded-pixel estimates. PDFium calls run serially on a dedicated native thread.
-- Ctrl+O, Ctrl+W, Ctrl+Tab, Ctrl+1, Ctrl+2, F4, Shift+F4, Home, End, Page Up, Page Down, H.
-- Organize Pages: real thumbnails loaded near the viewport, Ctrl/Shift multi-selection, page ranges, clockwise/counterclockwise rotation, confirmed page deletion, moving a selected page earlier/later, extraction, undo/redo, and Save a Copy. Ctrl+S saves a new copy; Ctrl+Z / Ctrl+Shift+Z / Ctrl+Y undo/redo.
-- All output writes go through Rust/lopdf. The original PDF is held as a native snapshot. New copies are checked with PDFium, flushed to a temporary file, then atomically published without overwriting existing files. Unsaved edits prompt before tab/window closure.
+Your PDFs stay on your computer. There's no document upload service or telemetry.
 
-## Known gaps and next milestone
+### Handy shortcuts
 
-See [docs/gaps.md](docs/gaps.md). Text/image editing, search, print, OCR, signatures, redaction, and persistent recents remain unimplemented. Save a Copy and the initial page tools work; overwriting originals and incremental saves are not supported. The viewer's right-side page list still uses page numbers; the organizer has image thumbnails. Unsupported signed/encrypted or structurally complex PDFs return explicit errors for relevant edits. No source PDF is modified. No telemetry or document-upload service is included.
+| Action | Shortcut |
+| --- | --- |
+| Open a PDF | Ctrl+O |
+| Save a copy | Ctrl+S |
+| Undo / redo | Ctrl+Z / Ctrl+Shift+Z or Ctrl+Y |
+| Close a tab / switch tabs | Ctrl+W / Ctrl+Tab |
+| Actual size / fit width | Ctrl+1 / Ctrl+2 |
+| Previous / next page | Page Up / Page Down |
+| First / last page | Home / End |
+| Toggle page list / tools panel | F4 / Shift+F4 |
+| Toggle hand tool | H |
 
-Next: complete viewer core (text selection/search, encrypted-file prompt, bookmarks/thumbnails, persisted preferences and recents), collect an authorized real-PDF corpus, benchmark the 98-page scan and 1,500-page abstract, and add packaged-app CI/E2E. Do not claim 60 fps or the source prompt's other performance targets from the synthetic tests.
+## What's still missing
 
-## References
+Text and image editing, text selection and search, printing, OCR, signatures, and redaction aren't ready yet. Unavailable tools are disabled in the interface. Recent files and preferences don't survive a restart yet, and password-protected PDFs aren't supported.
 
-- User-supplied original prompt: [docs/reference-prompt.md](docs/reference-prompt.md), retained as reference content.
-- Current UI baseline: https://helpx.adobe.com/acrobat/desktop/get-started/learn-the-basics/workspace.html
-- PDFium threading constraints: https://docs.rs/pdfium-render/0.9.4/pdfium_render/
-- Architecture decisions: [docs/decisions.md](docs/decisions.md).
+Saving currently means writing a new copy. You can't overwrite an existing file or save changes back to the original. Some page operations are also blocked on signed PDFs, forms, tagged documents, or files with bookmarks and annotations. The [Organize Pages guide](docs/tools/organize-pages.md) explains those limits.
+
+Next up are the reading basics: text selection, search, bookmarks, better page navigation, and remembering your files and settings. There's also more testing to do with real documents. The generated 98-page scan and 1,500-page text file are useful test cases, but they don't tell us how every large PDF will behave. The full list is in [Known gaps](docs/gaps.md).
+
+## Run from source
+
+You'll need Windows, Node.js, Rust with the MSVC toolchain, Visual Studio C++ build tools, and WebView2. If you've just installed Rust, open a new terminal so `cargo` is available.
+
+From the project folder, run these commands in PowerShell:
+
+```powershell
+npm ci
+npm run fixtures
+./scripts/setup-pdfium.ps1
+npm run tauri -- dev
+```
+
+To build a standalone development executable:
+
+```powershell
+npm run tauri -- build --debug --no-bundle
+```
+
+You'll find it at `src-tauri/target/debug/pdf-workstation.exe`. Keep the `resources` folder beside it. This build runs without a development server. On Joshua's development machine, the **PDF Workstation (development)** shortcut opens it.
+
+To run the tests:
+
+```powershell
+npm test
+cargo test --manifest-path src-tauri/Cargo.toml
+```
+
+To build an installer, see [Releases and signing](docs/releases.md). That guide covers the local signing key, GitHub Actions secrets, and publishing updates.
+
+## Under the hood
+
+The app uses Tauri 2, React 18, TypeScript, and CSS Modules. Rust handles PDF work: PDFium renders pages on a dedicated thread, and lopdf writes edited copies. The viewer renders pages near the viewport and uses a native cache with a 512 MiB budget that accounts for both PNG data and estimated decoded pixels.
+
+An open document keeps a snapshot of its original bytes. Before saving, the app checks that PDFium can open the output and that the page count is right, then writes a new file without replacing an existing one.
+
+For more background, see the [architecture notes](docs/decisions.md), [PDFium documentation](https://docs.rs/pdfium-render/0.9.4/pdfium_render/), and [original project brief](docs/reference-prompt.md). The interface follows the [current Acrobat workspace](https://helpx.adobe.com/acrobat/desktop/get-started/learn-the-basics/workspace.html); the older layout in the brief is just a reference.
 
 ## Recent changes
 
-- Release signing uses protected repository Actions secrets and retains publisher and updater verification.
-
-- Published and installed v0.2.0. Downloaded the public installer and verified its SHA-256 against the tested build; checked the live update endpoint from the installed app. Added the tag-triggered GitHub workflow for tested, signed draft releases. GitHub-hosted builds await Joshua's `TAURI_SIGNING_PRIVATE_KEY` Actions secret; local signed releases already work. A newer-version replacement/relaunch has not yet been exercised end to end.
-
-- Matched update-manifest URLs to GitHub's uploaded asset names, which replace spaces with periods. Verified the uploaded installer digest matches the locally tested installer before publication.
-
-- Added the 0.2.0 per-user Windows NSIS installer, bundled PDF engine, signed GitHub-release updater with release notes/progress and unsaved-document protection, and release-manifest validation. Signing keys remain outside Git. Windows Authenticode signing is not configured. Eleven frontend/release tests and seven native tests pass; the installer exits successfully and the installed app renders the bundled sample PDF.
-
-- Added the first Windows viewer foundation and current-style workspace, native worker/cache, synthetic fixtures, and viewport/rendering tests. Rust 1.98.1 was installed on the development machine. Detailed verification and remaining acceptance conditions are recorded in [docs/phase-0-status.md](docs/phase-0-status.md).
-- Built the standalone development executable and added a desktop shortcut. Verified native sample rendering and next-page navigation; the file picker opens, but automated file selection remains unverified because of desktop automation limitations.
-- Excluded Rust outputs and fixture files from Vite's watcher after Windows reported a locked compiled DLL. Repository commits use Joshua Beel's verified GitHub account with its GitHub no-reply address. Remote: https://github.com/Joshua-Beel/F-CK-Adobe, branch `master`.
-- Added Organize Pages and native safe-copy output with undo/redo and close guards. Seven Rust tests and five frontend tests pass, including pixel-identical previews/reopened rotated copies for every valid fixture and byte-for-byte preservation of originals. Attached Open/Save dialogs to the main window. Details: [docs/tools/organize-pages.md](docs/tools/organize-pages.md).
-- Verified the standalone desktop organizer, rendered thumbnails, page rotation, native Save dialog, and successful copy export with the unsaved indicator cleared. The generated UI-test copy remains in ignored `artifacts/`.
+- Rewrote this README around installing and using the app, with clearer setup instructions and less development-log clutter.
+- Connected future release builds to the existing Azure publisher profile. The build checks for valid, timestamped Joshua Beel signatures before preparing an update. Repository credentials still need to be configured; the published 0.2.0 installer hasn't changed.
+- Released the 0.2.0 installer and GitHub updater. Verified installation, PDF rendering, the live update check, and the downloaded installer's hash. Fixed update links to match GitHub's asset filenames. A full upgrade to a newer version still needs an end-to-end test. Details are in the [release guide](docs/releases.md).
+- Added Organize Pages, undo/redo, Save a Copy, and prompts for unsaved edits. Tests compare rotated previews with reopened saved files and check that originals remain unchanged. The latest recorded checks passed all 11 frontend/release tests and 7 Rust tests; desktop rotation and copy export were also checked. See the [tool guide](docs/tools/organize-pages.md).
+- Built the initial viewer, native PDF worker, page cache, and test fixtures. Added a standalone development build and shortcut, and fixed a Windows file-lock issue in the development watcher. Earlier checks are recorded in [Viewer foundation](docs/phase-0-status.md).
