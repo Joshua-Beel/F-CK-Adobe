@@ -15,6 +15,7 @@ Version 0.2.0 has a signed update package, but no Windows publisher signature. T
 ## What works
 
 - **Reading:** open PDFs in tabs, scroll through pages, pan, jump to a page, zoom from 10% to 400%, or fit the page to the window width.
+- **Page text (source build):** open the current page's embedded text, select any portion or all of it, and copy with Ctrl+C. Reading order depends on the PDF; scanned images still need OCR.
 - **Bookmarks (source build):** browse up to 1,000 embedded bookmarks with nested indentation and jump to supported internal page destinations. Unsupported actions stay disabled; destination zoom/position and bookmark editing are not implemented.
 - **Search (source build):** Ctrl+F searches embedded PDF text, with optional case matching, selectable excerpts, and links to matching pages. Search follows page edits; scans need OCR first. Results show one excerpt per matching page, up to 500 pages.
 - **Organizing pages:** select thumbnails or enter a page range, rotate pages, move a page earlier or later, delete pages, and extract a selection into a new PDF.
@@ -44,7 +45,7 @@ Text and image editing, text selection directly on PDF pages, printing, OCR, sig
 
 Saving currently means writing a new copy. You can't overwrite an existing file or save changes back to the original. Some page operations are also blocked on signed PDFs, forms, tagged documents, or files with bookmarks and annotations. The [Organize Pages guide](docs/tools/organize-pages.md) explains those limits.
 
-Next up are the remaining reading basics: text selection on pages, search highlighting, bookmarks, better page navigation, and remembering your files and settings. There's also more testing to do with real documents. The generated 98-page scan and 1,500-page text file are useful test cases, but they don't tell us how every large PDF will behave. The full list is in [Known gaps](docs/gaps.md).
+Next up are the remaining reading basics: text selection on pages, search highlighting, better page navigation, and remembering recent files. There's also more testing to do with real documents. The generated 98-page scan and 1,500-page text file are useful test cases, but they don't tell us how every large PDF will behave. The full list is in [Known gaps](docs/gaps.md).
 
 ## Run from source
 
@@ -86,6 +87,7 @@ For more background, see the [architecture notes](docs/decisions.md), [PDFium do
 
 ## Recent changes
 
+- Added a page-text dialog for selecting embedded text and copying with Ctrl+C. It distinguishes empty pages from extraction errors and displays PDF text without interpreting it as HTML. All 23 frontend/release tests and the production build pass. Native clipboard interaction is still unverified; this feature is newer than the 0.2.4 draft and does not provide selection directly over rendered pages.
 - Adversarial bookmark tests exposed repeated PDFium initialization and interference between parallel native workers: tests found inconsistent bookmark counts, preview mismatches, and startup failures. All service handles now share one process-wide worker, serializing initialization and PDF operations. Added cases for cyclic outlines, 1,005 bookmarks, empty outlines, closed documents, and internal GoTo actions; bookmark results remain capped at 1,000. This is an incremental hardening pass, not completion of the requested full review.
 - Added a native bookmark pane with internal page navigation, nested entries, an explicit 1,000-entry cap, and disabled unsupported destinations. All 21 frontend/release tests, 9 native tests, and the production build pass, including nested bookmark extraction, external-action rejection, stale requests, and UI navigation. Native desktop interaction remains unverified. This change is newer than the 0.2.4 draft.
 - The source build now saves reading preferences locally: theme, zoom, fit mode, pan mode, and panel visibility. Invalid saved values fall back to defaults, and unavailable storage shows a session-only notice. All 19 frontend/release tests and the production build pass, including an app remount test and storage failure cases. These changes are newer than the 0.2.4 draft; native restart verification is still pending.
