@@ -37,4 +37,6 @@ The first 0.2.0 installer establishes the updater. Earlier development executabl
 
 ## Verification
 
+The 0.2.4 draft passed GitHub Actions run 35184652612. Its downloaded installer and extracted application both pass the local timestamped Joshua Beel signature check. Installer SHA-256: `cf97903897c10f0f02c31bc61f9ac9d929a9c5abdc116dc200cce01a4cd68c7a`, matching the GitHub asset digest. All three release assets are present. Installation, search UI behavior, and the end-to-end upgrade remain pending because desktop capture/input is unreliable; do not treat the draft as a verified published release.
+
 v0.2.0 was installed successfully, and its bundled sample rendered in the installed application. The live GitHub manifest was fetched and its installer downloaded; SHA-256 matched the locally tested build (`17788cb82bb42deac35ea197a385a9bafc8cd331422446a2b834e115a90c4d2e`). The installed updater checked the public endpoint and correctly reported no newer version. Eleven frontend/release tests and seven native tests pass, including unsaved-edit blocking and mocked network/signature failures. Those tests also pass after the 0.2.1 version change. A full newer-version replacement/relaunch and the GitHub-hosted signing workflow still need verification.

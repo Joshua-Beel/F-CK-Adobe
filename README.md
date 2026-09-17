@@ -10,7 +10,7 @@ Download the Windows setup file from the [latest release](https://github.com/Jos
 
 For updates, use **Menu > Check for updates**. The app shows what's new and lets you choose when to install. Save any edited documents first; the app won't install an update while you have unsaved changes.
 
-Version 0.2.0 has a signed update package, but no Windows publisher signature. The next release is configured to use Joshua Beel's existing Azure signing setup, and the required GitHub Actions secrets are saved. A signed release build still needs to be verified. See [Releases and signing](docs/releases.md).
+Version 0.2.0 has a signed update package, but no Windows publisher signature. The 0.2.4 draft installer and its packaged application both have verified, timestamped Joshua Beel publisher signatures. Installation and upgrade testing remain pending, so the draft has not been published. See [Releases and signing](docs/releases.md).
 
 ## What works
 
@@ -85,6 +85,7 @@ For more background, see the [architecture notes](docs/decisions.md), [PDFium do
 
 ## Recent changes
 
+- The 0.2.4 release workflow passed all tests, signed the installer, verified its packaged application, and created a draft release. Downloaded assets were independently checked locally: both publisher signatures are valid and timestamped; installer SHA-256 is `cf97903897c10f0f02c31bc61f9ac9d929a9c5abdc116dc200cce01a4cd68c7a`, matching GitHub. Desktop automation still returns unreliable window captures, so installation/search UI checks and the full upgrade test remain unverified. The release stays a draft.
 - The 0.2.3 signature check found Tauri's restored unsigned build file. CI now verifies the installer, extracts its packaged application using 7-Zip, and verifies that application's timestamped publisher signature. Prepared 0.2.4 for this check. Publishing and the upgrade test are still pending.
 - Final completion requires a deep code review and adversarial tests: malformed PDFs, preservation of original files, undo/redo branches, stale search results, resource limits, crash behavior, and interrupted or invalid updates. Reproducible failures must be fixed with regression tests; unverified cases and remaining risks must be reported.
 - Azure signing succeeded for 0.2.2, including the installer and updater signature, but CI stopped when the Windows PowerShell child process could not load its signature-verification module. Changed CI to call the build script directly in PowerShell 7 and prepared 0.2.3. Full signature verification, publishing, and the upgrade test remain pending.
