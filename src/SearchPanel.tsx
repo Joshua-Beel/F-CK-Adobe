@@ -1,10 +1,12 @@
 import { useEffect, useRef, useState } from 'react';
 import { pageText } from './bridge';
 import type { DocumentInfo } from './model';
+import { literalMatches, type SearchHighlightQuery } from './searchHighlights';
 import s from './SearchPanel.module.css';
 
 type Hit = { page: number; before: string; match: string; after: string };
-export default function SearchPanel({ document, go, close }: { document: DocumentInfo; go: (page: number) => void; close: () => void }) {
+export type ActiveSearch = SearchHighlightQuery & { documentId: number; revision: number; pages: number[] };
+export default function SearchPanel({ document, go, close, onHighlights }: { document: DocumentInfo; go: (page: number) => void; close: () => void; onHighlights?: (search: ActiveSearch | null) => void }) {
   const [query, setQuery] = useState('');
   const [matchCase, setMatchCase] = useState(false);
   const [hits, setHits] = useState<Hit[]>([]);
@@ -13,7 +15,7 @@ export default function SearchPanel({ document, go, close }: { document: Documen
   const [running, setRunning] = useState(false);
   const [error, setError] = useState('');
   const generation = useRef(0);
-  useEffect(() => () => { generation.current++; }, []);
+  useEffect(() => () => { generation.current++; onHighlights?.(null); }, [onHighlights]);
   const cancel = () => { generation.current++; setRunning(false); setStatus('Search stopped. Results below may be incomplete.'); };
   const navigate = (index: number) => { if (hits[index]) { setSelected(index); go(hits[index].page); } };
   const search = async () => {
@@ -21,21 +23,21 @@ export default function SearchPanel({ document, go, close }: { document: Documen
     if (!needle) return;
     const request = ++generation.current;
     setHits([]); setSelected(-1); setError(''); setRunning(true);
+    onHighlights?.(null);
     const found: Hit[] = [];
-    const pattern = needle.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    const expression = new RegExp(pattern, matchCase ? 'u' : 'iu');
     try {
       for (let page = 0; page < document.pages.length; page++) {
         if (request !== generation.current) return;
         setStatus(`Searching page ${page + 1} of ${document.pages.length}…`);
         const text = await pageText(document.id, page, document.revision);
         if (request !== generation.current) return;
-        const match = expression.exec(text);
+        const match = literalMatches(text, needle, matchCase, 1)[0];
         if (match) {
-          const start = Math.max(0, match.index - 70);
-          const end = Math.min(text.length, match.index + match[0].length + 110);
-          found.push({ page, before: `${start ? '…' : ''}${text.slice(start, match.index)}`, match: match[0], after: `${text.slice(match.index + match[0].length, end)}${end < text.length ? '…' : ''}` });
+          const start = Math.max(0, match.start - 70);
+          const end = Math.min(text.length, match.end + 110);
+          found.push({ page, before: `${start ? '…' : ''}${text.slice(start, match.start)}`, match: text.slice(match.start, match.end), after: `${text.slice(match.end, end)}${end < text.length ? '…' : ''}` });
           setHits([...found]);
+          onHighlights?.({ documentId: document.id, revision: document.revision, query: needle, matchCase, pages: found.map(hit => hit.page) });
         }
         if (found.length === 500) { setStatus('Showing the first 500 matching pages. Narrow your search to see fewer results.'); return; }
       }
@@ -47,8 +49,8 @@ export default function SearchPanel({ document, go, close }: { document: Documen
   return <aside className={s.panel} aria-label="Find in document">
     <div className={s.heading}><h2>Find text</h2><button aria-label="Close search" onClick={close}>×</button></div>
     <form onSubmit={event => { event.preventDefault(); void search(); }}>
-      <input autoFocus aria-label="Find in document" value={query} maxLength={500} onChange={event => { cancel(); setQuery(event.target.value); setHits([]); setSelected(-1); setError(''); setStatus('Press Enter to search.'); }} />
-      <label><input type="checkbox" checked={matchCase} onChange={event => { cancel(); setMatchCase(event.target.checked); setHits([]); setSelected(-1); setError(''); setStatus('Press Enter to search.'); }} /> Match case</label>
+      <input autoFocus aria-label="Find in document" value={query} maxLength={500} onChange={event => { cancel(); onHighlights?.(null); setQuery(event.target.value); setHits([]); setSelected(-1); setError(''); setStatus('Press Enter to search.'); }} />
+      <label><input type="checkbox" checked={matchCase} onChange={event => { cancel(); onHighlights?.(null); setMatchCase(event.target.checked); setHits([]); setSelected(-1); setError(''); setStatus('Press Enter to search.'); }} /> Match case</label>
       <div className={s.actions}><button type="submit" disabled={!query.trim()}>Search</button>{running && <button type="button" onClick={cancel}>Stop</button>}</div>
     </form>
     <p role="status">{status}</p>

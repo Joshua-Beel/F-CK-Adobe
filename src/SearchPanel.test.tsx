@@ -8,12 +8,12 @@ vi.mock('./bridge', () => ({ pageText: vi.fn() }));
 const document: DocumentInfo = { id: 1, name: 'test.pdf', path: 'test.pdf', pages: [{ width: 612, height: 792 }, { width: 612, height: 792 }], revision: 3, dirty: false, can_undo: false, can_redo: false };
 describe('document search', () => {
   beforeEach(() => vi.clearAllMocks());
-  async function mount(query = 'needle') {
+  async function mount(query = 'needle', onHighlights = vi.fn()) {
     let ui!: ReactTestRenderer;
     const go = vi.fn();
-    await act(async () => { ui = create(<SearchPanel document={document} go={go} close={vi.fn()} />); });
+    await act(async () => { ui = create(<SearchPanel document={document} go={go} close={vi.fn()} onHighlights={onHighlights} />); });
     act(() => ui.root.findByProps({ 'aria-label': 'Find in document', maxLength: 500 }).props.onChange({ target: { value: query } }));
-    return { ui, go };
+    return { ui, go, onHighlights };
   }
   const submit = (ui: ReactTestRenderer) => ui.root.findByType('form').props.onSubmit({ preventDefault: vi.fn() });
   it('finds literal case-insensitive text and navigates to the matching current page', async () => {
@@ -73,12 +73,22 @@ describe('document search', () => {
   it('keeps partial results and ignores a pending extraction after Stop', async () => {
     let resolve!: (text: string) => void;
     vi.mocked(pageText).mockResolvedValueOnce('needle first').mockImplementationOnce(() => new Promise(done => { resolve = done; }));
-    const { ui } = await mount();
+    const { ui, onHighlights } = await mount();
     await act(async () => submit(ui));
     act(() => ui.root.findAllByType('button').find(button => button.children.join('') === 'Stop')!.props.onClick());
     await act(async () => resolve('needle second'));
     expect(ui.root.findAllByType('mark')).toHaveLength(1);
     expect(JSON.stringify(ui.toJSON())).toContain('Results below may be incomplete');
+    expect(onHighlights.mock.calls.at(-1)).toEqual([{ documentId: 1, revision: 3, query: 'needle', matchCase: false, pages: [0] }]);
+    act(() => ui.unmount());
+  });
+  it('publishes matching pages then clears overlays for a changed query', async () => {
+    vi.mocked(pageText).mockResolvedValueOnce('needle').mockResolvedValueOnce('nothing');
+    const { ui, onHighlights } = await mount();
+    await act(async () => { submit(ui); });
+    expect(onHighlights).toHaveBeenCalledWith({ documentId: 1, revision: 3, query: 'needle', matchCase: false, pages: [0] });
+    act(() => ui.root.findByProps({ maxLength: 500 }).props.onChange({ target: { value: 'changed' } }));
+    expect(onHighlights.mock.calls.at(-1)).toEqual([null]);
     act(() => ui.unmount());
   });
   it('stops extraction after 500 matching pages and allows navigation through the capped results', async () => {

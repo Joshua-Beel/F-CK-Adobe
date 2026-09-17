@@ -45,6 +45,45 @@ describe('on-page text layer', () => {
     act(() => ui.unmount());
   });
 
+  it('requests geometry for search in pan mode, highlights cross-glyph matches, and leaves text selection disabled', async () => {
+    vi.mocked(pageTextGeometry).mockResolvedValue(geometry({ characters: [
+      { text: 'A', bounds: { x: .1, y: .2, width: .05, height: .04 }, angle: 0 },
+      { text: ' ', bounds: null, angle: 0 },
+      { text: 'B', bounds: { x: .2, y: .2, width: .05, height: .04 }, angle: 0 }
+    ] }));
+    const ui = await mount({ enabled: false, search: { query: 'A B', matchCase: true } });
+    const highlights = ui.root.findAllByProps({ 'data-testid': 'search-highlight' });
+    expect(pageTextGeometry).toHaveBeenCalledWith(7, 2, 4);
+    expect(highlights).toHaveLength(2);
+    expect(highlights[0].props.style.left).toBe(40);
+    expect(highlights[0].props.style.top).toBe(100);
+    expect(highlights[0].props.style.width).toBeCloseTo(20);
+    expect(highlights[0].props.style.height).toBeCloseTo(20);
+    expect(ui.root.findAllByProps({ 'data-testid': 'text-layer' })).toHaveLength(0);
+    act(() => ui.unmount());
+  });
+
+  it('clears stale highlight boxes when the current query changes', async () => {
+    vi.mocked(pageTextGeometry).mockResolvedValue(geometry({ characters: [{ text: 'needle', bounds: { x: .1, y: .2, width: .1, height: .04 }, angle: 0 }] }));
+    const ui = await mount({ enabled: false, search: { query: 'needle', matchCase: false } });
+    expect(ui.root.findAllByProps({ 'data-testid': 'search-highlight' })).toHaveLength(1);
+    await act(async () => { ui.update(<TextLayer id={7} page={2} revision={4} enabled={false} imageReady pageWidth={400} pageHeight={500} search={{ query: 'changed', matchCase: false }} />); });
+    expect(ui.root.findAllByProps({ 'data-testid': 'search-highlight' })).toHaveLength(0);
+    expect(JSON.stringify(ui.toJSON())).toContain('unavailable for this match');
+    act(() => ui.unmount());
+  });
+
+  it('uses an honest fallback when a matching page cannot map a result to a positioned glyph', async () => {
+    vi.mocked(pageTextGeometry).mockResolvedValue(geometry({ characters: [
+      { text: 'needle', bounds: null, angle: 0 },
+      { text: 'elsewhere', bounds: { x: .1, y: .2, width: .1, height: .04 }, angle: 0 }
+    ] }));
+    const ui = await mount({ enabled: false, search: { query: 'needle', matchCase: false } });
+    expect(ui.root.findAllByProps({ 'data-testid': 'search-highlight' })).toHaveLength(0);
+    expect(JSON.stringify(ui.toJSON())).toContain('Use Find results or Read and copy page text instead');
+    act(() => ui.unmount());
+  });
+
   it('ignores stale geometry after a page changes', async () => {
     let resolveOld!: (value: PageTextGeometry) => void;
     const old = new Promise<PageTextGeometry>(resolve => { resolveOld = resolve; });

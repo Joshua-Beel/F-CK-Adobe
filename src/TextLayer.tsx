@@ -1,5 +1,6 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { pageTextGeometry, type PageTextGeometry } from './bridge';
+import { matchedCharacterIndexes, type SearchHighlightQuery } from './searchHighlights';
 import styles from './TextLayer.module.css';
 
 const MAX_GLYPHS = 20_000;
@@ -53,11 +54,18 @@ function Glyph({ text, bounds, angle, pageWidth, pageHeight }: { text: string; b
   return <span ref={element} className={styles.glyph} data-angle={angle} style={style}>{text}</span>;
 }
 
-export default function TextLayer({ id, page, revision, imageReady, enabled, pageWidth, pageHeight }: { id: number; page: number; revision: number; imageReady: boolean; enabled: boolean; pageWidth: number; pageHeight: number }) {
+function SearchHighlights({ geometry, indexes, pageWidth, pageHeight }: { geometry: PageTextGeometry; indexes: Set<number>; pageWidth: number; pageHeight: number }) {
+  return <div className={styles.highlightLayer} aria-hidden="true" data-testid="search-highlights">
+    {geometry.characters.map((character, index) => character.bounds && indexes.has(index) ? <span key={index} className={styles.highlight} data-testid="search-highlight" style={targetBox(character.bounds, pageWidth, pageHeight)} /> : null)}
+  </div>;
+}
+
+export default function TextLayer({ id, page, revision, imageReady, enabled, pageWidth, pageHeight, search }: { id: number; page: number; revision: number; imageReady: boolean; enabled: boolean; pageWidth: number; pageHeight: number; search?: SearchHighlightQuery }) {
   const request = `${id}:${page}:${revision}`;
   const [state, setState] = useState<State>({ request: '', kind: 'loading' });
+  const needsGeometry = enabled || Boolean(search);
   useEffect(() => {
-    if (!enabled || !imageReady) return;
+    if (!needsGeometry || !imageReady) return;
     let disposed = false;
     setState({ request, kind: 'loading' });
     pageTextGeometry(id, page, revision).then(geometry => {
@@ -66,13 +74,20 @@ export default function TextLayer({ id, page, revision, imageReady, enabled, pag
       setState(problem ? { request, kind: 'fallback', message: problem } : { request, kind: 'ready', geometry });
     }).catch(() => { if (!disposed) setState({ request, kind: 'fallback', message: 'Positioned text is unavailable for this page.' }); });
     return () => { disposed = true; };
-  }, [enabled, id, imageReady, page, request, revision]);
+  }, [id, imageReady, needsGeometry, page, request, revision]);
 
-  if (!enabled || !imageReady || state.request !== request || state.kind === 'loading') return null;
-  if (state.kind === 'fallback') return <div className={styles.fallback} role="status">On-page text selection is unavailable. {state.message} Use Read and copy page text instead.</div>;
-  return <div className={styles.layer} aria-hidden="true" data-testid="text-layer">
-    {state.geometry.characters.map((character, index) => character.bounds
-      ? <Glyph key={index} text={character.text} bounds={character.bounds} angle={character.angle} pageWidth={pageWidth} pageHeight={pageHeight} />
-      : <span className={styles.unpositioned} key={index}>{character.text}</span>)}
-  </div>;
+  if (!needsGeometry || !imageReady || state.request !== request || state.kind === 'loading') return null;
+  if (state.kind === 'fallback') return <div className={styles.fallback} role="status">{search ? 'On-page search highlights are unavailable.' : 'On-page text selection is unavailable.'} {state.message} Use Read and copy page text instead.</div>;
+  const highlightIndexes = search ? matchedCharacterIndexes(state.geometry.characters, search) : null;
+  const hasPositionedHighlight = highlightIndexes ? [...highlightIndexes].some(index => Boolean(state.geometry.characters[index].bounds)) : false;
+  return <>
+    {search && (hasPositionedHighlight
+      ? <SearchHighlights geometry={state.geometry} indexes={highlightIndexes!} pageWidth={pageWidth} pageHeight={pageHeight} />
+      : <div className={styles.fallback} role="status">On-page search highlights are unavailable for this match. Use Find results or Read and copy page text instead.</div>)}
+    {enabled && <div className={styles.layer} aria-hidden="true" data-testid="text-layer">
+      {state.geometry.characters.map((character, index) => character.bounds
+        ? <Glyph key={index} text={character.text} bounds={character.bounds} angle={character.angle} pageWidth={pageWidth} pageHeight={pageHeight} />
+        : <span className={styles.unpositioned} key={index}>{character.text}</span>)}
+    </div>}
+  </>;
 }

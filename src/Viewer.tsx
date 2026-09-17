@@ -2,9 +2,10 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { renderPage } from './bridge';
 import { pageOffsets, visiblePages, type DocumentInfo } from './model';
 import TextLayer from './TextLayer';
+import type { ActiveSearch } from './SearchPanel';
 import styles from './Workspace.module.css';
 
-function Page({ id, index, width, height, scale, revision, selectable }: { id: number; index: number; width: number; height: number; scale: number; revision: number; selectable: boolean }) {
+function Page({ id, index, width, height, scale, revision, selectable, search }: { id: number; index: number; width: number; height: number; scale: number; revision: number; selectable: boolean; search?: ActiveSearch }) {
   const [url, setUrl] = useState('');
   const [error, setError] = useState('');
   const [imageReady, setImageReady] = useState(false);
@@ -21,11 +22,11 @@ function Page({ id, index, width, height, scale, revision, selectable }: { id: n
     return () => { disposed = true; clearTimeout(timer); if (objectUrl) URL.revokeObjectURL(objectUrl); };
   }, [id, index, width, scale, revision]);
   return <div className={styles.paper} style={{ width: width * scale, height: height * scale }} aria-label={`Page ${index + 1}`}>
-    {url ? <><img src={url} alt={`Page ${index + 1}`} draggable={false} onLoad={() => setImageReady(true)} /><TextLayer id={id} page={index} revision={revision} enabled={selectable} imageReady={imageReady} pageWidth={width * scale} pageHeight={height * scale} /></> : <div className={styles.pageLoading}>{error || `Rendering page ${index + 1}…`}</div>}
+    {url ? <><img src={url} alt={`Page ${index + 1}`} draggable={false} onLoad={() => setImageReady(true)} /><TextLayer id={id} page={index} revision={revision} enabled={selectable} imageReady={imageReady} pageWidth={width * scale} pageHeight={height * scale} search={search} /></> : <div className={styles.pageLoading}>{error || `Rendering page ${index + 1}…`}</div>}
   </div>;
 }
 
-export default function Viewer({ document, zoom, fit, target, onPage, hand }: { document: DocumentInfo; zoom: number; fit: boolean; target: { page: number; token: number }; onPage: (page: number) => void; hand: boolean }) {
+export default function Viewer({ document, zoom, fit, target, onPage, hand, search }: { document: DocumentInfo; zoom: number; fit: boolean; target: { page: number; token: number }; onPage: (page: number) => void; hand: boolean; search?: ActiveSearch | null }) {
   const viewport = useRef<HTMLDivElement>(null);
   const [bounds, setBounds] = useState({ width: 900, height: 800 });
   const [top, setTop] = useState(0);
@@ -69,7 +70,7 @@ export default function Viewer({ document, zoom, fit, target, onPage, hand }: { 
   }} onPointerUp={() => { drag.current = null; }} onLostPointerCapture={() => { drag.current = null; }}>
     <div className={styles.pageStack} style={{ height, minWidth: Math.max(...document.pages.map(p => p.width)) * scale + 144 }}>
       {visible.map(index => <div key={`${document.id}-${index}`} className={styles.pagePosition} style={{ top: offsets[index] }}>
-        <Page id={document.id} index={index} {...document.pages[index]} scale={scale} revision={document.revision} selectable={!hand} />
+        <Page id={document.id} index={index} {...document.pages[index]} scale={scale} revision={document.revision} selectable={!hand} search={search?.documentId === document.id && search.revision === document.revision && search.pages.includes(index) ? search : undefined} />
       </div>)}
     </div>
   </div>;
