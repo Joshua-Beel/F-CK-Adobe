@@ -1,6 +1,6 @@
 use crate::editor::EditSession;
 use lopdf::{content::{Content, Operation}, dictionary, Dictionary, Document, LoadOptions, Object, ObjectId, Stream};
-use serde::{Deserialize, Serialize};
+use serde::{ser::SerializeMap, Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 
 pub const MAX_FIELDS: usize = 256;
@@ -21,6 +21,7 @@ pub struct FormFields {
 mod tests {
     use super::*;
     const FIXTURE: &[u8] = include_bytes!("../tests/fixtures/reportlab-plain-fields.pdf");
+    const MIXED: &[u8] = include_bytes!("../tests/fixtures/reportlab-mixed-fields.pdf");
     fn session(bytes: Vec<u8>) -> EditSession { EditSession::new(bytes, 1) }
     fn fixture() -> EditSession { session(FIXTURE.to_vec()) }
     fn mutated(change: impl FnOnce(&mut Document)) -> EditSession {
@@ -31,11 +32,80 @@ mod tests {
         dict(document, document.catalog().unwrap().get(b"AcroForm").unwrap()).unwrap().get(b"Fields").unwrap().as_array().unwrap().iter().map(|value| value.as_reference().unwrap()).collect()
     }
     #[test]
+    fn checkboxes_tagged_wire_shape_false_and_wrong_kind_are_explicit() {
+        let parsed=FormDocument::parse(&session(MIXED.to_vec())).unwrap();
+        let wire=serde_json::to_value(FormDocument::query(&session(MIXED.to_vec()),17)).unwrap();
+        assert_eq!(wire["documentId"],17); assert_eq!(wire["fields"][0]["kind"],"checkbox");assert_eq!(wire["fields"][0]["checked"],false);
+        assert!(wire["fields"][0].get("value").is_none());assert!(wire["fields"][0].get("maxLength").is_none());assert!(wire["fields"][0].get("fieldId").is_some());
+        assert_eq!(wire["fields"][1]["kind"],"text");assert_eq!(wire["fields"][1]["value"],"Original");assert_eq!(wire["fields"][1]["maxLength"],40);assert!(wire["fields"][1].get("checked").is_none());
+        let id=parsed.fields[0].dto.field_id.clone();
+        let false_patch:FieldValue=serde_json::from_value(serde_json::json!({"fieldId":id,"kind":"checkbox","checked":false})).unwrap();
+        assert!(matches!(false_patch,FieldValue::Checkbox {checked:false,..}));
+        for bad in [serde_json::json!({"fieldId":id,"kind":"checkbox","checked":false,"value":""}),serde_json::json!({"fieldId":id,"kind":"checkbox","checked":"false"}),serde_json::json!({"field_id":id,"kind":"checkbox","checked":true}),serde_json::json!({"fieldId":id,"value":"new"}),serde_json::json!({"fieldId":id,"kind":"text","value":"new","checked":true})] {assert!(serde_json::from_value::<FieldValue>(bad).is_err());}
+        assert!(parsed.prepare(&[FieldValue::Text {field_id:id,value:"new".into()}]).is_err());
+    }
+    #[test]
+    fn checkboxes_custom_on_state_toggle_clear_preserve_every_appearance_byte_and_default() {
+        let mut doc=Document::load_mem(MIXED).unwrap();let id=field_ids(&doc)[0];
+        let mut ap=dict(&doc,doc.get_dictionary(id).unwrap().get(b"AP").unwrap()).unwrap().clone();
+        for (_,states) in &mut ap {let states=states.as_dict_mut().unwrap();let on=states.remove(b"Yes").unwrap();states.set("Approved",on);}
+        doc.get_dictionary_mut(id).unwrap().set("AP",ap);doc.get_dictionary_mut(id).unwrap().set("DV",Object::Name(b"Approved".to_vec()));
+        let mut bytes=Vec::new();doc.save_to(&mut bytes).unwrap();let source=session(bytes.clone());
+        let parsed=FormDocument::parse(&source).unwrap();let patches=vec![FieldValue::Checkbox {field_id:parsed.fields[0].dto.field_id.clone(),checked:true},FieldValue::Text {field_id:parsed.fields[1].dto.field_id.clone(),value:"Mixed copy".into()}];
+        let (filled,fields)=parsed.prepare(&patches).unwrap();assert_eq!(fields[0].checked,Some(true));
+        let filled=session(filled);let on=FormDocument::parse(&filled).unwrap();let widget=on.document.get_dictionary(id).unwrap();assert_eq!(widget.get(b"V").unwrap().as_name().unwrap(),b"Approved");assert_eq!(widget.get(b"AS").unwrap(),widget.get(b"V").unwrap());
+        for key in [b"AP".as_slice(),b"DV",b"MK",b"BS",b"H",b"Rect",b"F",b"Ff"] {assert_eq!(widget.get(key).ok(),doc.get_dictionary(id).unwrap().get(key).ok());}
+        let original_ap=dict(&doc,doc.get_dictionary(id).unwrap().get(b"AP").unwrap()).unwrap();
+        for (_,states) in original_ap {for (_,reference) in states.as_dict().unwrap() {let stream=reference.as_reference().unwrap();assert_eq!(doc.get_object(stream).unwrap(),on.document.get_object(stream).unwrap(),"Raw compressed stream, resources and dictionary must remain byte-identical");}}
+        let text_id=on.fields[1].dto.field_id.clone();assert!(FormDocument::parse(&filled).unwrap().prepare(&[FieldValue::Checkbox {field_id:text_id,checked:true}]).is_err());
+        let (cleared,fields)=on.prepare(&[FieldValue::Checkbox {field_id:fields[0].field_id.clone(),checked:false}]).unwrap();assert_eq!(fields[0].checked,Some(false));
+        let off=FormDocument::parse(&session(cleared)).unwrap();let widget=off.document.get_dictionary(id).unwrap();assert_eq!(widget.get(b"V").unwrap().as_name().unwrap(),b"Off");assert_eq!(widget.get(b"AS").unwrap(),widget.get(b"V").unwrap());assert_eq!(widget.get(b"DV").unwrap().as_name().unwrap(),b"Approved");assert_eq!(source.source,bytes);
+    }
+    #[test]
+    fn checkboxes_refuse_ambiguous_states_unsafe_artwork_flags_and_hierarchies() {
+        for kind in 0..22 {
+            let mut doc=Document::load_mem(MIXED).unwrap();let id=field_ids(&doc)[0];
+            let normal=dict(&doc,doc.get_dictionary(id).unwrap().get(b"AP").unwrap()).unwrap().get(b"N").unwrap().as_dict().unwrap().clone();let on=normal.get(b"Yes").unwrap().as_reference().unwrap();
+            match kind {
+                0=>{doc.get_dictionary_mut(id).unwrap().set("AS",Object::Name(b"Yes".to_vec()));},
+                1=>{doc.get_dictionary_mut(id).unwrap().remove(b"V");},
+                2=>{doc.get_dictionary_mut(id).unwrap().set("DV",Object::Name(b"Unknown".to_vec()));},
+                3=>{let ap=doc.get_dictionary_mut(id).unwrap().get_mut(b"AP").unwrap().as_dict_mut().unwrap();ap.get_mut(b"N").unwrap().as_dict_mut().unwrap().set("Other",on);},
+                4=>{let ap=doc.get_dictionary_mut(id).unwrap().get_mut(b"AP").unwrap().as_dict_mut().unwrap();let states=ap.get_mut(b"N").unwrap().as_dict_mut().unwrap();states.set("Yes",states.get(b"Off").unwrap().clone());},
+                5=>{doc.get_dictionary_mut(id).unwrap().set("Ff",32768);},
+                6=>{doc.get_dictionary_mut(id).unwrap().set("Ff",65536);},
+                7=>{doc.get_dictionary_mut(id).unwrap().set("F",6);},
+                8=>{doc.get_dictionary_mut(id).unwrap().set("Parent",id);},
+                9=>{doc.get_dictionary_mut(id).unwrap().set("Kids",vec![Object::Reference(id)]);},
+                10=>{doc.get_object_mut(on).unwrap().as_stream_mut().unwrap().dict.set("Resources",dictionary! {"Font"=>dictionary!{}});},
+                11=>{doc.get_object_mut(on).unwrap().as_stream_mut().unwrap().dict.set("Matrix",real(&[1.0,0.0,0.0,1.0,1.0,0.0]));},
+                12=>{let stream=doc.get_object_mut(on).unwrap().as_stream_mut().unwrap();stream.dict.remove(b"Filter");stream.set_content(b"q 1 0 0 1 0 0 cm Q".to_vec());},
+                13=>{let stream=doc.get_object_mut(on).unwrap().as_stream_mut().unwrap();stream.dict.remove(b"Filter");stream.set_content(b"q q q q q q q q q 0 0 20 20 re f Q Q Q Q Q Q Q Q Q".to_vec());},
+                14=>{let stream=doc.get_object_mut(on).unwrap().as_stream_mut().unwrap();stream.dict.remove(b"Filter");stream.set_content("0 g ".repeat(257).into_bytes());},
+                15=>{let stream=doc.get_object_mut(on).unwrap().as_stream_mut().unwrap();stream.dict.remove(b"Filter");stream.set_content(b"10001 w 0 0 20 20 re f".to_vec());},
+                16=>{let stream=doc.get_object_mut(on).unwrap().as_stream_mut().unwrap();stream.dict.remove(b"Filter");stream.set_content(b"Q 0 0 20 20 re f".to_vec());},
+                17=>{let stream=doc.get_object_mut(on).unwrap().as_stream_mut().unwrap();stream.dict.remove(b"Filter");stream.set_content(b"0 0 m 100 0 l h f".to_vec());},
+                18=>{let ap=doc.get_dictionary_mut(id).unwrap().get_mut(b"AP").unwrap().as_dict_mut().unwrap();let states=ap.get_mut(b"R").unwrap().as_dict_mut().unwrap();let value=states.remove(b"Yes").unwrap();states.set("Different",value);},
+                19=>{doc.get_dictionary_mut(id).unwrap().set("AA",dictionary!{});},
+                20=>{doc.get_dictionary_mut(id).unwrap().set("H",Object::Name(b"P".to_vec()));},
+                _=>{doc.get_dictionary_mut(id).unwrap().set("Rect",real(&[60.0,650.0,80.0,679.0]));},
+            }
+            let mut bytes=Vec::new();doc.save_to(&mut bytes).unwrap();let source=session(bytes.clone());let result=FormDocument::query(&source,17);assert_eq!(result.status,"unsupported","Checkbox adversarial case {kind}");assert!(result.fields.is_empty());assert_eq!(source.source,bytes);assert_eq!(source.revision,0);
+        }
+        let source=session(MIXED.to_vec());let fields=FormDocument::parse(&source).unwrap();let id=fields.fields[0].dto.field_id.clone();assert!(fields.prepare(&[FieldValue::Checkbox {field_id:id.clone(),checked:true},FieldValue::Checkbox {field_id:id,checked:false}]).is_err());assert_eq!(source.source,MIXED);
+    }
+    #[test]
+    fn checkboxes_share_the_total_field_budget_and_preserve_mixed_defaults() {
+        let build=|count:usize|{let mut doc=Document::load_mem(MIXED).unwrap();let ids=field_ids(&doc);let checkbox=doc.get_dictionary(ids[0]).unwrap().clone();let text=doc.get_dictionary(ids[1]).unwrap().clone();let page=*doc.get_pages().values().next().unwrap();let form=doc.catalog().unwrap().get(b"AcroForm").unwrap().as_reference().unwrap();let mut refs=Vec::new();for index in 0..count {let mut field=if index%2==0{checkbox.clone()}else{text.clone()};field.set("T",Object::string_literal(format!("MixedField{index}")));refs.push(Object::Reference(doc.add_object(field)));}doc.get_dictionary_mut(form).unwrap().set("Fields",refs.clone());doc.get_dictionary_mut(page).unwrap().set("Annots",refs);let mut bytes=Vec::new();doc.save_to(&mut bytes).unwrap();session(bytes)};
+        let source=build(MAX_FIELDS);let parsed=FormDocument::parse(&source).unwrap();assert_eq!(parsed.fields.len(),MAX_FIELDS);assert_eq!(parsed.fields.iter().filter(|field|field.dto.checked.is_some()).count(),MAX_FIELDS/2);assert!(FormDocument::parse(&build(MAX_FIELDS+1)).err().unwrap().contains("256"));
+        let values=parsed.fields.iter().map(|field|if field.dto.checked.is_some(){FieldValue::Checkbox {field_id:field.dto.field_id.clone(),checked:true}}else{FieldValue::Text {field_id:field.dto.field_id.clone(),value:"Changed".into()}}).collect::<Vec<_>>();let(bytes,fields)=parsed.prepare(&values).unwrap();assert_eq!(fields.len(),MAX_FIELDS);assert_eq!(FormDocument::parse(&session(bytes)).unwrap().fields.iter().filter(|field|field.dto.checked==Some(true)).count(),MAX_FIELDS/2);
+    }
+    #[test]
     fn forms_reportlab_values_appearances_and_styles_round_trip_and_clear() {
         let source = fixture(); let parsed = FormDocument::parse(&source).unwrap();
         assert_eq!(parsed.fields.len(), 2); assert_eq!(parsed.fields[0].dto.value, "Original");
         let literal = "Portland (OR) \\ `city`";
-        let patches = parsed.fields.iter().enumerate().map(|(index, field)| FieldValue { field_id: field.dto.field_id.clone(), value: if index == 0 { String::new() } else { literal.into() } }).collect::<Vec<_>>();
+        let patches = parsed.fields.iter().enumerate().map(|(index, field)| FieldValue::Text { field_id: field.dto.field_id.clone(), value: if index == 0 { String::new() } else { literal.into() } }).collect::<Vec<_>>();
         let (bytes, fields) = parsed.prepare(&patches).unwrap();
         let output = session(bytes); let reparsed = FormDocument::parse(&output).unwrap();
         assert_eq!(fields[0].value, ""); assert_eq!(fields[1].value, literal);
@@ -46,8 +116,8 @@ mod tests {
         assert_eq!(shown.len(),1); assert_eq!(shown[0].operands[0].as_str().unwrap(),literal.as_bytes());
         let original = FormDocument::parse(&source).unwrap();
         for (before, after) in original.fields.iter().zip(&reparsed.fields) {
-            assert_eq!(before.style.size, after.style.size); assert_eq!(before.style.background, after.style.background);
-            assert_eq!(before.style.border_color, after.style.border_color); assert_eq!(before.style.text_color, after.style.text_color);
+            assert_eq!(before.style.as_ref().unwrap().size, after.style.as_ref().unwrap().size); assert_eq!(before.style.as_ref().unwrap().background, after.style.as_ref().unwrap().background);
+            assert_eq!(before.style.as_ref().unwrap().border_color, after.style.as_ref().unwrap().border_color); assert_eq!(before.style.as_ref().unwrap().text_color, after.style.as_ref().unwrap().text_color);
             let a = original.document.get_dictionary(before.object).unwrap(); let b = reparsed.document.get_dictionary(after.object).unwrap();
             for key in [b"DV".as_slice(), b"DA", b"Rect", b"BS", b"MK", b"P", b"T", b"F", b"Ff"] { assert_eq!(a.get(key).ok(), b.get(key).ok(), "Preserve original widget property"); }
         }
@@ -81,7 +151,7 @@ mod tests {
     #[test]
     fn forms_patch_validation_is_atomic_and_enforces_ascii_length_and_fit() {
         let source = fixture(); let id = FormDocument::parse(&source).unwrap().fields[0].dto.field_id.clone();
-        for values in [vec![], vec![FieldValue { field_id: "unknown".into(), value: "new".into() }], vec![FieldValue { field_id:id.clone(),value:"Original".into() }], vec![FieldValue { field_id:id.clone(),value:"é".into() }], vec![FieldValue { field_id:id.clone(),value:"line\nline".into() }], vec![FieldValue { field_id:id.clone(),value:"W".repeat(40) }], vec![FieldValue { field_id:id.clone(),value:"a".repeat(41) }], vec![FieldValue { field_id:id.clone(),value:"a".repeat(4097) }], vec![FieldValue { field_id:id.clone(),value:"a".into() },FieldValue { field_id:id.clone(),value:"b".into() }]] {
+        for values in [vec![], vec![FieldValue::Text { field_id: "unknown".into(), value: "new".into() }], vec![FieldValue::Text { field_id:id.clone(),value:"Original".into() }], vec![FieldValue::Text { field_id:id.clone(),value:"é".into() }], vec![FieldValue::Text { field_id:id.clone(),value:"line\nline".into() }], vec![FieldValue::Text { field_id:id.clone(),value:"W".repeat(40) }], vec![FieldValue::Text { field_id:id.clone(),value:"a".repeat(41) }], vec![FieldValue::Text { field_id:id.clone(),value:"a".repeat(4097) }], vec![FieldValue::Text { field_id:id.clone(),value:"a".into() },FieldValue::Text { field_id:id.clone(),value:"b".into() }]] {
             assert!(FormDocument::parse(&source).unwrap().prepare(&values).is_err()); assert_eq!(source.source, FIXTURE); assert_eq!(source.revision, 0);
         }
         let mut edited = fixture(); edited.plan[0].turns = 1; assert!(FormDocument::parse(&edited).is_err());
@@ -119,16 +189,28 @@ mod tests {
         let blank_without_ap=mutated(|doc| {let id=field_ids(doc)[1]; doc.get_dictionary_mut(id).unwrap().remove(b"AP");}); assert_eq!(FormDocument::query(&blank_without_ap,1).status,"supported");
     }
 }
-#[derive(Clone, Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct FormField { pub field_id: String, pub name: String, pub page: usize, pub value: String, pub max_length: Option<usize> }
+#[derive(Clone, Debug)]
+pub struct FormField { pub field_id: String, pub name: String, pub page: usize, pub value: String, pub max_length: Option<usize>, pub checked: Option<bool>, pub(crate) on_state: Option<String> }
+impl Serialize for FormField {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let mut map = serializer.serialize_map(Some(6))?;
+        map.serialize_entry("fieldId", &self.field_id)?; map.serialize_entry("name", &self.name)?; map.serialize_entry("page", &self.page)?;
+        if let Some(checked) = self.checked { map.serialize_entry("kind", "checkbox")?; map.serialize_entry("checked", &checked)?; }
+        else { map.serialize_entry("kind", "text")?; map.serialize_entry("value", &self.value)?; map.serialize_entry("maxLength", &self.max_length)?; }
+        map.end()
+    }
+}
 #[derive(Clone, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct FieldValue { pub field_id: String, pub value: String }
+#[serde(tag = "kind", rename_all = "lowercase", deny_unknown_fields)]
+pub enum FieldValue {
+    Text { #[serde(rename = "fieldId")] field_id: String, value: String },
+    Checkbox { #[serde(rename = "fieldId")] field_id: String, checked: bool },
+}
+impl FieldValue { fn field_id(&self) -> &str { match self { Self::Text { field_id, .. } | Self::Checkbox { field_id, .. } => field_id } } }
 
 #[derive(Clone)]
 struct Style { width: f32, height: f32, border: f32, background: Option<Vec<f32>>, border_color: Option<Vec<f32>>, text_color: Vec<f32>, font: String, size: f32, font_object: Object }
-struct ParsedField { dto: FormField, object: ObjectId, style: Style }
+struct ParsedField { dto: FormField, object: ObjectId, style: Option<Style>, on_state: Option<Vec<u8>> }
 pub struct FormDocument { document: Document, fields: Vec<ParsedField>, pub pages: usize }
 
 fn object<'a>(doc: &'a Document, value: &'a Object) -> Result<&'a Object, String> { doc.dereference(value).map(|(_, value)| value).map_err(|_| "The form contains an invalid or cyclic reference.".into()) }
@@ -158,6 +240,68 @@ fn same_object(a: &Object, b: &Object) -> bool {
 }
 fn same_appearance(actual: &Content<Vec<Operation>>, expected: &Content<Vec<Operation>>) -> bool {
     actual.operations.len() == expected.operations.len() && actual.operations.iter().zip(&expected.operations).all(|(a, b)| a.operator == b.operator && a.operands.len() == b.operands.len() && a.operands.iter().zip(&b.operands).all(|(a, b)| same_object(a, b)))
+}
+
+// Checkbox artwork is retained verbatim: this validator never generates a glyph or substitutes a style.
+fn checkbox(doc: &Document, field: &Dictionary, ap_bytes: &mut usize) -> Result<(Vec<u8>, bool), String> {
+    let rect = numbers(field.get(b"Rect").map_err(|_| "The checkbox rectangle is missing.")?)?;
+    if rect.len() != 4 { return Err("The checkbox rectangle is invalid.".into()); }
+    let (width, height) = (rect[2]-rect[0], rect[3]-rect[1]);
+    if !(8.0..=256.0).contains(&width) || (width-height).abs() > 0.0001 { return Err("Only bounded square checkbox widgets are supported.".into()); }
+    if field.get(b"H").ok().is_some_and(|value| value.as_name().ok() != Some(b"N")) { return Err("The checkbox interaction appearance is unsupported.".into()); }
+    if let Ok(bs) = field.get(b"BS") { let bs = dict(doc, bs)?; keys(bs, &[b"S",b"W"])?; if bs.get(b"S").and_then(Object::as_name).ok() != Some(b"S") || !(0.0..=4.0).contains(&number(bs.get(b"W").map_err(|_| "Missing checkbox border width.")?)?) { return Err("Only bounded solid checkbox borders are supported.".into()); } }
+    if let Ok(mk) = field.get(b"MK") { let mk = dict(doc,mk)?; keys(mk,&[b"CA",b"BC",b"BG"])?; for key in [b"BC".as_slice(),b"BG"] { if let Ok(value)=mk.get(key) { color(value)?; } } if let Ok(value)=mk.get(b"CA") { let caption=text(value)?; if caption.len()>8 || !caption.bytes().all(|byte| (32..=126).contains(&byte)) { return Err("The checkbox caption is unsupported.".into()); } } }
+    let ap = dict(doc, field.get(b"AP").map_err(|_| "The checkbox appearance is missing.")?)?; keys(ap, &[b"N",b"R",b"D"])?;
+    if !ap.has(b"N") { return Err("The checkbox normal appearance is missing.".into()); }
+    let mut on_state: Option<Vec<u8>> = None;
+    for (_, value) in ap {
+        let states = dict(doc,value)?;
+        if states.len()!=2 || !states.has(b"Off") { return Err("A checkbox requires Off and one distinct on appearance state.".into()); }
+        let on = states.iter().find(|(name,_)| name.as_slice()!=b"Off").map(|(name,_)|name).ok_or("The checkbox on state is missing.")?;
+        if on.is_empty() || on.len()>64 || !on.iter().all(u8::is_ascii_alphanumeric) { return Err("The checkbox on-state name is unsupported.".into()); }
+        if on_state.as_ref().is_some_and(|state|state!=on) { return Err("The checkbox appearance state names disagree.".into()); }
+        on_state=Some(on.clone());
+        let mut decoded_states = Vec::new();
+        for (_, value) in states {
+            let stream=object(doc,value)?.as_stream().map_err(|_| "The checkbox state appearance is not a stream.")?;
+            keys(&stream.dict,&[b"Type",b"Subtype",b"FormType",b"BBox",b"Matrix",b"Resources",b"Length",b"Filter"])?;
+            if stream.dict.get(b"Subtype").and_then(Object::as_name).ok()!=Some(b"Form") || stream.dict.get(b"Type").ok().is_some_and(|value|value.as_name().ok()!=Some(b"XObject")) || stream.dict.get(b"FormType").ok().is_some_and(|value|value.as_i64().ok()!=Some(1)) { return Err("The checkbox appearance type is unsupported.".into()); }
+            let bbox=numbers(stream.dict.get(b"BBox").map_err(|_| "Missing checkbox appearance bounds.")?)?;
+            if bbox.len()!=4 || !bbox.iter().zip([0.0,0.0,width,height]).all(|(a,b)|(a-b).abs()<0.0001) { return Err("The checkbox appearance bounds disagree with its widget.".into()); }
+            if stream.dict.get(b"Matrix").ok().map(numbers).transpose()?.is_some_and(|matrix|matrix!=vec![1.0,0.0,0.0,1.0,0.0,0.0]) { return Err("Transformed checkbox appearances are unsupported.".into()); }
+            if let Ok(resources)=stream.dict.get(b"Resources") { let resources=dict(doc,resources)?; keys(resources,&[b"ProcSet"])?; if resources.get(b"ProcSet").ok().is_some_and(|value|value.as_array().ok().is_none_or(|values|values.as_slice()!=[Object::Name(b"PDF".to_vec())])) { return Err("The checkbox appearance resources are unsupported.".into()); } }
+            let decoded=stream.decompressed_content_with_limit(MAX_AP).map_err(|_| "The checkbox appearance exceeds its decoding limit or uses an unsupported filter.")?;
+            *ap_bytes+=decoded.len(); if *ap_bytes>MAX_TEXT { return Err("The form appearances exceed 1 MiB.".into()); }
+            let content=Content::decode(&decoded).map_err(|_| "The checkbox appearance cannot be parsed.")?;
+            if content.operations.is_empty() || content.operations.len()>256 { return Err("The checkbox appearance exceeds its operator limit.".into()); }
+            let mut stack=0usize; let mut path=false; let mut painted=0;
+            for operation in &content.operations {
+                let count=match operation.operator.as_str() { "q"|"Q"|"h"|"f"|"f*"|"s"|"S"|"n"=>0,"g"|"G"|"w"=>1,"m"|"l"=>2,"rg"|"RG"=>3,"re"=>4,"c"=>6,_=>return Err("The checkbox uses unsupported appearance operators.".into()) };
+                if operation.operands.len()!=count { return Err("The checkbox appearance operator is malformed.".into()); }
+                let values=operation.operands.iter().map(number).collect::<Result<Vec<_>,_>>()?;
+                if values.iter().any(|value|value.abs()>10000.0) { return Err("The checkbox appearance number exceeds its limit.".into()); }
+                match operation.operator.as_str() {
+                    "q"=>{if path || stack>=8 { return Err("The checkbox graphics stack is unsupported.".into()); } stack+=1;},
+                    "Q"=>{if path || stack==0 { return Err("The checkbox graphics stack is unbalanced.".into()); } stack-=1;},
+                    "g"|"G"|"rg"|"RG"=>{color(&Object::Array(operation.operands.clone()))?;},
+                    "w"=>{if !(0.0..=4.0).contains(&values[0]) {return Err("The checkbox stroke width is unsupported.".into());}},
+                    "m"|"l"|"c"=>{if operation.operator!="m" && !path { return Err("The checkbox path is malformed.".into()); } if values.chunks_exact(2).any(|point|!(0.0..=width).contains(&point[0]) || !(0.0..=height).contains(&point[1])) { return Err("The checkbox path is outside its appearance bounds.".into()); } path=true;},
+                    "re"=>{if values[0]<0.0 || values[1]<0.0 || values[2]<=0.0 || values[3]<=0.0 || values[0]+values[2]>width || values[1]+values[3]>height { return Err("The checkbox rectangle path is out of bounds.".into()); } path=true;},
+                    "h"=>{if !path {return Err("The checkbox path is malformed.".into());}},
+                    "f"|"f*"|"s"|"S"=>{if !path {return Err("The checkbox paint has no path.".into());} painted+=1;path=false;},
+                    "n"=>{path=false;},_=>unreachable!(),
+                }
+            }
+            if stack!=0 || path || painted==0 { return Err("The checkbox appearance is incomplete or unbalanced.".into()); }
+            decoded_states.push(content);
+        }
+        if same_appearance(&decoded_states[0],&decoded_states[1]) { return Err("The checkbox on and Off appearances must differ.".into()); }
+    }
+    let on=on_state.ok_or("The checkbox on state is missing.")?;
+    let value=field.get(b"V").and_then(Object::as_name).map_err(|_| "The checkbox value state is missing or invalid.")?;
+    if value!=b"Off" && value!=on || field.get(b"AS").and_then(Object::as_name).ok()!=Some(value) {return Err("The checkbox value and appearance states disagree.".into());}
+    if field.get(b"DV").ok().is_some_and(|value|value.as_name().ok().is_none_or(|value|value!=b"Off" && value!=on)) { return Err("The checkbox default state is unsupported.".into()); }
+    let checked=value==on; Ok((on,checked))
 }
 
 fn font(doc: &Document, value: &Object) -> Result<(), String> {
@@ -209,10 +353,11 @@ fn style(doc: &Document, form: &Dictionary, field: &Dictionary) -> Result<Style,
 // Standard Helvetica ASCII advance widths, matching ReportLab's standard-font metrics (1/1000 em).
 const WIDTHS: [u16; 95] = [278,278,355,556,556,889,667,191,333,333,389,584,278,333,278,278,556,556,556,556,556,556,556,556,556,556,278,278,584,584,584,556,1015,667,667,722,722,667,611,778,722,278,500,667,556,833,722,778,667,778,722,667,611,722,667,944,667,667,611,278,278,278,469,556,333,556,556,500,556,556,278,556,556,222,222,500,222,833,556,556,556,556,333,500,278,556,500,722,500,500,500,334,260,334,584];
 fn fits(field: &ParsedField, value: &str) -> Result<(), String> {
+    let style = field.style.as_ref().ok_or("The submitted form patch has the wrong field kind.")?;
     ascii(value)?;
     if field.dto.max_length.is_some_and(|max| value.len() > max) { return Err("The form value exceeds the field's MaxLength.".into()); }
-    let advance = value.bytes().map(|byte| WIDTHS[(byte - 32) as usize] as f32).sum::<f32>() * field.style.size / 1000.0;
-    if advance > field.style.width - 8.0 * field.style.border - 1.0 || advance + 0.04 * field.style.size > field.style.width - 6.0 * field.style.border || value.starts_with(['j','/']) && field.style.border * 2.0 < 0.03 * field.style.size { return Err("The text does not fit this field at its existing font size without clipping. Use a shorter value.".into()); } Ok(())
+    let advance = value.bytes().map(|byte| WIDTHS[(byte - 32) as usize] as f32).sum::<f32>() * style.size / 1000.0;
+    if advance > style.width - 8.0 * style.border - 1.0 || advance + 0.04 * style.size > style.width - 6.0 * style.border || value.starts_with(['j','/']) && style.border * 2.0 < 0.03 * style.size { return Err("The text does not fit this field at its existing font size without clipping. Use a shorter value.".into()); } Ok(())
 }
 
 impl FormDocument {
@@ -258,14 +403,22 @@ impl FormDocument {
             let id = reference.as_reference().map_err(|_| "Only flat referenced form fields are supported.")?;
             if !ids.insert(id) { return Err("Repeated form field references are not supported.".into()); }
             let field = document.get_dictionary(id).map_err(|_| "The form field is invalid.")?;
-            keys(field, &[b"Type", b"Subtype", b"FT", b"T", b"TU", b"V", b"DV", b"F", b"Ff", b"Rect", b"P", b"DA", b"AP", b"BS", b"MK", b"MaxLen", b"Q"])?;
-            if field.get(b"Subtype").and_then(Object::as_name).ok() != Some(b"Widget") || field.get(b"FT").and_then(Object::as_name).ok() != Some(b"Tx") { return Err("Only flat single-line text fields with one merged widget are supported.".into()); }
+            let is_checkbox=field.get(b"FT").and_then(Object::as_name).ok()==Some(b"Btn");
+            if is_checkbox { keys(field,&[b"Type",b"Subtype",b"FT",b"T",b"TU",b"V",b"DV",b"AS",b"F",b"Ff",b"Rect",b"P",b"AP",b"BS",b"MK",b"H"])?; }
+            else { keys(field, &[b"Type", b"Subtype", b"FT", b"T", b"TU", b"V", b"DV", b"F", b"Ff", b"Rect", b"P", b"DA", b"AP", b"BS", b"MK", b"MaxLen", b"Q"])?; }
+            if field.get(b"Subtype").and_then(Object::as_name).ok() != Some(b"Widget") || !is_checkbox && field.get(b"FT").and_then(Object::as_name).ok() != Some(b"Tx") { return Err("Only flat single-line text fields and checkboxes with one merged widget are supported.".into()); }
             if field.get(b"Type").ok().is_some_and(|value| value.as_name().ok() != Some(b"Annot")) { return Err("The form widget annotation type is invalid.".into()); }
             if field.get(b"F").and_then(Object::as_i64).ok() != Some(4) || field.get(b"Ff").ok().is_some_and(|value| !matches!(value.as_i64().ok(), Some(0 | 2))) || field.get(b"Q").ok().is_some_and(|value| value.as_i64().ok() != Some(0)) { return Err("The form flags or text alignment are unsupported.".into()); }
             let page = *widgets.get(&id).ok_or("The canonical form field has no unique page widget.")?;
             if field.get(b"P").and_then(Object::as_reference).ok() != Some(pages[page]) { return Err("The form widget page relationship is inconsistent.".into()); }
             let name = text(field.get(b"T").map_err(|_| "An unnamed form field is unsupported.")?)?;
             if name.trim().is_empty() || name.len() > 1024 || name.chars().any(char::is_control) || !names.insert(name.clone()) { return Err("Unnamed, duplicate, or unsupported field names are not supported.".into()); }
+            if is_checkbox {
+                let (on_state,checked)=checkbox(&document,field,&mut ap_bytes)?;
+                text_bytes+=name.len(); if text_bytes>MAX_TEXT {return Err("The form text exceeds 1 MiB.".into());}
+                fields.push(ParsedField {dto:FormField {field_id:format!("field-{}-{}",id.0,id.1),name,page,value:checked.to_string(),max_length:None,checked:Some(checked),on_state:Some(String::from_utf8(on_state.clone()).map_err(|_|"Invalid checkbox state name.")?)},object:id,style:None,on_state:Some(on_state)});
+                continue;
+            }
             let value = field.get(b"V").ok().map(text).transpose()?.unwrap_or_default(); ascii(&value)?;
             if let Ok(default) = field.get(b"DV") { ascii(&text(default)?)?; }
             text_bytes += name.len() + value.len(); if text_bytes > MAX_TEXT { return Err("The form text exceeds 1 MiB.".into()); }
@@ -288,7 +441,7 @@ impl FormDocument {
                 let decoded = stream.decompressed_content_with_limit(MAX_AP).map_err(|_| "The form appearance exceeds its decoding limit or uses an unsupported filter.")?; ap_bytes += decoded.len(); if ap_bytes > MAX_TEXT { return Err("The form appearances exceed 1 MiB.".into()); }
                 if !same_appearance(&Content::decode(&decoded).map_err(|_| "The form appearance cannot be parsed.")?, &appearance(&style, &value)) { return Err("The form contains an unknown appearance or layout; filling it could discard artwork.".into()); }
             } else if !value.is_empty() { return Err("A populated form field without its original appearance is unsupported.".into()); }
-            let parsed = ParsedField { dto: FormField { field_id: format!("field-{}-{}", id.0, id.1), name, page, value, max_length }, object: id, style }; fits(&parsed, &parsed.dto.value)?; fields.push(parsed);
+            let parsed = ParsedField { dto: FormField { field_id: format!("field-{}-{}", id.0, id.1), name, page, value, max_length, checked:None, on_state:None }, object: id, style:Some(style), on_state:None }; fits(&parsed, &parsed.dto.value)?; fields.push(parsed);
         }
         if ids.len() != widgets.len() { return Err("The form contains orphaned or foreign page annotations.".into()); }
         Ok(Self { document, fields, pages: pages.len() })
@@ -300,10 +453,29 @@ impl FormDocument {
     pub fn prepare(mut self, values: &[FieldValue]) -> Result<(Vec<u8>, Vec<FormField>), String> {
         if values.is_empty() || values.len() > MAX_FIELDS { return Err("Change between one and 256 form fields before saving a copy.".into()); }
         let mut seen = HashSet::new(); let mut changed = false;
-        for patch in values { if !seen.insert(&patch.field_id) { return Err("A form field was submitted more than once.".into()); } let field = self.fields.iter_mut().find(|field| field.dto.field_id == patch.field_id).ok_or("A form field no longer exists. Refresh the field list.")?; fits(field, &patch.value)?; changed |= patch.value != field.dto.value; field.dto.value = patch.value.clone(); }
+        for patch in values {
+            if !seen.insert(patch.field_id()) { return Err("A form field was submitted more than once.".into()); }
+            let field=self.fields.iter_mut().find(|field|field.dto.field_id==patch.field_id()).ok_or("A form field no longer exists. Refresh the field list.")?;
+            match patch {
+                FieldValue::Text {value,..}=>{fits(field,value)?;changed|=*value!=field.dto.value;field.dto.value=value.clone();},
+                FieldValue::Checkbox {checked,..}=>{let current=field.dto.checked.ok_or("The submitted form patch has the wrong field kind.")?;changed|=current!=*checked;field.dto.checked=Some(*checked);field.dto.value=checked.to_string();},
+            }
+        }
         if !changed { return Err("Change at least one form value before saving a new copy.".into()); }
         if self.fields.iter().map(|field| field.dto.name.len() + field.dto.value.len()).sum::<usize>() > MAX_TEXT { return Err("The form names and values exceed 1 MiB.".into()); }
-        for field in &self.fields { if !seen.contains(&field.dto.field_id) { continue; } let content = appearance(&field.style, &field.dto.value).encode().map_err(|_| "Could not encode the form appearance.")?; let resources = dictionary! { "Font" => dictionary! { field.style.font.as_bytes() => field.style.font_object.clone() }, "ProcSet" => vec![Object::Name(b"PDF".to_vec()), Object::Name(b"Text".to_vec())] }; let ap = self.document.add_object(Stream::new(dictionary! { "Type" => "XObject", "Subtype" => "Form", "FormType" => 1, "BBox" => real(&[0.0,0.0,field.style.width,field.style.height]), "Matrix" => real(&[1.0,0.0,0.0,1.0,0.0,0.0]), "Resources" => resources }, content)); let widget = self.document.get_dictionary_mut(field.object).map_err(|_| "The form field disappeared during preparation.")?; widget.set("V", Object::string_literal(field.dto.value.as_bytes().to_vec())); widget.set("AP", dictionary! { "N" => ap }); }
+        for field in &self.fields {
+            if !seen.contains(field.dto.field_id.as_str()) { continue; }
+            if let Some(checked)=field.dto.checked {
+                let state=Object::Name(if checked {field.on_state.clone().ok_or("Missing checkbox on state.")?} else {b"Off".to_vec()});
+                let widget=self.document.get_dictionary_mut(field.object).map_err(|_| "The checkbox disappeared during preparation.")?;widget.set("V",state.clone());widget.set("AS",state);
+                continue;
+            }
+            let style=field.style.as_ref().ok_or("Missing form text style.")?;
+            let content = appearance(style, &field.dto.value).encode().map_err(|_| "Could not encode the form appearance.")?;
+            let resources = dictionary! { "Font" => dictionary! { style.font.as_bytes() => style.font_object.clone() }, "ProcSet" => vec![Object::Name(b"PDF".to_vec()), Object::Name(b"Text".to_vec())] };
+            let ap = self.document.add_object(Stream::new(dictionary! { "Type" => "XObject", "Subtype" => "Form", "FormType" => 1, "BBox" => real(&[0.0,0.0,style.width,style.height]), "Matrix" => real(&[1.0,0.0,0.0,1.0,0.0,0.0]), "Resources" => resources }, content));
+            let widget = self.document.get_dictionary_mut(field.object).map_err(|_| "The form field disappeared during preparation.")?; widget.set("V", Object::string_literal(field.dto.value.as_bytes().to_vec())); widget.set("AP", dictionary! { "N" => ap });
+        }
         let mut bytes = Vec::new(); self.document.save_to(&mut bytes).map_err(|_| "Could not serialize the filled form.")?; if bytes.len() > MAX_OUTPUT { return Err("The filled form output exceeds 256 MiB.".into()); } Ok((bytes, self.fields.into_iter().map(|field| field.dto).collect()))
     }
 }

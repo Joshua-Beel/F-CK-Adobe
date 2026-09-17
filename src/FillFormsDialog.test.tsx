@@ -5,7 +5,7 @@ import type { DocumentFormFields, SavedCopy } from './bridge';
 import type { DocumentInfo } from './model';
 
 const document: DocumentInfo = { id: 4, name: 'form.pdf', path: 'C:/form.pdf', pages: [{ width: 612, height: 792 }], revision: 7, dirty: true, can_undo: true, can_redo: false };
-const fields: DocumentFormFields = { documentId: 4, revision: 7, status: 'supported', reason: null, input: 'printable-ascii', valueByteLimit: 4096, fields: [{ fieldId: 'name', name: 'Name', page: 0, value: 'Ada', maxLength: 12 }, { fieldId: 'city', name: 'City', page: 0, value: '', maxLength: null }] };
+const fields: DocumentFormFields = { documentId: 4, revision: 7, status: 'supported', reason: null, input: 'printable-ascii', valueByteLimit: 4096, fields: [{ kind: 'text', fieldId: 'name', name: 'Name', page: 0, value: 'Ada', maxLength: 12 }, { kind: 'text', fieldId: 'city', name: 'City', page: 0, value: '', maxLength: null }, { kind: 'checkbox', fieldId: 'approved', name: 'Approve terms', page: 1, checked: true }, { kind: 'checkbox', fieldId: 'updates', name: 'Receive updates', page: 1, checked: false }] };
 const output: SavedCopy = { path: 'C:/filled.pdf', document: { ...document, id: 8, name: 'filled.pdf', path: 'C:/filled.pdf', revision: 0, dirty: false, can_undo: false } };
 const save = (ui: ReactTestRenderer) => ui.root.findAllByType('button').find(button => button.children.join('') === 'Save filled copy')!;
 
@@ -16,23 +16,26 @@ async function mount({ formFields = fields, error = '', busy = false, fill = vi.
 }
 
 describe('FillFormsDialog', () => {
-  it('uses changed printable-ASCII patches only and states new-copy source preservation', async () => {
+  it('uses tagged changed-only text and checkbox patches and states new-copy source preservation', async () => {
     const { ui, fill, close } = await mount();
     expect(JSON.stringify(ui.toJSON())).toContain('Your open source PDF stays unchanged.');
     act(() => ui.root.findByProps({ 'aria-label': 'Name' }).props.onChange({ target: { value: 'Ada Lovelace' } }));
+    act(() => ui.root.findByProps({ 'aria-label': 'Approve terms, page 2' }).props.onChange({ target: { checked: false } }));
     await act(async () => save(ui).props.onClick());
-    expect(fill).toHaveBeenCalledWith(4, 7, [{ fieldId: 'name', value: 'Ada Lovelace' }]);
+    expect(fill).toHaveBeenCalledWith(4, 7, [{ fieldId: 'name', kind: 'text', value: 'Ada Lovelace' }, { fieldId: 'approved', kind: 'checkbox', checked: false }]);
     expect(close).toHaveBeenCalledOnce();
     act(() => ui.unmount());
   });
 
-  it('validates printable ASCII, UTF-8 byte limits, and field character limits before native work', () => {
-    const values = { name: 'Ada', city: 'Paris' };
-    expect(formPatches(fields.fields, values)).toEqual([{ fieldId: 'city', value: 'Paris' }]);
-    expect(validateFormPatches(fields.fields, { name: 'Ada', city: '' }, 4096)).toContain('Change at least one');
-    expect(validateFormPatches(fields.fields, { name: 'Åda', city: '' }, 4096)).toContain('printable ASCII');
-    expect(validateFormPatches([{ ...fields.fields[0], maxLength: 3 }], { name: 'ABCD' }, 4096)).toContain('3-character');
-    expect(validateFormPatches([{ ...fields.fields[0], maxLength: null }], { name: 'ABCD' }, 3)).toContain('3-byte');
+  it('validates text without dropping blank or false checkbox values and recognizes a reverted checkbox as unchanged', () => {
+    expect(formPatches(fields.fields, { name: 'Ada', city: '', approved: true, updates: false })).toEqual([]);
+    expect(formPatches(fields.fields, { name: 'Ada', city: 'Paris', approved: false, updates: true })).toEqual([{ fieldId: 'city', kind: 'text', value: 'Paris' }, { fieldId: 'approved', kind: 'checkbox', checked: false }, { fieldId: 'updates', kind: 'checkbox', checked: true }]);
+    expect(validateFormPatches(fields.fields, { name: 'Ada', city: '', approved: true, updates: false }, 4096)).toContain('Change at least one');
+    expect(validateFormPatches(fields.fields, { name: 'Åda', city: '', approved: true, updates: false }, 4096)).toContain('printable ASCII');
+    const name = fields.fields[0];
+    if (name.kind !== 'text') throw new Error('fixture field changed');
+    expect(validateFormPatches([{ ...name, maxLength: 3 }], { name: 'ABCD' }, 4096)).toContain('3-character');
+    expect(validateFormPatches([{ ...name, maxLength: null }], { name: 'ABCD' }, 3)).toContain('3-byte');
   });
 
   it('shows unsupported native reasons without partial fields', async () => {
@@ -40,6 +43,18 @@ describe('FillFormsDialog', () => {
     expect(ui.root.findByProps({ role: 'status' }).children.join('')).toContain('Unsupported field appearance.');
     expect(ui.root.findAllByProps({ 'aria-label': 'Name' })).toHaveLength(0);
     expect(save(ui).props.disabled).toBe(true);
+    act(() => ui.unmount());
+  });
+
+  it('uses a keyboard-accessible source-named checkbox with its page and preserves its cancellation draft', async () => {
+    const { ui, fill, close } = await mount({ fill: vi.fn().mockResolvedValue(null) });
+    const checkbox = ui.root.findByProps({ 'aria-label': 'Receive updates, page 2' });
+    expect(checkbox.props.type).toBe('checkbox');
+    act(() => checkbox.props.onChange({ target: { checked: true } }));
+    await act(async () => save(ui).props.onClick());
+    expect(fill).toHaveBeenCalledWith(4, 7, [{ fieldId: 'updates', kind: 'checkbox', checked: true }]);
+    expect(close).not.toHaveBeenCalled();
+    expect(ui.root.findByProps({ 'aria-label': 'Receive updates, page 2' }).props.checked).toBe(true);
     act(() => ui.unmount());
   });
 
