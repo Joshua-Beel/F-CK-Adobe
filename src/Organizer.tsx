@@ -1,0 +1,73 @@
+import { useEffect, useRef, useState } from 'react';
+import { ArrowDownToLine, ArrowLeft, ArrowRight, CheckSquare, RotateCcw, RotateCw, Trash2, Undo2, Redo2, X } from 'lucide-react';
+import type { DocumentInfo, PageEdit } from './model';
+import { parsePageRange } from './model';
+import { renderPage } from './bridge';
+import s from './Organizer.module.css';
+import ConfirmDialog from './ConfirmDialog';
+
+function Thumbnail({ document, index }: { document: DocumentInfo; index: number }) {
+  const element = useRef<HTMLDivElement>(null);
+  const [visible, setVisible] = useState(false);
+  const [url, setUrl] = useState('');
+  const [error, setError] = useState('');
+  useEffect(() => {
+    const observer = new IntersectionObserver(([entry]) => setVisible(entry.isIntersecting), { rootMargin: '200px' });
+    observer.observe(element.current!); return () => observer.disconnect();
+  }, []);
+  useEffect(() => {
+    if (!visible) { setUrl(''); return; }
+    let disposed = false, objectUrl = '';
+    setUrl(''); setError('');
+    renderPage(document.id, index, 260).then(value => {
+      objectUrl = value; if (disposed) URL.revokeObjectURL(value); else setUrl(value);
+    }).catch(e => { if (!disposed) setError(String(e)); });
+    return () => { disposed = true; if (objectUrl) URL.revokeObjectURL(objectUrl); };
+  }, [visible, document.id, document.revision, index]);
+  const size = document.pages[index];
+  return <div ref={element} className={s.thumbnail} style={{ aspectRatio: `${size.width}/${size.height}` }}>{url ? <img src={url} alt={`Page ${index + 1} preview`} draggable={false} /> : <span>{error ? 'Preview unavailable' : 'Loading…'}</span>}</div>;
+}
+
+export default function Organizer({ document, busy, edit, save, close }: { document: DocumentInfo; busy: boolean; edit: (action: PageEdit) => Promise<boolean>; save: (pages?: number[]) => Promise<void>; close: () => void }) {
+  const [selected, setSelected] = useState<number[]>([0]);
+  const [range, setRange] = useState('1');
+  const [error, setError] = useState('');
+  const [confirmDelete, setConfirmDelete] = useState(false);
+  const lastClicked = useRef(0);
+  useEffect(() => { setSelected(list => list.filter(i => i < document.pages.length)); }, [document.pages.length]);
+  const change = async (action: PageEdit) => {
+    if (await edit(action)) { setSelected([]); setRange(''); }
+  };
+  const select = (index: number, shift: boolean, additive: boolean) => {
+    if (shift) {
+      const start = Math.min(lastClicked.current, index), end = Math.max(lastClicked.current, index);
+      setSelected(Array.from({ length: end - start + 1 }, (_, i) => start + i));
+    } else if (additive) setSelected(list => list.includes(index) ? list.filter(i => i !== index) : [...list, index].sort((a, b) => a - b));
+    else setSelected([index]);
+    lastClicked.current = index;
+  };
+  const count = selected.length;
+  return <section className={s.organizer} aria-label="Organize pages workspace">
+    <div className={s.heading}><div><h1>Organize pages</h1><p>Rotate, reorder, or extract pages. Save your changes as a new PDF.</p></div><button onClick={close} disabled={busy}><X size={17} /> Close tool</button></div>
+    <div className={s.toolbar}>
+      <label>Pages <input aria-label="Page selection range" placeholder="1-3, 5" value={range} onChange={e => setRange(e.target.value)} onKeyDown={e => { if (e.key === 'Enter') { try { setSelected(parsePageRange(range, document.pages.length)); setError(''); } catch (e) { setError(String(e)); } } }} disabled={busy} /></label>
+      <button disabled={busy} onClick={() => { try { setSelected(parsePageRange(range, document.pages.length)); setError(''); } catch (e) { setError(String(e)); } }}>Select</button>
+      <button title="Select all pages" aria-label="Select all pages" disabled={busy} onClick={() => setSelected(document.pages.map((_, i) => i))}><CheckSquare size={17} /></button>
+      <span className={s.separator} />
+      <button aria-label="Rotate selected pages counterclockwise" disabled={busy || !count} onClick={() => void edit({ kind: 'rotate', pages: selected, clockwise: false })}><RotateCcw size={17} /></button>
+      <button aria-label="Rotate selected pages clockwise" disabled={busy || !count} onClick={() => void edit({ kind: 'rotate', pages: selected, clockwise: true })}><RotateCw size={17} /></button>
+      <button disabled={busy || !count || count === document.pages.length} onClick={() => setConfirmDelete(true)}><Trash2 size={16} /> Delete</button>
+      <button disabled={busy || !count} onClick={() => void save(selected)}><ArrowDownToLine size={16} /> Extract</button>
+      <span className={s.separator} />
+      <button aria-label="Move selected page earlier" disabled={busy || count !== 1 || selected[0] === 0} onClick={() => { const to = selected[0] - 1; void edit({ kind: 'move', from: selected[0], to }).then(ok => { if (ok) setSelected([to]); }); }}><ArrowLeft size={17} /></button>
+      <button aria-label="Move selected page later" disabled={busy || count !== 1 || selected[0] === document.pages.length - 1} onClick={() => { const to = selected[0] + 1; void edit({ kind: 'move', from: selected[0], to }).then(ok => { if (ok) setSelected([to]); }); }}><ArrowRight size={17} /></button>
+      <button aria-label="Undo page edit" disabled={busy || !document.can_undo} onClick={() => void change({ kind: 'undo' })}><Undo2 size={17} /></button>
+      <button aria-label="Redo page edit" disabled={busy || !document.can_redo} onClick={() => void change({ kind: 'redo' })}><Redo2 size={17} /></button>
+      <button className={s.save} disabled={busy} onClick={() => void save()}>Save a copy</button>
+    </div>
+    <div className={s.selectionInfo}><span>{count} selected · {document.pages.length} pages{document.dirty ? ' · Unsaved changes' : ''}</span><span>Ctrl+click to add · Shift+click for a range</span></div>
+    {error && <p className={s.error} role="alert">{error}</p>}
+    <div className={s.grid}>{document.pages.map((_, index) => <button key={index} disabled={busy} aria-label={`Select page ${index + 1}`} aria-pressed={selected.includes(index)} className={`${s.card} ${selected.includes(index) ? s.selected : ''}`} onClick={e => select(index, e.shiftKey, e.ctrlKey || e.metaKey)}><Thumbnail document={document} index={index} /><span className={s.pageLabel}><span className={s.checkbox}>{selected.includes(index) ? '✓' : ''}</span>Page {index + 1}</span></button>)}</div>
+    {confirmDelete && <ConfirmDialog title={`Delete ${count} selected ${count === 1 ? 'page' : 'pages'}?`} message="This changes the working document. You can undo it. Your original file stays unchanged." confirmLabel="Delete pages" onCancel={() => setConfirmDelete(false)} onConfirm={() => { setConfirmDelete(false); void change({ kind: 'delete', pages: selected }); }} />}
+  </section>;
+}

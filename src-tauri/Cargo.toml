@@ -13,6 +13,8 @@ pdfium-render = "=0.9.4"
 image = { version = "0.25", default-features = false, features = ["png"] }
 rfd = "0.15"
 tokio = { version = "1", features = ["sync"] }
+lopdf = "=0.45.0"
+tempfile = "3"
 
 [profile.release]
 strip = true

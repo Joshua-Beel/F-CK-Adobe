@@ -2,7 +2,7 @@
 
 ## Viewer foundation
 
-No password prompt, PDF text selection, Find, folder search, print, document properties, outlines/bookmark pane, embedded attachments, layer toggles, tags, annotations, signatures, rulers, splits, alternate page layouts, read-aloud, or drag/drop opening yet. Files currently stay open in one native worker. Recent files and stars are session-only. Thumbnail images, progressive low-resolution previews, cancelable priority queues, crash isolation and auto-save recovery are not yet implemented. There is no mutation path.
+No password prompt, PDF text selection, Find, folder search, print, document properties, outlines/bookmark pane, embedded attachments, layer toggles, tags, annotations, signatures, rulers, splits, alternate page layouts, read-aloud, or drag/drop opening yet. Files currently stay open in one native worker. Recent files and stars are session-only. Organizer thumbnails are implemented, but viewer-pane thumbnails, progressive low-resolution previews, cancelable priority queues, crash isolation and auto-save recovery remain unimplemented. Native page edits now export through lopdf.
 
 ## Performance and compatibility
 
@@ -10,7 +10,9 @@ No validated 60 fps target, 10,000-page open latency, real 300-dpi scan benchmar
 
 ## Remaining tools
 
-All creation, assembly, organization, editing, export, OCR, image enhancement, commenting, stamps, measurement, comparison, form preparation, fill/sign, certificate, password security, sanitization, redaction, PDF standards, optimization, accessibility, print preview, action wizard, custom-tool, index and virtual-printer features remain unimplemented. Disabled cards are a roadmap, not evidence of implementation.
+Organization now supports rotate/delete/extract, move earlier/later, undo/redo and save a new copy. Insert/replace/split/crop/page-label/page-box operations, drag-reordering and extraction into separate files remain unimplemented. Signed or certified documents are rejected for edits; complex page-reference structures are rejected for relevant destructive/structural operations until preservation is implemented. See the tool documentation for exact restrictions.
+
+Creation, combining, text/image editing, format export, OCR, image enhancement, commenting, stamps, measurement, comparison, form preparation, fill/sign, certificate, password security, sanitization, redaction, PDF standards, optimization, accessibility, print preview, action wizard, custom-tool, index and virtual-printer features remain unimplemented. Disabled cards are a roadmap, not evidence of implementation.
 
 ## Distribution and verification
 

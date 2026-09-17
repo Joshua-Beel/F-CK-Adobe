@@ -1,11 +1,13 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 mod service;
+mod editor;
 use service::{DocumentInfo, PdfService};
 use tauri::{Manager, State};
 
 #[tauri::command]
-async fn open_document(service: State<'_, PdfService>) -> Result<Option<DocumentInfo>, String> {
-    let path = tauri::async_runtime::spawn_blocking(|| rfd::FileDialog::new().add_filter("PDF documents", &["pdf"]).pick_file()).await.map_err(|e| e.to_string())?;
+async fn open_document(app: tauri::AppHandle, service: State<'_, PdfService>) -> Result<Option<DocumentInfo>, String> {
+    let window = app.get_webview_window("main").ok_or("Application window is unavailable")?;
+    let path = tauri::async_runtime::spawn_blocking(move || rfd::FileDialog::new().set_parent(&window).add_filter("PDF documents", &["pdf"]).pick_file()).await.map_err(|e| e.to_string())?;
     match path { Some(path) => service.open(path).await.map(Some), None => Ok(None) }
 }
 #[tauri::command]
@@ -19,11 +21,23 @@ async fn render_page(service: State<'_, PdfService>, id: u64, page: u16, width: 
 #[tauri::command]
 async fn close_document(service: State<'_, PdfService>, id: u64) -> Result<(), String> { service.close(id).await }
 
+#[tauri::command]
+async fn edit_pages(service: State<'_, PdfService>, id: u64, edit: editor::PageEdit) -> Result<DocumentInfo, String> {
+    service.edit(id, edit).await
+}
+#[tauri::command]
+async fn save_copy(app: tauri::AppHandle, service: State<'_, PdfService>, id: u64, pages: Option<Vec<usize>>) -> Result<Option<service::SavedCopy>, String> {
+    let window = app.get_webview_window("main").ok_or("Application window is unavailable")?;
+    let suggested = if pages.is_some() { "extracted-pages.pdf" } else { "organized-copy.pdf" };
+    let path = tauri::async_runtime::spawn_blocking(move || rfd::FileDialog::new().set_parent(&window).add_filter("PDF documents", &["pdf"]).set_file_name(suggested).save_file()).await.map_err(|e| e.to_string())?;
+    match path { Some(path) => service.save(id, pages, path).await.map(Some), None => Ok(None) }
+}
+
 fn main() {
     tauri::Builder::default().setup(|app| {
         let library = app.path().resource_dir()?.join("resources/pdfium/bin/pdfium.dll");
         app.manage(PdfService::start(library));
         Ok(())
-    }).invoke_handler(tauri::generate_handler![open_document, open_example, render_page, close_document])
+    }).invoke_handler(tauri::generate_handler![open_document, open_example, render_page, close_document, edit_pages, save_copy])
       .run(tauri::generate_context!()).expect("Desktop application failed");
 }

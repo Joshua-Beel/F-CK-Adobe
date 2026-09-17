@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { clampPage, pageOffsets, visiblePages } from './model';
+import { clampPage, pageOffsets, visiblePages, parsePageRange } from './model';
 describe('document viewport', () => {
   it('bounds invalid navigation', () => { expect(clampPage(-1, 98)).toBe(0); expect(clampPage(120, 98)).toBe(97); expect(clampPage(NaN, 98)).toBe(0); });
   it('lays out mixed page sizes without overlap', () => { expect(pageOffsets([{ width: 612, height: 792 }, { width: 792, height: 612 }], 2)).toEqual([24, 1632]); });
@@ -8,5 +8,11 @@ describe('document viewport', () => {
     const offsets = pageOffsets(pages, 1);
     const visible = visiblePages(offsets, pages, 1, offsets[749], 1000);
     expect(visible).toContain(749); expect(visible.length).toBeLessThanOrEqual(5); expect(visible).not.toContain(0);
+  });
+});
+describe('page range selection', () => {
+  it('deduplicates ranges in document order', () => { expect(parsePageRange('5, 1-3, 2', 6)).toEqual([0, 1, 2, 4]); });
+  it('rejects empty, reversed, non-integer and out-of-bounds ranges', () => {
+    for (const value of ['', '0', '1-99', '3-1', '1.5', '1,,2', '-1']) expect(() => parsePageRange(value, 6)).toThrow();
   });
 });

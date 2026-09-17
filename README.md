@@ -1,6 +1,6 @@
 # PDF Workstation
 
-Windows desktop PDF application under development. The target is the current Acrobat workspace, following Joshua's explicit correction to the supplied classic-2020 reference. This is a viewer foundation, **not a complete clone or a finished Phase 0 acceptance**. Product branding remains undecided; the window uses a descriptive working label.
+Windows desktop PDF application under development. The target is the current Acrobat workspace, following Joshua's explicit correction to the supplied classic-2020 reference. The viewer and initial Organize Pages tools are available; this is **not a complete clone or full phase acceptance**. Product branding remains undecided; the window uses a descriptive working label.
 
 ## Run
 
@@ -19,10 +19,12 @@ Test: `npm test` and `cargo test --manifest-path src-tauri/Cargo.toml`.
 - Open unencrypted PDFs through a native dialog; display native-rendered PNGs; continuous scrolling; hand pan; page jump; zoom 10–400%; fit width; close tabs; in-session file listing and stars.
 - Virtualized page images with cleanup of blob URLs. Native LRU cache has a 512 MiB weighted budget including decoded-pixel estimates. PDFium calls run serially on a dedicated native thread.
 - Ctrl+O, Ctrl+W, Ctrl+Tab, Ctrl+1, Ctrl+2, F4, Shift+F4, Home, End, Page Up, Page Down, H.
+- Organize Pages: real thumbnails loaded near the viewport, Ctrl/Shift multi-selection, page ranges, clockwise/counterclockwise rotation, confirmed page deletion, moving a selected page earlier/later, extraction, undo/redo, and Save a Copy. Ctrl+S saves a new copy; Ctrl+Z / Ctrl+Shift+Z / Ctrl+Y undo/redo.
+- All output writes go through Rust/lopdf. The original PDF is held as a native snapshot. New copies are checked with PDFium, flushed to a temporary file, then atomically published without overwriting existing files. Unsaved edits prompt before tab/window closure.
 
 ## Known gaps and next milestone
 
-See [docs/gaps.md](docs/gaps.md). Editing, save, text selection, search, print, OCR, signatures, redaction, persistent recents, and thumbnail rendering are not implemented. Advanced tools are disabled. The page list uses page numbers, not thumbnail images. No source PDF is modified. No telemetry or document-upload service is included.
+See [docs/gaps.md](docs/gaps.md). Text/image editing, search, print, OCR, signatures, redaction, and persistent recents remain unimplemented. Save a Copy and the initial page tools work; overwriting originals and incremental saves are not supported. The viewer's right-side page list still uses page numbers; the organizer has image thumbnails. Unsupported signed/encrypted or structurally complex PDFs return explicit errors for relevant edits. No source PDF is modified. No telemetry or document-upload service is included.
 
 Next: complete viewer core (text selection/search, encrypted-file prompt, bookmarks/thumbnails, persisted preferences and recents), collect an authorized real-PDF corpus, benchmark the 98-page scan and 1,500-page abstract, and add packaged-app CI/E2E. Do not claim 60 fps or the source prompt's other performance targets from the synthetic tests.
 
@@ -37,4 +39,6 @@ Next: complete viewer core (text selection/search, encrypted-file prompt, bookma
 
 - Added the first Windows viewer foundation and current-style workspace, native worker/cache, synthetic fixtures, and viewport/rendering tests. Rust 1.98.1 was installed on the development machine. Detailed verification and remaining acceptance conditions are recorded in [docs/phase-0-status.md](docs/phase-0-status.md).
 - Built the standalone development executable and added a desktop shortcut. Verified native sample rendering and next-page navigation; the file picker opens, but automated file selection remains unverified because of desktop automation limitations.
-- Excluded Rust outputs and fixture files from Vite's watcher after Windows reported a locked compiled DLL. Repository commits use Joshua Beel's verified GitHub account with its GitHub no-reply address. No remote repository is configured yet.
+- Excluded Rust outputs and fixture files from Vite's watcher after Windows reported a locked compiled DLL. Repository commits use Joshua Beel's verified GitHub account with its GitHub no-reply address. Remote: https://github.com/Joshua-Beel/F-CK-Adobe, branch `master`.
+- Added Organize Pages and native safe-copy output with undo/redo and close guards. Seven Rust tests and five frontend tests pass, including pixel-identical previews/reopened rotated copies for every valid fixture and byte-for-byte preservation of originals. Attached Open/Save dialogs to the main window. Details: [docs/tools/organize-pages.md](docs/tools/organize-pages.md).
+- Verified the standalone desktop organizer, rendered thumbnails, page rotation, native Save dialog, and successful copy export with the unsaved indicator cleared. The generated UI-test copy remains in ignored `artifacts/`.

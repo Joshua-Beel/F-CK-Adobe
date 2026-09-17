@@ -3,7 +3,7 @@ import { renderPage } from './bridge';
 import { pageOffsets, visiblePages, type DocumentInfo } from './model';
 import styles from './Workspace.module.css';
 
-function Page({ id, index, width, height, scale }: { id: number; index: number; width: number; height: number; scale: number }) {
+function Page({ id, index, width, height, scale, revision }: { id: number; index: number; width: number; height: number; scale: number; revision: number }) {
   const [url, setUrl] = useState('');
   const [error, setError] = useState('');
   useEffect(() => {
@@ -17,7 +17,7 @@ function Page({ id, index, width, height, scale }: { id: number; index: number; 
       }).catch(e => { if (!disposed) setError(String(e)); });
     }, 35);
     return () => { disposed = true; clearTimeout(timer); if (objectUrl) URL.revokeObjectURL(objectUrl); };
-  }, [id, index, width, scale]);
+  }, [id, index, width, scale, revision]);
   return <div className={styles.paper} style={{ width: width * scale, height: height * scale }} aria-label={`Page ${index + 1}`}>
     {url ? <img src={url} alt={`Page ${index + 1}`} draggable={false} /> : <div className={styles.pageLoading}>{error || `Rendering page ${index + 1}…`}</div>}
   </div>;
@@ -67,7 +67,7 @@ export default function Viewer({ document, zoom, fit, target, onPage, hand }: { 
   }} onPointerUp={() => { drag.current = null; }} onLostPointerCapture={() => { drag.current = null; }}>
     <div className={styles.pageStack} style={{ height, minWidth: Math.max(...document.pages.map(p => p.width)) * scale + 144 }}>
       {visible.map(index => <div key={`${document.id}-${index}`} className={styles.pagePosition} style={{ top: offsets[index] }}>
-        <Page id={document.id} index={index} {...document.pages[index]} scale={scale} />
+        <Page id={document.id} index={index} {...document.pages[index]} scale={scale} revision={document.revision} />
       </div>)}
     </div>
   </div>;
