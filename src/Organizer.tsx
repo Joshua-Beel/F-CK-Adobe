@@ -31,10 +31,22 @@ function Thumbnail({ document, index }: { document: DocumentInfo; index: number 
 export default function Organizer({ document, busy, edit, save, close }: { document: DocumentInfo; busy: boolean; edit: (action: PageEdit) => Promise<boolean>; save: (pages?: number[]) => Promise<void>; close: () => void }) {
   const [selected, setSelected] = useState<number[]>([0]);
   const [range, setRange] = useState('1');
+  const [destination, setDestination] = useState('');
   const [error, setError] = useState('');
   const [confirmDelete, setConfirmDelete] = useState(false);
   const lastClicked = useRef(0);
-  useEffect(() => { setSelected(list => list.filter(i => i < document.pages.length)); }, [document.pages.length]);
+  useEffect(() => { setSelected(list => list.filter(i => i < document.pages.length)); lastClicked.current = Math.min(lastClicked.current, document.pages.length - 1); }, [document.pages.length]);
+  const moveTo = async () => {
+    if (busy || selected.length !== 1) return;
+    const position = Number(destination);
+    if (!/^\d+$/.test(destination.trim()) || !Number.isSafeInteger(position) || position < 1 || position > document.pages.length) {
+      setError(`Enter a destination between 1 and ${document.pages.length}.`); return;
+    }
+    setError('');
+    if (await edit({ kind: 'move', from: selected[0], to: position - 1 })) {
+      setSelected([position - 1]); setRange(String(position)); lastClicked.current = position - 1;
+    }
+  };
   const change = async (action: PageEdit) => {
     if (await edit(action)) { setSelected([]); setRange(''); }
   };
@@ -61,6 +73,8 @@ export default function Organizer({ document, busy, edit, save, close }: { docum
       <span className={s.separator} />
       <button aria-label="Move selected page earlier" disabled={busy || count !== 1 || selected[0] === 0} onClick={() => { const to = selected[0] - 1; void edit({ kind: 'move', from: selected[0], to }).then(ok => { if (ok) setSelected([to]); }); }}><ArrowLeft size={17} /></button>
       <button aria-label="Move selected page later" disabled={busy || count !== 1 || selected[0] === document.pages.length - 1} onClick={() => { const to = selected[0] + 1; void edit({ kind: 'move', from: selected[0], to }).then(ok => { if (ok) setSelected([to]); }); }}><ArrowRight size={17} /></button>
+      <label>Move to page <input aria-label="Destination page position" inputMode="numeric" placeholder={`1-${document.pages.length}`} value={destination} disabled={busy || count !== 1} onChange={event => setDestination(event.target.value)} onKeyDown={event => { if (event.key === 'Enter') { event.preventDefault(); void moveTo(); } }} /></label>
+      <button disabled={busy || count !== 1} onClick={() => void moveTo()}>Move</button>
       <button aria-label="Undo page edit" disabled={busy || !document.can_undo} onClick={() => void change({ kind: 'undo' })}><Undo2 size={17} /></button>
       <button aria-label="Redo page edit" disabled={busy || !document.can_redo} onClick={() => void change({ kind: 'redo' })}><Redo2 size={17} /></button>
       <button className={s.save} disabled={busy} onClick={() => void save()}>Save a copy</button>

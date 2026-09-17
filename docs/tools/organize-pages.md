@@ -5,7 +5,7 @@ Open a PDF, then choose **Organize pages** in All tools. Click thumbnails, Ctrl+
 Available commands:
 - Rotate selected pages clockwise/counterclockwise.
 - Delete selected pages with confirmation. At least one page must remain. Undo restores deletion.
-- Move one selected page earlier or later.
+- Move one selected page earlier or later. In the source build, enter a final position in **Move to page** and press **Move** or Enter to jump directly there. For example, moving page 1 to position 6 makes it the sixth page; the moved page stays selected. Undo restores the previous order.
 - Extract selected pages into one new PDF in document order.
 - Undo/redo page operations. A new edit after undo clears the redo branch.
 - Save a Copy of the complete working document. Existing files cannot be overwritten. Canceling the file picker leaves edits intact.
