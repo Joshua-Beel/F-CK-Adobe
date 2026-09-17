@@ -1,3 +1,11 @@
+## 0.2.5 (draft candidate)
+
+- Adds on-page embedded-text selection and literal match highlights where supported geometry is available, plus Page text fallbacks for unsupported or capped pages.
+- Adds fixed-size splitting, current-page crop, Combine Files, Insert Pages, and Replace Pages. Structural copy operations use current edits, preserve the stated source metadata, and create a new output without changing either source tab.
+- Adds source-availability archives for five exact MPL-2.0 crates and current dependency notices to the bundled resources.
+
+Native desktop verification of selection/clipboard behavior, split and structural-copy save dialogs, crop interaction, printing, installation, and upgrade/relaunch remains open.
+
 ## 0.2.4
 
 - Verifies the actual application extracted from the signed installer, rather than Tauri's restored unsigned build file.

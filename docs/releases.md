@@ -22,7 +22,7 @@ Configure `AZURE_TENANT_ID`, `AZURE_CLIENT_ID`, `AZURE_CLIENT_SECRET`, and `TAUR
 
 The release workflow installs pinned `artifact-signing-cli` 0.11.0 and invokes `npm run installer -- -AzureSigning`. The Tauri signing hook applies Azure Authenticode signatures during bundling, before the final installer receives its Tauri updater signature. It then requires valid timestamped `Joshua Beel` signatures on both the app executable and installer before generating the manifest or uploading assets. Missing credentials or invalid signatures fail the release; the workflow never falls back to unsigned publishing. Local `npm run installer` remains a development build without Azure publisher signing. See [Tauri's Azure signing integration](https://v2.tauri.app/distribute/sign/windows/#azure-artifact-signing).
 
-Publish publisher signing as a new version; do not replace the already published 0.2.0 installer, because its Tauri signature and manifest identify those exact bytes. Version 0.2.1 is prepared for the first Azure-enabled workflow run. Its signing and upgrade checks are pending.
+Publish publisher signing as a new version; do not replace the already published 0.2.0 installer, because its Tauri signature and manifest identify those exact bytes. Version 0.2.5 is the next draft candidate. Its tag, draft assets, installation, and upgrade checks are pending.
 
 ### Release steps
 
@@ -36,6 +36,8 @@ Local fallback: use `gh release create` with the existing version tag, the three
 The first 0.2.0 installer establishes the updater. Earlier development executables have no updater and must install this release manually. Installation replaces app files only; source PDFs remain outside the installation folder.
 
 ## Verification
+
+The 0.2.5 draft candidate has aligned source metadata and refreshed dependency-notice inputs. It has no tag, GitHub release, signed installer, or draft artifact yet. Build and release evidence must be recorded only after the matching tag workflow completes; native save dialogs, installation, and upgrade/relaunch remain separate desktop checks.
 
 The 0.2.4 draft passed GitHub Actions run 35184652612. Its downloaded installer and extracted application both pass the local timestamped Joshua Beel signature check. Installer SHA-256: `cf97903897c10f0f02c31bc61f9ac9d929a9c5abdc116dc200cce01a4cd68c7a`, matching the GitHub asset digest. All three release assets are present. Installation, search UI behavior, and the end-to-end upgrade remain pending because desktop capture/input is unreliable; do not treat the draft as a verified published release.
 
