@@ -1,8 +1,11 @@
 use std::{collections::{HashMap, VecDeque}, io::Cursor, path::PathBuf, sync::{mpsc, OnceLock}};
 use pdfium_render::prelude::*;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tokio::sync::oneshot;
-use crate::editor::{EditSession, PageEdit, write_new_file};
+use crate::editor::{CropBox, EditSession, PageEdit, PageSpec, write_new_file};
+
+#[derive(Clone, Copy, Deserialize)]
+pub struct CropRect { pub x: f64, pub y: f64, pub width: f64, pub height: f64 }
 
 #[derive(Clone, Serialize)]
 pub struct PageSize { width: f32, height: f32 }
@@ -38,6 +41,7 @@ enum Request {
     Properties(u64, u64, Reply<crate::document_properties::DocumentProperties>),
     Close(u64, Reply<()>),
     Edit(u64, PageEdit, Reply<DocumentInfo>),
+    Crop(u64, u16, u64, CropRect, Reply<DocumentInfo>),
     Save(u64, Option<Vec<usize>>, PathBuf, Reply<SavedCopy>),
     Split(u64, u64, usize, PathBuf, Reply<crate::split::SplitOutput>),
 }
@@ -109,20 +113,13 @@ impl PdfService {
                         let result = (|| {
                             let (document, plan) = print_snapshots.get(&token).ok_or("Print job has ended")?;
                             let spec = plan.get(index).ok_or("Print page is out of range")?;
-                            let mut page = document.pages().get(spec.source as i32).map_err(|error| error.to_string())?;
-                            let original = page.rotation().map_err(|error| error.to_string())?;
-                            let original_turns = match original { PdfPageRenderRotation::Degrees90 => 1, PdfPageRenderRotation::Degrees180 => 2, PdfPageRenderRotation::Degrees270 => 3, _ => 0 };
-                            let rotation = match (original_turns + spec.turns) % 4 { 1 => PdfPageRenderRotation::Degrees90, 2 => PdfPageRenderRotation::Degrees180, 3 => PdfPageRenderRotation::Degrees270, _ => PdfPageRenderRotation::None };
-                            page.set_rotation(rotation);
-                            let result = (|| {
+                            with_planned_page(document, spec, |page| {
                                 let (width, height) = print_dimensions(page.width().value, page.height().value, max_width, max_height)?;
                                 let bitmap = page.render_with_config(&PdfRenderConfig::new().set_fixed_size(width as i32, height as i32).set_format(PdfBitmapFormat::BGRA).set_reverse_byte_order(false).clear_before_rendering(true).set_clear_color(PdfColor::WHITE).render_annotations(true).render_form_data(true).use_print_quality(true)).map_err(|error| error.to_string())?;
                                 let bgra = bitmap.as_raw_bytes();
                                 if bitmap.width() != width as i32 || bitmap.height() != height as i32 || bgra.len() != width as usize * height as usize * 4 { return Err("Unexpected print bitmap layout.".into()); }
                                 Ok(PrintBitmap { width, height, bgra })
-                            })();
-                            page.set_rotation(original);
-                            result
+                            })
                         })();
                         let _ = reply.send(result);
                     }
@@ -174,17 +171,10 @@ impl PdfService {
                             (|| {
                                 let document = documents.get(&id).ok_or("Document is closed")?;
                                 let spec = sessions.get(&id).ok_or("Document is closed")?.0.plan.get(page as usize).ok_or("Page is out of range")?;
-                                let mut page = document.pages().get(spec.source as i32).map_err(|e| e.to_string())?;
-                                let original_rotation = page.rotation().map_err(|e| e.to_string())?;
-                                let original_turns = match original_rotation { PdfPageRenderRotation::Degrees90 => 1, PdfPageRenderRotation::Degrees180 => 2, PdfPageRenderRotation::Degrees270 => 3, _ => 0 };
-                                let rotation = match (original_turns + spec.turns) % 4 { 1 => PdfPageRenderRotation::Degrees90, 2 => PdfPageRenderRotation::Degrees180, 3 => PdfPageRenderRotation::Degrees270, _ => PdfPageRenderRotation::None };
-                                page.set_rotation(rotation);
-                                let image_result = (|| {
+                                let image = with_planned_page(document, spec, |page| {
                                     let bitmap = page.render_with_config(&PdfRenderConfig::new().set_target_width(width).set_maximum_height(5000)).map_err(|e| e.to_string())?;
                                     bitmap.as_image().map_err(|e| e.to_string())
-                                })();
-                                page.set_rotation(original_rotation);
-                                let image = image_result?;
+                                })?;
                                 let mut bytes = Cursor::new(Vec::new());
                                 image.write_to(&mut bytes, image::ImageFormat::Png).map_err(|e| e.to_string())?;
                                 let bytes = bytes.into_inner();
@@ -200,7 +190,7 @@ impl PdfService {
                             let (session, original) = sessions.get(&id).ok_or("Document is closed")?;
                             if session.revision != revision { return Err("Document changed. Reopen document properties.".into()); }
                             let document = documents.get(&id).ok_or("Document is closed")?;
-                            let dimensions = current_info(session, original).pages.iter().map(|page| (page.width, page.height)).collect::<Vec<_>>();
+                            let dimensions = current_info(session, original, document)?.pages.iter().map(|page| (page.width, page.height)).collect::<Vec<_>>();
                             crate::document_properties::inspect(document, session.source.len(), &dimensions)
                         })();
                         let _ = reply.send(result);
@@ -232,14 +222,7 @@ impl PdfService {
                             if session.revision != revision { return Err("Document changed. Select text again.".into()); }
                             let spec = session.plan.get(index as usize).ok_or("Page is out of range")?;
                             let document = documents.get(&id).ok_or("Document is closed")?;
-                            let mut page = document.pages().get(spec.source as i32).map_err(|error| error.to_string())?;
-                            let original = page.rotation().map_err(|error| error.to_string())?;
-                            let turns = original.as_degrees() as i32 / 90;
-                            let rotation = match (turns + spec.turns).rem_euclid(4) { 1 => PdfPageRenderRotation::Degrees90, 2 => PdfPageRenderRotation::Degrees180, 3 => PdfPageRenderRotation::Degrees270, _ => PdfPageRenderRotation::None };
-                            page.set_rotation(rotation);
-                            let geometry = crate::text_geometry::inspect(&page, id, index, revision);
-                            page.set_rotation(original);
-                            geometry
+                            with_planned_page(document, spec, |page| crate::text_geometry::inspect(page, id, index, revision))
                         })();
                         let _ = reply.send(result);
                     }
@@ -250,10 +233,11 @@ impl PdfService {
                             if session.revision != revision { return Err("Document changed. Search again.".into()); }
                             let spec = session.plan.get(page as usize).ok_or("Page is out of range")?;
                             let document = documents.get(&id).ok_or("Document is closed")?;
-                            let source = document.pages().get(spec.source as i32).map_err(|e| e.to_string())?;
-                            let text = source.text().map_err(|e| e.to_string())?;
-                            let visible = source.boundaries().bounding().map_err(|e| e.to_string())?.bounds;
-                            Ok(text.inside_rect(visible))
+                            with_planned_page(document, spec, |source| {
+                                let text = source.text().map_err(|e| e.to_string())?;
+                                let visible = source.boundaries().bounding().map_err(|e| e.to_string())?.bounds;
+                                Ok(text.inside_rect(visible))
+                            })
                         })();
                         let _ = reply.send(result);
                     }
@@ -262,7 +246,27 @@ impl PdfService {
                             let (session, original) = sessions.get_mut(&id).ok_or("Document is closed")?;
                             session.apply(edit)?;
                             cache.close(id);
-                            Ok(current_info(session, original))
+                            current_info(session, original, documents.get(&id).ok_or("Document is closed")?)
+                        })();
+                        let _ = reply.send(result);
+                    }
+                    Request::Crop(id, index, revision, rect, reply) => {
+                        if reply.is_closed() { continue; }
+                        let result = (|| {
+                            let (session, original) = sessions.get_mut(&id).ok_or("Document is closed")?;
+                            if session.revision != revision { return Err("Document changed. Open the crop tool again.".into()); }
+                            let spec = session.plan.get(index as usize).ok_or("Page is out of range")?;
+                            let document = documents.get(&id).ok_or("Document is closed")?;
+                            let crop = with_planned_page(document, spec, |page| displayed_crop(page, rect))?;
+                            let mut proposed = spec.clone(); proposed.crop = Some(crop);
+                            with_planned_page(document, &proposed, |page| {
+                                let (width, height) = (page.width().value, page.height().value);
+                                if !width.is_finite() || !height.is_finite() || width <= 0.0 || height <= 0.0 { return Err("The crop produces invalid page dimensions.".into()); }
+                                Ok(())
+                            })?;
+                            session.apply(PageEdit::Crop { page: index as usize, crop })?;
+                            cache.close(id);
+                            current_info(session, original, document)
                         })();
                         let _ = reply.send(result);
                     }
@@ -301,7 +305,7 @@ impl PdfService {
                             if check.pages().len() as usize != expected { return Err("Output page count validation failed.".into()); }
                             write_new_file(&path, &bytes)?;
                             if pages.is_none() { session.mark_saved(); }
-                            Ok(SavedCopy { path: path.to_string_lossy().into_owned(), document: current_info(session, original) })
+                            Ok(SavedCopy { path: path.to_string_lossy().into_owned(), document: current_info(session, original, documents.get(&id).ok_or("Document is closed")?)? })
                         })();
                         let _ = reply.send(result);
                     }
@@ -353,6 +357,9 @@ impl PdfService {
     pub async fn edit(&self, id: u64, edit: PageEdit) -> Result<DocumentInfo, String> {
         let (tx, rx) = oneshot::channel(); self.sender.send(Request::Edit(id, edit, tx)).map_err(|e| e.to_string())?; rx.await.map_err(|e| e.to_string())?
     }
+    pub async fn crop(&self, id: u64, page: u16, revision: u64, rect: CropRect) -> Result<DocumentInfo, String> {
+        let (tx, rx) = oneshot::channel(); self.sender.send(Request::Crop(id, page, revision, rect, tx)).map_err(|error| error.to_string())?; rx.await.map_err(|error| error.to_string())?
+    }
     pub async fn save(&self, id: u64, pages: Option<Vec<usize>>, path: PathBuf) -> Result<SavedCopy, String> {
         let (tx, rx) = oneshot::channel(); self.sender.send(Request::Save(id, pages, path, tx)).map_err(|e| e.to_string())?; rx.await.map_err(|e| e.to_string())?
     }
@@ -383,18 +390,320 @@ fn page_sizes(document: &PdfDocument<'_>) -> Result<Vec<PageSize>, String> {
     }).collect()
 }
 
-fn current_info(session: &EditSession, original: &DocumentInfo) -> DocumentInfo {
+fn with_planned_page<T>(document: &PdfDocument<'_>, spec: &PageSpec, action: impl FnOnce(&PdfPage<'_>) -> Result<T, String>) -> Result<T, String> {
+    let mut page = document.pages().get(spec.source as i32).map_err(|error| error.to_string())?;
+    let original_rotation = page.rotation().map_err(|error| error.to_string())?;
+    let original_crop = if spec.crop.is_some() {
+        Some(page.boundaries().crop().or_else(|_| page.boundaries().bounding()).map_err(|error| error.to_string())?.bounds)
+    } else { None };
+    if let Some(crop) = spec.crop { page.boundaries_mut().set_crop(PdfRect::new_from_values(crop.bottom, crop.left, crop.top, crop.right)).map_err(|error| error.to_string())?; }
+    let turns = (original_rotation.as_degrees() as i32 / 90 + spec.turns).rem_euclid(4);
+    page.set_rotation(match turns { 1 => PdfPageRenderRotation::Degrees90, 2 => PdfPageRenderRotation::Degrees180, 3 => PdfPageRenderRotation::Degrees270, _ => PdfPageRenderRotation::None });
+    let result = action(&page);
+    let restore = match original_crop { Some(crop) => page.boundaries_mut().set_crop(crop).map_err(|error| error.to_string()), None => Ok(()) };
+    page.set_rotation(original_rotation);
+    result.and_then(|value| restore.map(|_| value))
+}
+
+fn displayed_crop(page: &PdfPage<'_>, rect: CropRect) -> Result<CropBox, String> {
+    if ![rect.x, rect.y, rect.width, rect.height].iter().all(|value| value.is_finite()) || rect.x < 0.0 || rect.y < 0.0 || rect.width <= 0.0 || rect.height <= 0.0 || rect.x + rect.width > 1.0 + 1e-12 || rect.y + rect.height > 1.0 + 1e-12 {
+        return Err("Choose a nonempty crop rectangle within the current page.".into());
+    }
+    let bounds = page.boundaries().bounding().map_err(|error| error.to_string())?.bounds;
+    let visible = CropBox { left: bounds.left().value, bottom: bounds.bottom().value, right: bounds.right().value, top: bounds.top().value };
+    if rect.x == 0.0 && rect.y == 0.0 && rect.width == 1.0 && rect.height == 1.0 { visible.validate_within(visible)?; return Ok(visible); }
+    const SIZE: i32 = 1_000_000;
+    let config = PdfRenderConfig::new().set_fixed_size(SIZE, SIZE);
+    // DeviceToPage takes integer pixels. Interpolate its page corners in f64 so a one-point crop is not rounded to a smaller pixel cell.
+    let mut page_corners = [(0.0_f64, 0.0_f64); 4];
+    for (index, (x, y)) in [(0, 0), (SIZE, 0), (0, SIZE), (SIZE, SIZE)].into_iter().enumerate() {
+        let (x, y) = page.pixels_to_points(x, y, &config).map_err(|error| error.to_string())?;
+        if !x.value.is_finite() || !y.value.is_finite() { return Err("The crop could not be mapped to the source page.".into()); }
+        page_corners[index] = (f64::from(x.value), f64::from(y.value));
+    }
+    let mut crop = CropBox { left: f32::INFINITY, bottom: f32::INFINITY, right: f32::NEG_INFINITY, top: f32::NEG_INFINITY };
+    for (x, y) in [(rect.x, rect.y), (rect.x + rect.width, rect.y), (rect.x, rect.y + rect.height), (rect.x + rect.width, rect.y + rect.height)] {
+        let (x, y) = (x.min(1.0), y.min(1.0));
+        let weights = [(1.0 - x) * (1.0 - y), x * (1.0 - y), (1.0 - x) * y, x * y];
+        let point = weights.into_iter().zip(page_corners).fold((0.0, 0.0), |(x, y), (weight, (corner_x, corner_y))| (x + weight * corner_x, y + weight * corner_y));
+        crop.left = crop.left.min(point.0 as f32); crop.bottom = crop.bottom.min(point.1 as f32); crop.right = crop.right.max(point.0 as f32); crop.top = crop.top.max(point.1 as f32);
+    }
+    crop.left = crop.left.max(visible.left); crop.bottom = crop.bottom.max(visible.bottom); crop.right = crop.right.min(visible.right); crop.top = crop.top.min(visible.top);
+    crop.validate_within(visible)?;
+    Ok(crop)
+}
+
+fn current_info(session: &EditSession, original: &DocumentInfo, document: &PdfDocument<'_>) -> Result<DocumentInfo, String> {
     let mut info = original.clone();
-    info.pages = session.plan.iter().map(|page| {
-        let size = &original.pages[page.source];
-        if page.turns % 2 == 0 { size.clone() } else { PageSize { width: size.height, height: size.width } }
-    }).collect();
-    info.revision = session.revision; info.dirty = session.dirty(); info.can_undo = session.can_undo(); info.can_redo = session.can_redo(); info
+    info.pages = session.plan.iter().map(|spec| {
+        if spec.crop.is_some() { return with_planned_page(document, spec, |page| Ok(PageSize { width: page.width().value, height: page.height().value })); }
+        let size = &original.pages[spec.source];
+        Ok(if spec.turns % 2 == 0 { size.clone() } else { PageSize { width: size.height, height: size.width } })
+    }).collect::<Result<_, String>>()?;
+    info.revision = session.revision; info.dirty = session.dirty(); info.can_undo = session.can_undo(); info.can_redo = session.can_redo(); Ok(info)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    // Print admission is a process-wide four-job resource; isolate only its tests, not the PDF worker or the full suite.
+    static PRINT_TESTS: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    fn print_test_lock() -> std::sync::MutexGuard<'static, ()> {
+        PRINT_TESTS.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+    fn call<T>(service: &PdfService, request: impl FnOnce(Reply<T>) -> Request) -> Result<T, String> {
+        let (tx, rx) = oneshot::channel(); service.sender.send(request(tx)).unwrap(); rx.blocking_recv().unwrap()
+    }
+    struct TestPrintSnapshot { service: PdfService, info: PrintSnapshotInfo }
+    impl std::ops::Deref for TestPrintSnapshot {
+        type Target = PrintSnapshotInfo;
+        fn deref(&self) -> &Self::Target { &self.info }
+    }
+    impl Drop for TestPrintSnapshot {
+        fn drop(&mut self) {
+            let (tx, rx) = oneshot::channel();
+            if self.service.sender.send(Request::EndPrint(self.info.token, tx)).is_ok() { let _ = rx.blocking_recv(); }
+        }
+    }
+    fn print_snapshot(service: &PdfService, id: u64, revision: u64) -> TestPrintSnapshot {
+        TestPrintSnapshot { service: service.clone(), info: call(service, |reply| Request::BeginPrint(id, revision, reply)).unwrap() }
+    }
+    #[test]
+    fn print_snapshot_admission_limit_and_guard_cleanup_preserve_worker_capacity() {
+        let _print_lock = print_test_lock();
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let service = PdfService::start(root.join("resources/pdfium/bin/pdfium.dll"));
+        let info = call(&service, |reply| Request::Open(root.join("resources/welcome.pdf"), reply)).unwrap();
+        let held = (0..3).map(|_| print_snapshot(&service, info.id, 0)).collect::<Vec<_>>();
+        let unwind = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _fourth = print_snapshot(&service, info.id, 0);
+            assert!(call(&service, |reply| Request::BeginPrint(info.id, 0, reply)).err().unwrap().contains("another print job"));
+            panic!("Exercise snapshot guard cleanup after a failed assertion");
+        }));
+        assert!(unwind.is_err());
+        let replacement = print_snapshot(&service, info.id, 0);
+        assert!(call(&service, |reply| Request::BeginPrint(info.id, 0, reply)).err().unwrap().contains("another print job"));
+        drop(replacement); drop(held);
+        let reusable = (0..4).map(|_| print_snapshot(&service, info.id, 0)).collect::<Vec<_>>();
+        assert!(call(&service, |reply| Request::BeginPrint(info.id, 0, reply)).err().unwrap().contains("another print job"));
+        drop(reusable);
+        call(&service, |reply| Request::Close(info.id, reply)).unwrap();
+    }
+    fn assert_same_ink(actual: &image::RgbImage, expected: &image::RgbImage) {
+        assert!(actual.width().abs_diff(expected.width()) <= 1 && actual.height().abs_diff(expected.height()) <= 1, "Unexpected crop dimensions: {:?} vs {:?}", actual.dimensions(), expected.dimensions());
+        let ink = |image: &image::RgbImage| image.enumerate_pixels().filter(|(_, _, pixel)| pixel.0.iter().any(|value| *value < 100)).map(|(x, y, _)| (x, y)).collect::<Vec<_>>();
+        let actual_ink = ink(actual); let expected_ink = ink(expected);
+        assert!(!actual_ink.is_empty() && !expected_ink.is_empty());
+        let compare = |points: &[(u32, u32)], source: &image::RgbImage, target: &image::RgbImage| {
+            points.iter().filter(|(x, y)| {
+                let x = (f64::from(*x) * f64::from(target.width()) / f64::from(source.width())).round() as i32;
+                let y = (f64::from(*y) * f64::from(target.height()) / f64::from(source.height())).round() as i32;
+                (-2..=2).any(|dy| (-2..=2).any(|dx| {
+                    let (x, y) = (x + dx, y + dy);
+                    x >= 0 && y >= 0 && x < target.width() as i32 && y < target.height() as i32 && target.get_pixel(x as u32, y as u32).0.iter().any(|value| *value < 100)
+                }))
+            }).count()
+        };
+        assert!(compare(&actual_ink, actual, expected) as f64 / actual_ink.len() as f64 > 0.99, "Crop has unexpected rendered ink");
+        assert!(compare(&expected_ink, expected, actual) as f64 / expected_ink.len() as f64 > 0.99, "Crop lost expected rendered ink");
+    }
+    #[test]
+    fn crop_rotation_inherited_boxes_preview_text_geometry_print_and_reopened_outputs_agree() {
+        let _print_lock = print_test_lock();
+        use lopdf::Document;
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let service = PdfService::start(root.join("resources/pdfium/bin/pdfium.dll"));
+        let folder = tempfile::tempdir().unwrap();
+        let full = CropRect { x: 0.0, y: 0.0, width: 1.0, height: 1.0 };
+        for inherited in [false, true] {
+            for original_rotation in [0, 90, 180, 270] {
+                let bytes = crate::text_geometry::tests::fixture(original_rotation, [1.0, 0.0, 0.0, 1.0, 100.0, 300.0], "OutsideTop\n\nInsideHeader\nInsideBody\n\nOutsideBottom");
+                let mut pdf = Document::load_mem(&bytes).unwrap();
+                let page = pdf.get_pages()[&1];
+                pdf.get_object_mut(page).unwrap().as_dict_mut().unwrap().set("MediaBox", vec![20.into(), 30.into(), 420.into(), 430.into()]);
+                if inherited {
+                    let parent = pdf.get_dictionary(page).unwrap().get(b"Parent").unwrap().as_reference().unwrap();
+                    for key in [b"MediaBox".as_slice(), b"CropBox", b"Rotate"] {
+                        let value = pdf.get_object_mut(page).unwrap().as_dict_mut().unwrap().remove(key).unwrap();
+                        pdf.get_object_mut(parent).unwrap().as_dict_mut().unwrap().set(key, value);
+                    }
+                }
+                let path = folder.path().join(format!("crop-{inherited}-{original_rotation}.pdf"));
+                pdf.save(&path).unwrap(); let source = std::fs::read(&path).unwrap();
+                let mut info = call(&service, |reply| Request::Open(path.clone(), reply)).unwrap();
+                let old_snapshot = print_snapshot(&service, info.id, info.revision);
+                let original_print = service.print_render_blocking(old_snapshot.token, 0, 900, 900).unwrap();
+                for edited in 0..4 {
+                    let turns = (original_rotation / 90 + edited) % 4;
+                    let before_revision = info.revision;
+                    let no_op = call(&service, |reply| Request::Crop(info.id, 0, info.revision, full, reply)).unwrap();
+                    assert_eq!(no_op.revision, info.revision); assert_eq!(no_op.dirty, info.dirty); assert_eq!(no_op.can_undo, info.can_undo); assert_eq!(no_op.can_redo, info.can_redo);
+                    // These fixed pixel regions describe [80,150,320,260] inside the fixture's [50,70,350,330] visible box.
+                    let (rect, expected_region, old_width, new_width) = match turns {
+                        0 => (CropRect { x: 0.1, y: 70.0 / 260.0, width: 0.8, height: 110.0 / 260.0 }, (90, 210, 720, 330), 900, 720),
+                        1 => (CropRect { x: 80.0 / 260.0, y: 0.1, width: 110.0 / 260.0, height: 0.8 }, (240, 90, 330, 720), 780, 330),
+                        2 => (CropRect { x: 0.1, y: 80.0 / 260.0, width: 0.8, height: 110.0 / 260.0 }, (90, 240, 720, 330), 900, 720),
+                        _ => (CropRect { x: 70.0 / 260.0, y: 0.1, width: 110.0 / 260.0, height: 0.8 }, (210, 90, 330, 720), 780, 330),
+                    };
+                    let before = image::load_from_memory(&call(&service, |reply| Request::Render(info.id, 0, old_width, reply)).unwrap()).unwrap().into_rgb8();
+                    let expected = image::imageops::crop_imm(&before, expected_region.0, expected_region.1, expected_region.2, expected_region.3).to_image();
+                    info = call(&service, |reply| Request::Crop(info.id, 0, info.revision, rect, reply)).unwrap();
+                    assert_eq!(info.revision, before_revision + 1); assert!(info.dirty && info.can_undo);
+                    let (expected_width, expected_height) = if turns % 2 == 0 { (240.0, 110.0) } else { (110.0, 240.0) };
+                    assert!((info.pages[0].width - expected_width).abs() < 0.001 && (info.pages[0].height - expected_height).abs() < 0.001);
+                    assert!(call(&service, |reply| Request::Crop(info.id, 0, before_revision, rect, reply)).err().unwrap().contains("changed"));
+                    assert!(call(&service, |reply| Request::Text(info.id, 0, before_revision, reply)).is_err());
+                    assert!(call(&service, |reply| Request::TextGeometry(info.id, 0, before_revision, reply)).is_err());
+                    let no_op = call(&service, |reply| Request::Crop(info.id, 0, info.revision, full, reply)).unwrap(); assert_eq!(no_op.revision, info.revision);
+                    let preview = image::load_from_memory(&call(&service, |reply| Request::Render(info.id, 0, new_width, reply)).unwrap()).unwrap().into_rgb8();
+                    assert_same_ink(&preview, &expected);
+                    let geometry = call(&service, |reply| Request::TextGeometry(info.id, 0, info.revision, reply)).unwrap();
+                    assert_eq!(geometry.status, "ok", "{:?}", geometry.reason);
+                    let positioned = geometry.characters.iter().map(|character| character.text.as_str()).collect::<String>();
+                    let text = call(&service, |reply| Request::Text(info.id, 0, info.revision, reply)).unwrap();
+                    for words in [&positioned, &text] {
+                        for word in ["InsideHeader", "InsideBody"] { assert!(words.contains(word), "Lost {word}: original {original_rotation}, edit {edited}, inherited {inherited}: {words}"); }
+                        for word in ["OutsideTop", "OutsideBottom"] { assert!(!words.contains(word), "Copied hidden {word}"); }
+                    }
+                    let boxes = geometry.characters.iter().filter_map(|character| character.bounds.as_ref()).collect::<Vec<_>>();
+                    for (x, y, pixel) in preview.enumerate_pixels().filter(|(_, _, pixel)| pixel.0.iter().any(|value| *value < 100)) {
+                        let _ = pixel;
+                        assert!(boxes.iter().any(|bounds| x as f32 >= bounds.x * preview.width() as f32 - 2.0 && x as f32 <= (bounds.x + bounds.width) * preview.width() as f32 + 2.0 && y as f32 >= bounds.y * preview.height() as f32 - 2.0 && y as f32 <= (bounds.y + bounds.height) * preview.height() as f32 + 2.0), "Crop geometry missed rendered ink");
+                    }
+                    let snapshot = print_snapshot(&service, info.id, info.revision);
+                    assert!(service.print_render_blocking(snapshot.token, 0, 0, 900).is_err());
+                    let printed = service.print_render_blocking(snapshot.token, 0, new_width as u32, expected_region.3).unwrap();
+                    let print_rgb = image::RgbImage::from_raw(printed.width, printed.height, printed.bgra.chunks_exact(4).flat_map(|pixel| [pixel[2], pixel[1], pixel[0]]).collect()).unwrap();
+                    assert_same_ink(&print_rgb, &expected);
+                    let prior_print = service.print_render_blocking(old_snapshot.token, 0, 900, 900).unwrap();
+                    assert_eq!(prior_print.bgra, original_print.bgra, "Crop or failure changed an earlier print snapshot");
+                    let copy = folder.path().join(format!("copy-{inherited}-{original_rotation}-{edited}.pdf"));
+                    let saved = call(&service, |reply| Request::Save(info.id, None, copy.clone(), reply)).unwrap();
+                    assert!(!saved.document.dirty); assert_eq!(saved.document.revision, info.revision);
+                    let output = Document::load(&copy).unwrap();
+                    assert_eq!(output.get_page_content(output.get_pages()[&1]), pdf.get_page_content(page));
+                    assert!(output.extract_text(&[1]).unwrap().contains("OutsideBottom"), "Crop must hide content without deleting it");
+                    let reopened = call(&service, |reply| Request::Open(copy.clone(), reply)).unwrap();
+                    let reopened_image = image::load_from_memory(&call(&service, |reply| Request::Render(reopened.id, 0, new_width, reply)).unwrap()).unwrap().into_rgb8();
+                    assert_same_ink(&reopened_image, &expected);
+                    let reopened_text = call(&service, |reply| Request::Text(reopened.id, 0, 0, reply)).unwrap(); assert!(reopened_text.contains("InsideHeader") && !reopened_text.contains("OutsideBottom"));
+                    call(&service, |reply| Request::Close(reopened.id, reply)).unwrap();
+                    let split_folder = folder.path().join(format!("split-{inherited}-{original_rotation}-{edited}"));
+                    let split = call(&service, |reply| Request::Split(info.id, info.revision, 1, split_folder, reply)).unwrap(); assert_eq!(split.files.len(), 1);
+                    let split_info = call(&service, |reply| Request::Open(PathBuf::from(&split.files[0].path), reply)).unwrap();
+                    let split_image = image::load_from_memory(&call(&service, |reply| Request::Render(split_info.id, 0, new_width, reply)).unwrap()).unwrap().into_rgb8(); assert_same_ink(&split_image, &expected);
+                    call(&service, |reply| Request::Close(split_info.id, reply)).unwrap();
+                    info = call(&service, |reply| Request::Edit(info.id, PageEdit::Undo, reply)).unwrap();
+                    let restored = image::load_from_memory(&call(&service, |reply| Request::Render(info.id, 0, old_width, reply)).unwrap()).unwrap().into_rgb8(); assert_eq!(restored, before);
+                    info = call(&service, |reply| Request::Edit(info.id, PageEdit::Redo, reply)).unwrap();
+                    let redone = image::load_from_memory(&call(&service, |reply| Request::Render(info.id, 0, new_width, reply)).unwrap()).unwrap().into_rgb8(); assert_same_ink(&redone, &expected);
+                    info = call(&service, |reply| Request::Edit(info.id, PageEdit::Undo, reply)).unwrap();
+                    let held = service.print_render_blocking(snapshot.token, 0, new_width as u32, expected_region.3).unwrap(); assert_eq!(held.bgra, printed.bgra, "Crop print snapshot changed after undo");
+                    call(&service, |reply| Request::EndPrint(snapshot.token, reply)).unwrap();
+                    assert_eq!(std::fs::read(&path).unwrap(), source);
+                    if edited < 3 { info = call(&service, |reply| Request::Edit(info.id, PageEdit::Rotate { pages: vec![0], clockwise: true }, reply)).unwrap(); }
+                }
+                call(&service, |reply| Request::Close(info.id, reply)).unwrap();
+                assert!(call(&service, |reply| Request::Crop(info.id, 0, info.revision, full, reply)).err().unwrap().contains("closed"));
+                assert_eq!(service.print_render_blocking(old_snapshot.token, 0, 900, 900).unwrap().bgra, original_print.bgra);
+                call(&service, |reply| Request::EndPrint(old_snapshot.token, reply)).unwrap();
+                assert_eq!(std::fs::read(&path).unwrap(), source);
+                let original = call(&service, |reply| Request::Open(path.clone(), reply)).unwrap();
+                assert_eq!(original.pages[0].width, if original_rotation % 180 == 0 { 300.0 } else { 260.0 });
+                call(&service, |reply| Request::Close(original.id, reply)).unwrap();
+            }
+        }
+    }
+    #[test]
+    fn crop_current_edited_page_all_fixtures_and_repeated_crop_preserve_other_pages_and_source() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let service = PdfService::start(root.join("resources/pdfium/bin/pdfium.dll"));
+        let folder = tempfile::tempdir().unwrap();
+        for (fixture, count) in [("resources/welcome.pdf", 6usize), ("../test-corpus/synthetic-scan-98.pdf", 98), ("../test-corpus/synthetic-text-1500.pdf", 1500)] {
+            let path = root.join(fixture); let source = std::fs::read(&path).unwrap();
+            let mut info = call(&service, |reply| Request::Open(path.clone(), reply)).unwrap();
+            info = call(&service, |reply| Request::Edit(info.id, PageEdit::Move { from: 0, to: 2 }, reply)).unwrap();
+            let original_text = call(&service, |reply| Request::Text(info.id, 2, info.revision, reply)).unwrap();
+            assert!(original_text.contains(&format!("Page 1 of {count}")));
+            let other_before = call(&service, |reply| Request::Render(info.id, 0, 201, reply)).unwrap();
+            let original_crop_page = call(&service, |reply| Request::Render(info.id, 2, 200, reply)).unwrap();
+            let started = std::time::Instant::now();
+            info = call(&service, |reply| Request::Crop(info.id, 2, info.revision, CropRect { x: 0.0, y: 0.0, width: 1.0, height: 0.8 }, reply)).unwrap();
+            assert_eq!(info.pages.len(), count); assert!(info.dirty && info.can_undo);
+            assert!(call(&service, |reply| Request::Text(info.id, 0, info.revision, reply)).unwrap().contains(&format!("Page 2 of {count}")));
+            assert!(!call(&service, |reply| Request::Text(info.id, 2, info.revision, reply)).unwrap().contains(&format!("Page 1 of {count}")), "Footer should be outside the crop in {fixture}");
+            let geometry = call(&service, |reply| Request::TextGeometry(info.id, 2, info.revision, reply)).unwrap();
+            assert_eq!(geometry.status, "ok", "{fixture}: {:?}", geometry.reason);
+            assert!(!geometry.characters.iter().map(|character| character.text.as_str()).collect::<String>().contains(&format!("Page 1 of {count}")));
+            let first_size = info.pages[2].clone();
+            info = call(&service, |reply| Request::Crop(info.id, 2, info.revision, CropRect { x: 0.1, y: 0.1, width: 0.8, height: 0.8 }, reply)).unwrap();
+            assert!((info.pages[2].width - first_size.width * 0.8).abs() < 0.001 && (info.pages[2].height - first_size.height * 0.8).abs() < 0.001);
+            let plan_revision = info.revision;
+            for rect in [
+                CropRect { x: f64::NAN, y: 0.0, width: 0.5, height: 0.5 },
+                CropRect { x: 0.0, y: 0.0, width: f64::INFINITY, height: 0.5 },
+                CropRect { x: -0.1, y: 0.0, width: 0.5, height: 0.5 },
+                CropRect { x: 0.0, y: 0.0, width: 0.0, height: 0.5 },
+                CropRect { x: 0.2, y: 0.0, width: 0.9, height: 0.5 },
+                CropRect { x: 0.0, y: 0.0, width: 0.0001, height: 0.5 },
+            ] { assert!(call(&service, |reply| Request::Crop(info.id, 2, info.revision, rect, reply)).is_err()); }
+            assert!(call(&service, |reply| Request::Crop(info.id, count as u16, info.revision, CropRect { x: 0.0, y: 0.0, width: 1.0, height: 1.0 }, reply)).is_err());
+            assert_eq!(call(&service, |reply| Request::Properties(info.id, plan_revision, reply)).unwrap().page_count, count);
+            assert_eq!(call(&service, |reply| Request::Render(info.id, 0, 201, reply)).unwrap(), other_before, "Crop changed an unrelated current page");
+            let preview = image::load_from_memory(&call(&service, |reply| Request::Render(info.id, 2, 200, reply)).unwrap()).unwrap().into_rgb8();
+            let copy = folder.path().join(format!("fixture-{count}.pdf"));
+            let saved = call(&service, |reply| Request::Save(info.id, None, copy.clone(), reply)).unwrap(); assert!(!saved.document.dirty);
+            let reopened = call(&service, |reply| Request::Open(copy, reply)).unwrap();
+            assert_eq!(reopened.pages.len(), count);
+            let after = image::load_from_memory(&call(&service, |reply| Request::Render(reopened.id, 2, 200, reply)).unwrap()).unwrap().into_rgb8();
+            assert_eq!(after, preview);
+            call(&service, |reply| Request::Close(reopened.id, reply)).unwrap();
+            println!("crop fixture={fixture} pages={count} repeated-crop-export-reopen-ms={:.1}", started.elapsed().as_secs_f64() * 1000.0);
+            info = call(&service, |reply| Request::Edit(info.id, PageEdit::Undo, reply)).unwrap();
+            assert!((info.pages[2].width - first_size.width).abs() < 0.001 && (info.pages[2].height - first_size.height).abs() < 0.001);
+            info = call(&service, |reply| Request::Edit(info.id, PageEdit::Undo, reply)).unwrap();
+            assert_eq!(call(&service, |reply| Request::Render(info.id, 2, 200, reply)).unwrap(), original_crop_page);
+            assert_eq!(std::fs::read(&path).unwrap(), source);
+            call(&service, |reply| Request::Close(info.id, reply)).unwrap();
+        }
+    }
+    #[test]
+    fn crop_minimum_point_and_edge_rounding_and_protected_failures_restore_source_page() {
+        let _print_lock = print_test_lock();
+        use lopdf::{dictionary, Document};
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let service = PdfService::start(root.join("resources/pdfium/bin/pdfium.dll"));
+        let folder = tempfile::tempdir().unwrap();
+        for kind in ["ordinary", "certified", "signature", "byte_range"] {
+            let mut pdf = Document::load(root.join("resources/welcome.pdf")).unwrap();
+            match kind {
+                "certified" => { pdf.catalog_mut().unwrap().set("Perms", dictionary! {}); }
+                "signature" => { pdf.add_object(dictionary! { "Type" => "Sig" }); }
+                "byte_range" => { pdf.add_object(dictionary! { "ByteRange" => vec![0.into(), 1.into(), 2.into(), 3.into()] }); }
+                _ => {}
+            }
+            let path = folder.path().join(format!("protected-{kind}.pdf")); pdf.save(&path).unwrap(); let source = std::fs::read(&path).unwrap();
+            let info = call(&service, |reply| Request::Open(path.clone(), reply)).unwrap();
+            let snapshot = print_snapshot(&service, info.id, 0);
+            let before = service.print_render_blocking(snapshot.token, 0, 300, 400).unwrap();
+            if kind == "ordinary" {
+                let width = f64::from(info.pages[0].width);
+                let changed = call(&service, |reply| Request::Crop(info.id, 0, 0, CropRect { x: (width - 1.0) / width, y: 0.0, width: 1.0 / width + 1e-15, height: 1.0 }, reply)).unwrap();
+                assert_eq!(changed.pages[0].width, 1.0); assert_eq!(changed.revision, 1);
+                call(&service, |reply| Request::Edit(info.id, PageEdit::Undo, reply)).unwrap();
+            } else {
+                for rect in [CropRect { x: 0.1, y: 0.1, width: 0.8, height: 0.8 }, CropRect { x: 0.0, y: 0.0, width: 1.0, height: 1.0 }] {
+                    assert!(call(&service, |reply| Request::Crop(info.id, 0, 0, rect, reply)).err().unwrap().contains("Signed or certified"));
+                }
+                let properties = call(&service, |reply| Request::Properties(info.id, 0, reply)).unwrap(); assert_eq!(properties.page_count, 6);
+            }
+            assert_eq!(service.print_render_blocking(snapshot.token, 0, 300, 400).unwrap().bgra, before.bgra, "Crop or rejected operation changed source boundaries");
+            call(&service, |reply| Request::Close(info.id, reply)).unwrap();
+            assert_eq!(service.print_render_blocking(snapshot.token, 0, 300, 400).unwrap().bgra, before.bgra);
+            call(&service, |reply| Request::EndPrint(snapshot.token, reply)).unwrap();
+            assert_eq!(std::fs::read(&path).unwrap(), source);
+        }
+    }
     #[test]
     fn page_text_and_geometry_keep_visible_words_and_exclude_crop_hidden_words_at_every_rotation() {
         let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -645,6 +954,7 @@ mod tests {
     }
     #[test]
     fn print_bitmap_is_bgra_with_opaque_white_background() {
+        let _print_lock = print_test_lock();
         use lopdf::{dictionary, Object, Stream};
         let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         let folder = tempfile::tempdir().unwrap();
@@ -657,7 +967,7 @@ mod tests {
         let path = folder.path().join("print-colors.pdf"); pdf.save(&path).unwrap();
         let service = PdfService::start(root.join("resources/pdfium/bin/pdfium.dll"));
         let (tx, rx) = oneshot::channel(); service.sender.send(Request::Open(path, tx)).unwrap(); let info = rx.blocking_recv().unwrap().unwrap();
-        let (tx, rx) = oneshot::channel(); service.sender.send(Request::BeginPrint(info.id, 0, tx)).unwrap(); let snapshot = rx.blocking_recv().unwrap().unwrap();
+        let snapshot = print_snapshot(&service, info.id, 0);
         let bitmap = service.print_render_blocking(snapshot.token, 0, 100, 100).unwrap();
         assert_eq!(&bitmap.bgra[..4], &[255, 255, 255, 255]);
         let center = (50 * bitmap.width as usize + 50) * 4; assert_eq!(&bitmap.bgra[center..center + 4], &[0, 0, 255, 255]);
@@ -666,12 +976,12 @@ mod tests {
     }
     #[test]
     fn print_snapshot_survives_edits_and_close_but_not_release() {
+        let _print_lock = print_test_lock();
         let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         let service = PdfService::start(root.join("resources/pdfium/bin/pdfium.dll"));
         let (tx, rx) = oneshot::channel(); service.sender.send(Request::Open(root.join("resources/welcome.pdf"), tx)).unwrap();
         let info = rx.blocking_recv().unwrap().unwrap();
-        let (tx, rx) = oneshot::channel(); service.sender.send(Request::BeginPrint(info.id, 0, tx)).unwrap();
-        let before = rx.blocking_recv().unwrap().unwrap(); assert_eq!(before.pages, 6);
+        let before = print_snapshot(&service, info.id, 0); assert_eq!(before.pages, 6);
         let original_first = service.print_render_blocking(before.token, 0, 300, 400).unwrap();
         let original_second = service.print_render_blocking(before.token, 1, 300, 400).unwrap();
         assert_eq!(original_first.bgra.len(), original_first.width as usize * original_first.height as usize * 4);
@@ -683,7 +993,7 @@ mod tests {
             let (tx, rx) = oneshot::channel(); service.sender.send(Request::Edit(info.id, edit, tx)).unwrap(); rx.blocking_recv().unwrap().unwrap();
         }
         let (tx, rx) = oneshot::channel(); service.sender.send(Request::BeginPrint(info.id, 0, tx)).unwrap(); assert!(rx.blocking_recv().unwrap().is_err());
-        let (tx, rx) = oneshot::channel(); service.sender.send(Request::BeginPrint(info.id, 2, tx)).unwrap(); let after = rx.blocking_recv().unwrap().unwrap();
+        let after = print_snapshot(&service, info.id, 2);
         let reordered = service.print_render_blocking(after.token, 0, 300, 400).unwrap(); assert_eq!(reordered.bgra, original_second.bgra);
         let rotated = service.print_render_blocking(after.token, 2, 300, 400).unwrap(); assert!(rotated.width > rotated.height);
         let (tx, rx) = oneshot::channel(); service.sender.send(Request::Close(info.id, tx)).unwrap(); rx.blocking_recv().unwrap().unwrap();
@@ -696,6 +1006,7 @@ mod tests {
     }
     #[test]
     fn encrypted_open_retries_cancels_and_keeps_edits_blocked() {
+        let _print_lock = print_test_lock();
         use lopdf::encryption::crypt_filters::{Aes128CryptFilter, Aes256CryptFilter, CryptFilter};
         use std::{collections::BTreeMap, sync::Arc};
         let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -752,6 +1063,8 @@ mod tests {
                 let (tx, rx) = oneshot::channel(); service.sender.send(Request::Render(info.id, page as u16, 100, tx)).unwrap(); assert!(!rx.blocking_recv().unwrap().unwrap().is_empty(), "v{version}-{kind} page {page}");
             }
             let (tx, rx) = oneshot::channel(); service.sender.send(Request::Edit(info.id, PageEdit::Rotate { pages: vec![0], clockwise: true }, tx)).unwrap(); assert!(rx.blocking_recv().unwrap().is_err());
+            let (tx, rx) = oneshot::channel(); service.sender.send(Request::Crop(info.id, 0, 0, CropRect { x: 0.1, y: 0.1, width: 0.8, height: 0.8 }, tx)).unwrap(); assert!(rx.blocking_recv().unwrap().is_err(), "Encrypted v{version}-{kind} must not crop");
+            let (tx, rx) = oneshot::channel(); service.sender.send(Request::Render(info.id, 0, 101, tx)).unwrap(); assert!(!rx.blocking_recv().unwrap().unwrap().is_empty(), "Rejected crop must preserve a fresh encrypted preview");
             let output = folder.path().join("must-not-export.pdf");
             let (tx, rx) = oneshot::channel(); service.sender.send(Request::Save(info.id, None, output.clone(), tx)).unwrap(); assert!(rx.blocking_recv().unwrap().is_err()); assert!(!output.exists());
             assert_eq!(std::fs::read(&path).unwrap(), source);

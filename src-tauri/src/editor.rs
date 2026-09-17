@@ -12,6 +12,35 @@ fn snapshot_bytes(snapshot: &Vec<PageSpec>) -> usize {
 pub struct PageSpec {
     pub source: usize,
     pub turns: i32,
+    pub crop: Option<CropBox>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CropBox {
+    pub left: f32,
+    pub bottom: f32,
+    pub right: f32,
+    pub top: f32,
+}
+
+impl CropBox {
+    fn valid(self) -> bool {
+        [self.left, self.bottom, self.right, self.top].iter().all(|value| value.is_finite())
+            && self.right > self.left && self.top > self.bottom
+    }
+    fn contains(self, other: Self) -> bool {
+        other.left >= self.left && other.bottom >= self.bottom && other.right <= self.right && other.top <= self.top
+    }
+    pub fn validate_within(self, visible: Self) -> Result<(), String> {
+        if !self.valid() || self.right - self.left < 1.0 || self.top - self.bottom < 1.0 {
+            return Err("Keep at least one PDF point of width and height when cropping.".into());
+        }
+        if !visible.valid() || !visible.contains(self) { return Err("The crop must stay within the page's current visible area.".into()); }
+        Ok(())
+    }
+    fn object(self) -> Object {
+        Object::Array([self.left, self.bottom, self.right, self.top].into_iter().map(Object::Real).collect())
+    }
 }
 
 #[derive(Deserialize)]
@@ -20,6 +49,8 @@ pub enum PageEdit {
     Rotate { pages: Vec<usize>, clockwise: bool },
     Delete { pages: Vec<usize> },
     Move { from: usize, to: usize },
+    #[serde(skip_deserializing)]
+    Crop { page: usize, crop: CropBox },
     Undo,
     Redo,
 }
@@ -38,7 +69,7 @@ pub struct EditSession {
 
 impl EditSession {
     pub fn new(source: Vec<u8>, count: usize) -> Self {
-        let plan: Vec<_> = (0..count).map(|source| PageSpec { source, turns: 0 }).collect();
+        let plan: Vec<_> = (0..count).map(|source| PageSpec { source, turns: 0, crop: None }).collect();
         Self { source, source_page_count: count, saved: plan.clone(), plan, undo: VecDeque::new(), redo: VecDeque::new(), history_bytes: 0, history_budget: HISTORY_BUDGET, revision: 0 }
     }
     pub fn dirty(&self) -> bool { self.plan != self.saved }
@@ -82,9 +113,10 @@ impl EditSession {
             }
             edit => {
                 let mut next = self.plan.clone();
-                let structural = !matches!(&edit, PageEdit::Rotate { .. });
+                let structural = !matches!(&edit, PageEdit::Rotate { .. } | PageEdit::Crop { .. });
                 let removal = matches!(&edit, PageEdit::Delete { .. });
-                check_supported(&self.load_source()?, structural, removal)?;
+                let document = self.load_source()?;
+                check_supported(&document, structural, removal)?;
                 match edit {
                     PageEdit::Rotate { pages, clockwise } => {
                         for index in validate_selection(&pages, next.len())? {
@@ -99,6 +131,16 @@ impl EditSession {
                     PageEdit::Move { from, to } => {
                         if from >= next.len() || to >= next.len() { return Err("Page position is out of range.".into()); }
                         let page = next.remove(from); next.insert(to, page);
+                    }
+                    PageEdit::Crop { page, crop } => {
+                        let spec = next.get_mut(page).ok_or("Page is out of range")?;
+                        let id = *document.get_pages().values().nth(spec.source).ok_or("Source page mapping is invalid.")?;
+                        let rotation = inherited(&document, id, b"Rotate")?.map(|value| value.as_i64().map_err(|error| error.to_string())).transpose()?.unwrap_or(0);
+                        if rotation % 90 != 0 { return Err("This document has an unsupported page rotation.".into()); }
+                        let visible = match spec.crop { Some(crop) => crop, None => visible_box(&document, id)? };
+                        crop.validate_within(visible)?;
+                        if crop == visible { return Ok(()); }
+                        spec.crop = Some(crop);
                     }
                     _ => unreachable!(),
                 }
@@ -133,6 +175,7 @@ impl EditSession {
             let id = original[spec.source];
             let rotation = inherited(&document, id, b"Rotate")?.map(|o| o.as_i64().map_err(|e| e.to_string())).transpose()?.unwrap_or(0);
             if rotation % 90 != 0 { return Err("This document has an unsupported page rotation.".into()); }
+            if let Some(crop) = spec.crop { crop.validate_within(visible_box(&document, id)?)?; }
             let attributes: Vec<_> = if structural {
                 [b"Resources".as_slice(), b"MediaBox", b"CropBox"].iter().map(|key| Ok((key.to_vec(), inherited(&document, id, key)?))).collect::<Result<_, String>>()?
             } else { Vec::new() };
@@ -143,6 +186,7 @@ impl EditSession {
                 page.set("Parent", root);
                 kids.push(Object::Reference(id));
             }
+            if let Some(crop) = spec.crop { page.set("CropBox", crop.object()); }
         }
         if let Some(root) = new_root {
             document.objects.insert(root, Object::Dictionary(dictionary! { "Type" => "Pages", "Count" => plan.len() as i64, "Kids" => kids }));
@@ -153,6 +197,22 @@ impl EditSession {
         document.save_to(&mut bytes).map_err(|e| e.to_string())?;
         Ok(bytes)
     }
+}
+
+fn visible_box(document: &Document, id: ObjectId) -> Result<CropBox, String> {
+    let read_box = |value: Object| -> Result<CropBox, String> {
+        let array = value.as_array().map_err(|_| "The page has an unsupported boundary box.")?;
+        if array.len() != 4 { return Err("The page has an unsupported boundary box.".into()); }
+        let values = array.iter().map(|value| document.dereference(value).map_err(|error| error.to_string())?.1.as_float().map_err(|error| error.to_string())).collect::<Result<Vec<_>, _>>()?;
+        let bounds = CropBox { left: values[0], bottom: values[1], right: values[2], top: values[3] };
+        if !bounds.valid() { return Err("The page has an invalid boundary box.".into()); }
+        Ok(bounds)
+    };
+    let media = read_box(inherited(document, id, b"MediaBox")?.ok_or("The page has no supported MediaBox.")?)?;
+    let crop = inherited(document, id, b"CropBox")?.map(read_box).transpose()?.unwrap_or(media);
+    let visible = CropBox { left: media.left.max(crop.left), bottom: media.bottom.max(crop.bottom), right: media.right.min(crop.right), top: media.top.min(crop.top) };
+    if !visible.valid() { return Err("The page has an empty visible boundary box.".into()); }
+    Ok(visible)
 }
 
 fn validate_selection(pages: &[usize], count: usize) -> Result<HashSet<usize>, String> {
@@ -209,6 +269,101 @@ mod tests {
         let allocated = session.undo.iter().chain(session.redo.iter()).map(snapshot_bytes).sum::<usize>();
         assert_eq!(session.history_bytes, allocated);
         assert!(allocated <= session.history_budget);
+    }
+    #[test]
+    fn crop_plan_and_export_preserve_content_references_source_and_saved_history() {
+        let mut document = Document::load_mem(&sample()).unwrap();
+        let first = document.get_pages()[&1];
+        let annotation = document.add_object(dictionary! { "Type" => "Annot", "Subtype" => "Text", "Rect" => vec![20.into(), 20.into(), 40.into(), 40.into()] });
+        document.get_object_mut(first).unwrap().as_dict_mut().unwrap().set("Annots", vec![Object::Reference(annotation)]);
+        for key in ["AcroForm", "StructTreeRoot", "PageLabels", "Threads", "Outlines", "Names"] { document.catalog_mut().unwrap().set(key, dictionary! {}); }
+        document.catalog_mut().unwrap().set("OpenAction", vec![Object::Reference(first), Object::Name(b"Fit".to_vec())]);
+        let mut bytes = Vec::new(); document.save_to(&mut bytes).unwrap();
+        let mut session = EditSession::new(bytes.clone(), 6);
+        let full = visible_box(&document, first).unwrap();
+        session.apply(PageEdit::Crop { page: 0, crop: full }).unwrap();
+        assert_eq!(session.revision, 0); assert!(!session.can_undo()); assert!(!session.dirty());
+        let crop = CropBox { left: 20.0, bottom: 40.0, right: 590.0, top: 750.0 };
+        session.apply(PageEdit::Crop { page: 0, crop }).unwrap();
+        assert_eq!(session.plan[0].crop, Some(crop)); assert_eq!(session.revision, 1);
+        let undo_bytes = session.history_bytes;
+        session.apply(PageEdit::Crop { page: 0, crop }).unwrap();
+        assert_eq!(session.revision, 1); assert_eq!(session.history_bytes, undo_bytes);
+        session.mark_saved();
+        let smaller = CropBox { left: 30.0, bottom: 50.0, right: 580.0, top: 740.0 };
+        session.apply(PageEdit::Crop { page: 0, crop: smaller }).unwrap();
+        assert!(session.apply(PageEdit::Crop { page: 0, crop }).unwrap_err().contains("current visible area"));
+        let output = Document::load_mem(&session.export(None).unwrap()).unwrap();
+        assert_eq!(document.get_pages(), output.get_pages());
+        assert_eq!(output.get_page_content(first), document.get_page_content(first));
+        assert_eq!(visible_box(&output, first).unwrap(), smaller);
+        assert_eq!(output.catalog().unwrap(), document.catalog().unwrap());
+        assert_eq!(output.get_object(annotation).unwrap(), document.get_object(annotation).unwrap());
+        session.apply(PageEdit::Undo).unwrap(); assert!(!session.dirty()); assert_eq!(session.plan[0].crop, Some(crop));
+        session.apply(PageEdit::Redo).unwrap(); assert!(session.dirty()); assert_eq!(session.plan[0].crop, Some(smaller));
+        session.apply(PageEdit::Undo).unwrap();
+        session.apply(PageEdit::Rotate { pages: vec![0], clockwise: true }).unwrap();
+        assert!(!session.can_redo()); assert_eq!(session.plan[0].crop, Some(crop));
+        assert_eq!(session.source, bytes); assert_history_budget(&session);
+        assert!(serde_json::from_str::<PageEdit>(r#"{"kind":"crop","page":0,"crop":{"left":0,"bottom":0,"right":1,"top":1}}"#).is_err(), "Source-coordinate crop cannot bypass the dedicated revision-checked IPC");
+    }
+    #[test]
+    fn crop_inherited_intersected_boxes_survive_structural_export_and_invalid_edits_are_atomic() {
+        let mut document = Document::load_mem(&sample()).unwrap();
+        let root = document.catalog().unwrap().get(b"Pages").unwrap().as_reference().unwrap();
+        for id in document.get_pages().values() {
+            let page = document.get_object_mut(*id).unwrap().as_dict_mut().unwrap();
+            page.remove(b"MediaBox"); page.remove(b"CropBox");
+        }
+        let parent = document.get_object_mut(root).unwrap().as_dict_mut().unwrap();
+        parent.set("MediaBox", vec![20.into(), 30.into(), 612.into(), 792.into()]);
+        parent.set("CropBox", vec![0.into(), 50.into(), 600.into(), 900.into()]);
+        let first = document.get_pages()[&1];
+        assert_eq!(visible_box(&document, first).unwrap(), CropBox { left: 20.0, bottom: 50.0, right: 600.0, top: 792.0 });
+        let mut bytes = Vec::new(); document.save_to(&mut bytes).unwrap();
+        let mut session = EditSession::new(bytes.clone(), 6);
+        let crop = CropBox { left: 30.0, bottom: 60.0, right: 590.0, top: 780.0 };
+        session.apply(PageEdit::Crop { page: 0, crop }).unwrap();
+        let current = session.plan.clone(); let revision = session.revision;
+        for invalid in [CropBox { left: f32::NAN, ..crop }, CropBox { right: f32::INFINITY, ..crop }, CropBox { right: 30.5, ..crop }, CropBox { bottom: 20.0, ..crop }, CropBox { top: 60.0, ..crop }] {
+            assert!(session.apply(PageEdit::Crop { page: 0, crop: invalid }).is_err());
+            assert_eq!(session.plan, current); assert_eq!(session.revision, revision);
+        }
+        assert!(session.apply(PageEdit::Crop { page: 6, crop }).is_err());
+        session.apply(PageEdit::Move { from: 0, to: 5 }).unwrap();
+        let output = Document::load_mem(&session.export(Some(&[0, 5])).unwrap()).unwrap();
+        assert_eq!(visible_box(&output, output.get_pages()[&2]).unwrap(), crop);
+        assert_eq!(visible_box(&output, output.get_pages()[&1]).unwrap(), visible_box(&document, document.get_pages()[&2]).unwrap());
+        assert_eq!(output.get_page_content(output.get_pages()[&2]), document.get_page_content(first));
+        assert_eq!(session.source, bytes);
+    }
+    #[test]
+    fn crop_protected_malformed_and_unsupported_rotations_fail_before_mutation() {
+        let crop = CropBox { left: 30.0, bottom: 60.0, right: 590.0, top: 780.0 };
+        for kind in ["certified", "signature", "byte_range", "rotation", "boundary", "encrypted", "malformed", "page_count"] {
+            let mut document = Document::load_mem(&sample()).unwrap();
+            let first = document.get_pages()[&1];
+            match kind {
+                "certified" => { document.catalog_mut().unwrap().set("Perms", dictionary! {}); }
+                "signature" => { document.add_object(dictionary! { "Type" => "Sig" }); }
+                "byte_range" => { document.add_object(dictionary! { "ByteRange" => vec![0.into(), 1.into(), 2.into(), 3.into()] }); }
+                "rotation" => document.get_object_mut(first).unwrap().as_dict_mut().unwrap().set("Rotate", 45),
+                "boundary" => document.get_object_mut(first).unwrap().as_dict_mut().unwrap().set("CropBox", vec![0.into(), 0.into(), 0.into(), 10.into()]),
+                "encrypted" => {
+                    document.trailer.set("ID", vec![Object::string_literal("crop-test-id"), Object::string_literal("crop-test-id")]);
+                    let encryption = lopdf::EncryptionVersion::V2 { document: &document, owner_password: "owner", user_password: "", key_length: 128, permissions: lopdf::Permissions::all() };
+                    document.encrypt(&lopdf::EncryptionState::try_from(encryption).unwrap()).unwrap();
+                }
+                _ => {}
+            }
+            let mut bytes = Vec::new(); document.save_to(&mut bytes).unwrap();
+            if kind == "malformed" { bytes = b"not a PDF".to_vec(); }
+            let mut session = EditSession::new(bytes.clone(), if kind == "page_count" { 5 } else { 6 });
+            let original = session.plan.clone();
+            assert!(session.apply(PageEdit::Crop { page: 0, crop }).is_err(), "{kind}");
+            assert_eq!(session.plan, original); assert_eq!(session.source, bytes); assert_eq!(session.revision, 0);
+            assert!(!session.dirty()); assert!(!session.can_undo()); assert!(!session.can_redo());
+        }
     }
     #[test]
     fn shared_page_objects_reject_rotation_and_export_without_mutation() {
@@ -311,7 +466,7 @@ mod tests {
     fn history_accounts_for_reserved_capacity_and_both_stacks() {
         let mut session = EditSession::new(sample(), 6);
         let mut roomy = Vec::with_capacity(100);
-        roomy.push(PageSpec { source: 0, turns: 0 });
+        roomy.push(PageSpec { source: 0, turns: 0, crop: None });
         let roomy_bytes = snapshot_bytes(&roomy);
         assert!(roomy_bytes > std::mem::size_of::<PageSpec>() * roomy.len());
         let small = session.plan.clone();

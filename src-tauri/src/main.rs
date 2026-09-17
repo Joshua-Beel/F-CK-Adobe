@@ -57,6 +57,10 @@ async fn edit_pages(service: State<'_, PdfService>, id: u64, edit: editor::PageE
     service.edit(id, edit).await
 }
 #[tauri::command]
+async fn crop_page(service: State<'_, PdfService>, id: u64, page: u16, revision: u64, rect: service::CropRect) -> Result<DocumentInfo, String> {
+    service.crop(id, page, revision, rect).await
+}
+#[tauri::command]
 async fn save_copy(app: tauri::AppHandle, service: State<'_, PdfService>, id: u64, pages: Option<Vec<usize>>) -> Result<Option<service::SavedCopy>, String> {
     let window = app.get_webview_window("main").ok_or("Application window is unavailable")?;
     let suggested = if pages.is_some() { "extracted-pages.pdf" } else { "organized-copy.pdf" };
@@ -77,6 +81,6 @@ fn main() {
         app.manage(PdfService::start(library));
         app.manage(print_commands::PrintJobs::default());
         Ok(())
-    }).invoke_handler(tauri::generate_handler![open_document, reopen_document, open_example, render_page, close_document, edit_pages, save_copy, split_document, page_text, page_text_geometry, document_bookmarks, document_properties, dependency_notices, unlock_document, cancel_password_request, print_commands::print_document, print_commands::cancel_print])
+    }).invoke_handler(tauri::generate_handler![open_document, reopen_document, open_example, render_page, close_document, edit_pages, crop_page, save_copy, split_document, page_text, page_text_geometry, document_bookmarks, document_properties, dependency_notices, unlock_document, cancel_password_request, print_commands::print_document, print_commands::cancel_print])
       .run(tauri::generate_context!()).expect("Desktop application failed");
 }

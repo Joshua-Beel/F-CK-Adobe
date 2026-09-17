@@ -37,6 +37,7 @@ export const editPages = (id: number, edit: PageEdit) => invoke<DocumentInfo>('e
 export const saveCopy = (id: number, pages?: number[]) => invoke<{ path: string; document: DocumentInfo } | null>('save_copy', { id, pages: pages ?? null });
 export type SplitOutput = { folder: string; files: { path: string; first_page: number; last_page: number; page_count: number }[] };
 export const splitDocument = (id: number, revision: number, pagesPerFile: number) => invoke<SplitOutput | null>('split_document', { id, revision, pagesPerFile });
+export const cropPage = (id: number, page: number, revision: number, rect: { x: number; y: number; width: number; height: number }) => invoke<DocumentInfo>('crop_page', { id, page, revision, rect });
 export async function renderPage(id: number, page: number, width: number) {
   const bytes = await invoke<ArrayBuffer>('render_page', { id, page, width });
   return URL.createObjectURL(new Blob([bytes], { type: 'image/png' }));
