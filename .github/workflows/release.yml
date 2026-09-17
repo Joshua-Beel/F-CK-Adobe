@@ -1,0 +1,52 @@
+name: Windows release
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+permissions:
+  contents: write
+concurrency:
+  group: windows-release-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  installer:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Validate release version and signing setup
+        shell: pwsh
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+        run: |
+          if (-not $env:TAURI_SIGNING_PRIVATE_KEY) { throw 'Add the release signing key as TAURI_SIGNING_PRIVATE_KEY in repository Actions secrets.' }
+          $version = (Get-Content src-tauri/tauri.conf.json -Raw | ConvertFrom-Json).version
+          if ($env:GITHUB_REF_TYPE -ne 'tag' -or $env:GITHUB_REF_NAME -ne "v$version") { throw 'Run this workflow on the matching version tag.' }
+      - run: npm ci
+      - run: npm run fixtures
+      - run: ./scripts/setup-pdfium.ps1
+        shell: pwsh
+      - run: npm test
+      - run: cargo test --locked --manifest-path src-tauri/Cargo.toml
+      - name: Build signed installer and update manifest
+        run: npm run installer
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-installer
+          path: src-tauri/target/release/bundle/nsis/*
+          if-no-files-found: error
+      - name: Create draft release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $assets = Get-ChildItem src-tauri/target/release/bundle/nsis -File | Where-Object { $_.Name -match '\.(exe|sig|json)$' } | ForEach-Object FullName
+          gh release create $env:GITHUB_REF_NAME @assets --verify-tag --draft --title "PDF Workstation $env:GITHUB_REF_NAME" --notes-file docs/release-notes.md
+          if ($LASTEXITCODE -ne 0) { throw 'Release creation failed. Existing releases are never overwritten.' }

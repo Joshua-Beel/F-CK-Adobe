@@ -39,6 +39,8 @@ Next: complete viewer core (text selection/search, encrypted-file prompt, bookma
 
 ## Recent changes
 
+- Published and installed v0.2.0. Downloaded the public installer and verified its SHA-256 against the tested build; checked the live update endpoint from the installed app. Added the tag-triggered GitHub workflow for tested, signed draft releases. GitHub-hosted builds await Joshua's `TAURI_SIGNING_PRIVATE_KEY` Actions secret; local signed releases already work. A newer-version replacement/relaunch has not yet been exercised end to end.
+
 - Matched update-manifest URLs to GitHub's uploaded asset names, which replace spaces with periods. Verified the uploaded installer digest matches the locally tested installer before publication.
 
 - Added the 0.2.0 per-user Windows NSIS installer, bundled PDF engine, signed GitHub-release updater with release notes/progress and unsaved-document protection, and release-manifest validation. Signing keys remain outside Git. Windows Authenticode signing is not configured. Eleven frontend/release tests and seven native tests pass; the installer exits successfully and the installed app renders the bundled sample PDF.

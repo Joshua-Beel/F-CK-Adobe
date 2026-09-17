@@ -22,3 +22,7 @@ Joshua configures repository secrets himself. For GitHub-hosted builds, add the 
 Local fallback: use `gh release create` with the existing version tag, the three locally built assets, `--draft`, and `--notes-file docs/release-notes.md`. This needs no Actions secret. After testing, use `gh release edit vMAJOR.MINOR.PATCH --draft=false --latest`.
 
 The first 0.2.0 installer establishes the updater. Earlier development executables have no updater and must install this release manually. Installation replaces app files only; source PDFs remain outside the installation folder.
+
+## Verification
+
+v0.2.0 was installed successfully, and its bundled sample rendered in the installed application. The live GitHub manifest was fetched and its installer downloaded; SHA-256 matched the locally tested build (`17788cb82bb42deac35ea197a385a9bafc8cd331422446a2b834e115a90c4d2e`). The installed updater checked the public endpoint and correctly reported no newer version. Eleven frontend/release tests and seven native tests pass, including unsaved-edit blocking and mocked network/signature failures. A full newer-version replacement/relaunch and the GitHub-hosted workflow remain unexercised; the latter requires Joshua's signing secret.
