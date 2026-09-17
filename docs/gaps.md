@@ -16,4 +16,4 @@ Creation, combining, text/image editing, format export, OCR, image enhancement, 
 
 ## Distribution and verification
 
-No installer/signing/updater, CI, automated desktop UI tests, full dependency-license audit, or 200-file real corpus. Synthetic tests and manual UI checks are recorded separately in phase status. The current build must not be used as a redaction, signing or PDF/A-conformance tool.
+The installer, signed updater, and release CI are implemented. Azure credentials are configured; a publisher-signed release and full upgrade/relaunch still need verification. Automated desktop UI tests, a full dependency-license audit, and a 200-file real corpus remain outstanding. Synthetic tests and manual UI checks are recorded separately in phase status. The current build must not be used as a redaction, document-signing or PDF/A-conformance tool.

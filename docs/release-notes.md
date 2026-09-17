@@ -1,3 +1,9 @@
+## 0.2.1
+
+- Windows publisher signing through Joshua Beel's Azure signing profile.
+- Release builds verify timestamped signatures on the application and installer.
+- Keeps the existing updater key so version 0.2.0 can accept this update.
+
 ## 0.2.0
 
 - Windows installer with the PDF engine included.

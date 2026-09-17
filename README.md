@@ -83,6 +83,7 @@ For more background, see the [architecture notes](docs/decisions.md), [PDFium do
 
 ## Recent changes
 
+- Prepared 0.2.1 to exercise Azure publisher signing and the upgrade from 0.2.0. Release verification is in progress; this is not yet a verified published installer.
 - Release signing uses protected repository Actions secrets and retains publisher and updater verification.
 - Rewrote this README around installing and using the app, with clearer setup instructions and less development-log clutter.
 - Connected future release builds to the existing Azure publisher profile. The build checks for valid, timestamped Joshua Beel signatures before preparing an update. The published 0.2.0 installer hasn't changed.

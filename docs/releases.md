@@ -1,6 +1,6 @@
 # Installers and GitHub updates
 
-Download the Windows x64 setup executable from https://github.com/Joshua-Beel/F-CK-Adobe/releases/latest. Run it once; it installs for the current user and includes PDFium and its license notices. WebView2 is installed if needed, which requires internet access. The published 0.2.0 installer has no Windows publisher signature. Future release builds are configured for Joshua's existing Azure publisher profile, pending repository credentials. Tauri update signatures are separate and are enabled.
+Download the Windows x64 setup executable from https://github.com/Joshua-Beel/F-CK-Adobe/releases/latest. Run it once; it installs for the current user and includes PDFium and its license notices. WebView2 is installed if needed, which requires internet access. The published 0.2.0 installer has no Windows publisher signature. Future release builds are configured for Joshua's existing Azure publisher profile, with repository credentials now saved. Tauri update signatures are separate and are enabled.
 
 In the installed app, choose **Menu > Check for updates**. The dialog shows the installed version, newer release notes, and download progress. Installation requires a click and is disabled while any document has unsaved edits or an operation is running. The verified update starts the installer, closes the app, and relaunches it. Open documents are not automatically restored. Checks are manual; ordinary commits do not update installed apps.
 
@@ -10,7 +10,7 @@ The public update endpoint is `https://github.com/Joshua-Beel/F-CK-Adobe/release
 
 Keep private signing material outside Git in secure storage, with a secure backup. The public updater verification key remains in `src-tauri/tauri.conf.json`.
 
-Joshua configures repository secrets himself. For GitHub-hosted builds, add the file's contents as the repository Actions secret `TAURI_SIGNING_PRIVATE_KEY`. The initial key has no password; `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` is unnecessary unless a password-protected key is used. Do not generate a replacement key for each release.
+The file's contents are saved as the repository Actions secret `TAURI_SIGNING_PRIVATE_KEY`, with Joshua's explicit approval. The initial key has no password; `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` is unnecessary unless a password-protected key is used. Do not generate a replacement key for each release.
 
 ## Publish a new version
 
@@ -22,7 +22,7 @@ Configure `AZURE_TENANT_ID`, `AZURE_CLIENT_ID`, `AZURE_CLIENT_SECRET`, and `TAUR
 
 The release workflow installs pinned `artifact-signing-cli` 0.11.0 and invokes `npm run installer -- -AzureSigning`. The Tauri signing hook applies Azure Authenticode signatures during bundling, before the final installer receives its Tauri updater signature. It then requires valid timestamped `Joshua Beel` signatures on both the app executable and installer before generating the manifest or uploading assets. Missing credentials or invalid signatures fail the release; the workflow never falls back to unsigned publishing. Local `npm run installer` remains a development build without Azure publisher signing. See [Tauri's Azure signing integration](https://v2.tauri.app/distribute/sign/windows/#azure-artifact-signing).
 
-Publish publisher signing as a new version; do not replace the already published 0.2.0 installer, because its Tauri signature and manifest identify those exact bytes. The Azure-enabled path has not been run against the signing service because this repository has no signing credentials configured yet.
+Publish publisher signing as a new version; do not replace the already published 0.2.0 installer, because its Tauri signature and manifest identify those exact bytes. Version 0.2.1 is prepared for the first Azure-enabled workflow run. Its signing and upgrade checks are pending.
 
 ### Release steps
 
@@ -37,4 +37,4 @@ The first 0.2.0 installer establishes the updater. Earlier development executabl
 
 ## Verification
 
-v0.2.0 was installed successfully, and its bundled sample rendered in the installed application. The live GitHub manifest was fetched and its installer downloaded; SHA-256 matched the locally tested build (`17788cb82bb42deac35ea197a385a9bafc8cd331422446a2b834e115a90c4d2e`). The installed updater checked the public endpoint and correctly reported no newer version. Eleven frontend/release tests and seven native tests pass, including unsaved-edit blocking and mocked network/signature failures. A full newer-version replacement/relaunch and the GitHub-hosted workflow remain unexercised; the latter requires Joshua's signing secret.
+v0.2.0 was installed successfully, and its bundled sample rendered in the installed application. The live GitHub manifest was fetched and its installer downloaded; SHA-256 matched the locally tested build (`17788cb82bb42deac35ea197a385a9bafc8cd331422446a2b834e115a90c4d2e`). The installed updater checked the public endpoint and correctly reported no newer version. Eleven frontend/release tests and seven native tests pass, including unsaved-edit blocking and mocked network/signature failures. Those tests also pass after the 0.2.1 version change. A full newer-version replacement/relaunch and the GitHub-hosted signing workflow still need verification.
