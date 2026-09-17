@@ -1,10 +1,10 @@
 # Dependency license inventory
 
-This inventory covers the current Windows x64 source tree, the locally extracted v0.2.4 draft installer, and a fresh local unsigned debug installer extraction. It identifies notice-packaging work; it does not mark the app's licensing review complete. Versions below come from the lockfiles and installed package manifests, not requested version ranges.
+This inventory covers the current Windows x64 source tree, the locally extracted v0.2.4 draft installer, a fresh local unsigned debug installer extraction, and the verified signed v0.2.6 draft extraction. It identifies notice-packaging work; it does not mark the app's licensing review complete. Versions below come from the lockfiles and installed package manifests, not requested version ranges.
 
 ## What is packaged today
 
-`src-tauri/tauri.conf.json` explicitly includes the PDFium DLL, its top-level `LICENSE`, all files under `resources/pdfium/licenses/`, the generated Rust/frontend third-party notice collection, and five exact MPL source archives. The extracted draft installer contains the older PDFium notice set. A fresh local unsigned debug installer extraction matched the generated inventory, full notices, source-archive manifest, and all five archive hashes. That checks bundled resources only; it does not verify installation, signed-release contents, notice interaction, or complete licensing review.
+`src-tauri/tauri.conf.json` explicitly includes the PDFium DLL, its top-level `LICENSE`, all files under `resources/pdfium/licenses/`, the generated Rust/frontend third-party notice collection, and five exact MPL source archives. The extracted 0.2.4 draft contains the older PDFium notice set. A fresh local unsigned debug installer extraction matched the generated inventory, full notices, source-archive manifest, and all five archive hashes. The signed v0.2.6 draft from `c3eea4ab13276e8e998a94a387c24425fb244e7f` was independently extracted from [run 35250878119](https://github.com/Joshua-Beel/Smacrobat/actions/runs/35250878119): all five archives, their manifest, inventory, and both notice resources matched the tagged source. That checks bundled resources only; it does not verify installation, notice interaction, or complete licensing review.
 
 The PDFium distribution is Chromium build **151.0.7881.0**, pinned by `scripts/setup-pdfium.ps1`. Its local `args.gn` says Windows x64, standalone, V8 disabled, XFA disabled. Keep its complete upstream notice set rather than deriving a new list from the wrapper crate's license:
 
@@ -95,7 +95,7 @@ node scripts/dependency-notices.mjs --check
 
 ## Remaining release checks
 
-1. Extract a newly built signed release installer and compare the packaged index, notices, source archives, and manifest against these resources; check the installed app's notice entry. The fresh unsigned debug extraction does not establish those facts.
+1. Check the installed app's notice entry after installation. The signed v0.2.6 draft extraction establishes bundled resources, not installed-app interaction.
 2. Record the WebView2 bootstrapper/distribution version and its associated terms separately. The config downloads the bootstrapper; this inventory did not inspect that payload. The app's own redistribution license is also unresolved: the root has no `LICENSE` file and its Cargo package has no license field. Joshua owns that choice.
 
 ## Reproducing the metadata read
@@ -104,4 +104,4 @@ node scripts/dependency-notices.mjs --check
 cargo metadata --offline --locked --filter-platform x86_64-pc-windows-msvc --format-version 1 --manifest-path src-tauri/Cargo.toml
 ```
 
-The initial inventory used local lockfiles, installed dependency notices and the extracted v0.2.4 draft's PDFium directory. The later supplement collection fetched the recorded upstream license files. The MPL archive collection compared all five official cached archives to their extracted Cargo source trees, and the fresh unsigned debug installer extraction hash-checked all five archives plus both notice resources. These checks establish reproducibility and resource inclusion, not complete release-license review.
+The initial inventory used local lockfiles, installed dependency notices and the extracted v0.2.4 draft's PDFium directory. The later supplement collection fetched the recorded upstream license files. The MPL archive collection compared all five official cached archives to their extracted Cargo source trees; fresh unsigned debug and signed v0.2.6 draft extractions hash-checked all five archives plus both notice resources. These checks establish reproducibility and resource inclusion, not complete release-license review.
