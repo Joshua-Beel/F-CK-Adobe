@@ -6,6 +6,8 @@ use crate::editor::{CropBox, EditSession, PageEdit, PageSpec, write_new_file};
 
 #[derive(Clone, Copy, Deserialize)]
 pub struct CropRect { pub x: f64, pub y: f64, pub width: f64, pub height: f64 }
+#[derive(Clone, Copy, Deserialize)]
+pub struct CombineSource { pub id: u64, pub revision: u64 }
 
 #[derive(Clone, Serialize)]
 pub struct PageSize { width: f32, height: f32 }
@@ -44,6 +46,8 @@ enum Request {
     Crop(u64, u16, u64, CropRect, Reply<DocumentInfo>),
     Save(u64, Option<Vec<usize>>, PathBuf, Reply<SavedCopy>),
     Split(u64, u64, usize, PathBuf, Reply<crate::split::SplitOutput>),
+    CheckCombine(CombineSource, CombineSource, Reply<()>),
+    Combine(CombineSource, CombineSource, PathBuf, Reply<SavedCopy>),
 }
 #[derive(Clone)]
 pub struct PdfService { sender: mpsc::Sender<Request> }
@@ -294,6 +298,40 @@ impl PdfService {
                         })();
                         let _ = reply.send(result);
                     }
+                    Request::CheckCombine(first, second, reply) => {
+                        if reply.is_closed() { continue; }
+                        let result = combine_sessions(&sessions, first, second).and_then(|(first, second)| crate::combine::validate_sources(first, second).map(|_| ()));
+                        let _ = reply.send(result);
+                    }
+                    Request::Combine(first, second, path, reply) => {
+                        if reply.is_closed() { continue; }
+                        let result = (|| {
+                            let (first, second) = combine_sessions(&sessions, first, second)?;
+                            let engine = pdfium.as_ref().map_err(Clone::clone)?;
+                            let mut prepared = None;
+                            let bytes = crate::combine::prepare_and_write(first, second, &path, |bytes, expected| {
+                                if reply.is_closed() { return Err("Combine was canceled.".into()); }
+                                let document = engine.load_pdf_from_byte_vec(bytes.to_vec(), None).map_err(|error| format!("Output could not be opened: {error}"))?;
+                                let pages = page_sizes(&document)?;
+                                if pages.len() != expected { return Err("Output page count differs from the combine plan.".into()); }
+                                for index in 0..document.pages().len() {
+                                    let page = document.pages().get(index).map_err(|error| format!("Output page {} could not be read: {error}", index + 1))?;
+                                    let bitmap = page.render_with_config(&PdfRenderConfig::new().set_target_width(64).set_maximum_height(64)).map_err(|error| format!("Output page {} could not be rendered: {error}", index + 1))?;
+                                    if bitmap.width() <= 0 || bitmap.height() <= 0 { return Err(format!("Output page {} has an invalid bitmap.", index + 1)); }
+                                }
+                                if reply.is_closed() { return Err("Combine was canceled.".into()); }
+                                prepared = Some((document, pages));
+                                Ok(())
+                            })?;
+                            let (document, pages) = prepared.ok_or("Combined output was not validated")?;
+                            let id = next_id; next_id += 1;
+                            let info = DocumentInfo { id, name: path.file_name().unwrap_or_default().to_string_lossy().into_owned(), path: path.to_string_lossy().into_owned(), pages, revision: 0, dirty: false, can_undo: false, can_redo: false };
+                            sessions.insert(id, (EditSession::new(bytes, info.pages.len()), info.clone()));
+                            documents.insert(id, std::rc::Rc::new(document));
+                            Ok(SavedCopy { path: path.to_string_lossy().into_owned(), document: info })
+                        })();
+                        if let Err(Ok(saved)) = reply.send(result) { documents.remove(&saved.document.id); sessions.remove(&saved.document.id); }
+                    }
                     Request::Save(id, pages, path, reply) => {
                         let result = (|| {
                             let (session, original) = sessions.get_mut(&id).ok_or("Document is closed")?;
@@ -366,6 +404,20 @@ impl PdfService {
     pub async fn split(&self, id: u64, revision: u64, pages_per_file: usize, folder: PathBuf) -> Result<crate::split::SplitOutput, String> {
         let (tx, rx) = oneshot::channel(); self.sender.send(Request::Split(id, revision, pages_per_file, folder, tx)).map_err(|error| error.to_string())?; rx.await.map_err(|error| error.to_string())?
     }
+    pub async fn check_combine(&self, first: CombineSource, second: CombineSource) -> Result<(), String> {
+        let (tx, rx) = oneshot::channel(); self.sender.send(Request::CheckCombine(first, second, tx)).map_err(|error| error.to_string())?; rx.await.map_err(|error| error.to_string())?
+    }
+    pub async fn combine(&self, first: CombineSource, second: CombineSource, path: PathBuf) -> Result<SavedCopy, String> {
+        let (tx, rx) = oneshot::channel(); self.sender.send(Request::Combine(first, second, path, tx)).map_err(|error| error.to_string())?; rx.await.map_err(|error| error.to_string())?
+    }
+}
+
+fn combine_sessions(sessions: &HashMap<u64, (EditSession, DocumentInfo)>, first: CombineSource, second: CombineSource) -> Result<(&EditSession, &EditSession), String> {
+    if first.id == second.id { return Err("Choose two different open PDFs to combine.".into()); }
+    let first_session = &sessions.get(&first.id).ok_or("First document is closed")?.0;
+    let second_session = &sessions.get(&second.id).ok_or("Second document is closed")?.0;
+    if first_session.revision != first.revision || second_session.revision != second.revision { return Err("A document changed. Open Combine again.".into()); }
+    Ok((first_session, second_session))
 }
 
 fn print_dimensions(width: f32, height: f32, max_width: u32, max_height: u32) -> Result<(u32, u32), String> {
@@ -506,6 +558,141 @@ mod tests {
         };
         assert!(compare(&actual_ink, actual, expected) as f64 / actual_ink.len() as f64 > 0.99, "Crop has unexpected rendered ink");
         assert!(compare(&expected_ink, expected, actual) as f64 / expected_ink.len() as f64 > 0.99, "Crop lost expected rendered ink");
+    }
+    fn combine_source(info: &DocumentInfo) -> CombineSource { CombineSource { id: info.id, revision: info.revision } }
+    #[test]
+    fn combine_all_ordered_fixture_pairs_validate_every_output_page_and_preserve_source_history() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let service = PdfService::start(root.join("resources/pdfium/bin/pdfium.dll"));
+        let folder = tempfile::tempdir().unwrap();
+        let fixtures = [("resources/welcome.pdf", 6usize), ("../test-corpus/synthetic-scan-98.pdf", 98), ("../test-corpus/synthetic-text-1500.pdf", 1500)];
+        for (first_index, (first_fixture, first_count)) in fixtures.iter().enumerate() {
+            for (second_index, (second_fixture, second_count)) in fixtures.iter().enumerate() {
+                if first_index == second_index { continue; }
+                let first_path = root.join(first_fixture); let second_path = root.join(second_fixture);
+                let first_bytes = std::fs::read(&first_path).unwrap(); let second_bytes = std::fs::read(&second_path).unwrap();
+                let mut first = call(&service, |reply| Request::Open(first_path.clone(), reply)).unwrap();
+                let mut second = call(&service, |reply| Request::Open(second_path.clone(), reply)).unwrap();
+                for edit in [PageEdit::Move { from: 0, to: 2 }, PageEdit::Rotate { pages: vec![0], clockwise: true }, PageEdit::Delete { pages: vec![1] }] {
+                    first = call(&service, |reply| Request::Edit(first.id, edit, reply)).unwrap();
+                }
+                for edit in [PageEdit::Delete { pages: vec![1, 3] }, PageEdit::Rotate { pages: vec![0], clockwise: false }, PageEdit::Move { from: 0, to: 1 }] {
+                    second = call(&service, |reply| Request::Edit(second.id, edit, reply)).unwrap();
+                }
+                let path = folder.path().join(format!("pair-{first_count}-{second_count}.pdf"));
+                call(&service, |reply| Request::CheckCombine(combine_source(&first), combine_source(&second), reply)).unwrap();
+                let started = std::time::Instant::now();
+                let combined = call(&service, |reply| Request::Combine(combine_source(&first), combine_source(&second), path.clone(), reply)).unwrap().document;
+                println!("combine {first_count}+{second_count}: {} current pages, validation/write {:?}", combined.pages.len(), started.elapsed());
+                assert_ne!(combined.id, first.id); assert_ne!(combined.id, second.id);
+                assert_eq!(combined.pages.len(), first_count + second_count - 3);
+                assert_eq!(combined.revision, 0);
+                assert!(!combined.dirty && !combined.can_undo && !combined.can_redo);
+                let reopened = call(&service, |reply| Request::Open(path.clone(), reply)).unwrap();
+                for position in 0..combined.pages.len() {
+                    let (source, local, original_page, count) = if position < first.pages.len() {
+                        let original = match position { 0 => 1, 1 => 0, other => other + 1 };
+                        (&first, position, original, first_count)
+                    } else {
+                        let local = position - first.pages.len();
+                        let original = match local { 0 => 2, 1 => 0, other => other + 2 };
+                        (&second, local, original, second_count)
+                    };
+                    let text = call(&service, |reply| Request::Text(combined.id, position as u16, 0, reply)).unwrap();
+                    assert!(text.contains(&format!("Page {} of {count}", original_page + 1)), "Output source/order differs at page {position} of {first_count}+{second_count}");
+                    assert_eq!((combined.pages[position].width, combined.pages[position].height), (source.pages[local].width, source.pages[local].height));
+                    let expected = call(&service, |reply| Request::Render(source.id, local as u16, 64, reply)).unwrap();
+                    let actual = call(&service, |reply| Request::Render(combined.id, position as u16, 64, reply)).unwrap();
+                    let reopened_actual = call(&service, |reply| Request::Render(reopened.id, position as u16, 64, reply)).unwrap();
+                    let decode = |bytes: &[u8]| image::load_from_memory(bytes).unwrap().into_rgba8();
+                    assert_eq!(decode(&actual), decode(&expected), "Combined output render differs at page {position}");
+                    assert_eq!(decode(&reopened_actual), decode(&expected), "Reopened output render differs at page {position}");
+                }
+                assert_eq!(std::fs::read(&first_path).unwrap(), first_bytes); assert_eq!(std::fs::read(&second_path).unwrap(), second_bytes);
+                for source in [&first, &second] {
+                    let properties = call(&service, |reply| Request::Properties(source.id, source.revision, reply)).unwrap();
+                    assert_eq!(properties.page_count, source.pages.len());
+                    for undo in 0..3 {
+                        let restored = call(&service, |reply| Request::Edit(source.id, PageEdit::Undo, reply)).unwrap();
+                        assert_eq!(restored.revision, source.revision + undo + 1); assert_eq!(restored.dirty, undo != 2); assert!(restored.can_redo);
+                    }
+                }
+                for id in [first.id, second.id, combined.id, reopened.id] { call(&service, |reply| Request::Close(id, reply)).unwrap(); }
+            }
+        }
+    }
+    #[test]
+    fn combine_cropped_inherited_original_and_edited_rotations_keep_independent_ink_and_visible_tokens() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let service = PdfService::start(root.join("resources/pdfium/bin/pdfium.dll")); let folder = tempfile::tempdir().unwrap();
+        for original in [0, 90, 180, 270] {
+            for edited in 0..4 {
+                let mut sources = Vec::new(); let mut expected = Vec::new();
+                for (index, label) in ["First", "Second"].into_iter().enumerate() {
+                    let rotation = if index == 0 { original } else { (360 - original) % 360 };
+                    let bytes = crate::text_geometry::tests::fixture(rotation, [1.0, 0.0, 0.0, 1.0, 100.0, 300.0], &format!("{label}OutsideTop\n\n{label}Header\n{label}Body\n\n{label}OutsideBottom"));
+                    let mut pdf = lopdf::Document::load_mem(&bytes).unwrap(); let page = pdf.get_pages()[&1];
+                    pdf.get_dictionary_mut(page).unwrap().set("MediaBox", vec![20.into(), 30.into(), 420.into(), 430.into()]);
+                    let parent = pdf.get_dictionary(page).unwrap().get(b"Parent").unwrap().as_reference().unwrap();
+                    for key in [b"MediaBox".as_slice(), b"CropBox", b"Rotate", b"Resources"] {
+                        let value = pdf.get_dictionary_mut(page).unwrap().remove(key).unwrap(); pdf.get_dictionary_mut(parent).unwrap().set(key, value);
+                    }
+                    let path = folder.path().join(format!("source-{original}-{edited}-{index}.pdf")); pdf.save(&path).unwrap(); let source_bytes = std::fs::read(&path).unwrap();
+                    let mut info = call(&service, |reply| Request::Open(path.clone(), reply)).unwrap();
+                    for _ in 0..edited { info = call(&service, |reply| Request::Edit(info.id, PageEdit::Rotate { pages: vec![0], clockwise: index == 0 }, reply)).unwrap(); }
+                    let turns = (rotation / 90 + if index == 0 { edited } else { (4 - edited) % 4 }) % 4;
+                    let (rect, region, old_width, new_width) = match turns {
+                        0 => (CropRect { x: 0.1, y: 70.0 / 260.0, width: 0.8, height: 110.0 / 260.0 }, (90, 210, 720, 330), 900, 720),
+                        1 => (CropRect { x: 80.0 / 260.0, y: 0.1, width: 110.0 / 260.0, height: 0.8 }, (240, 90, 330, 720), 780, 330),
+                        2 => (CropRect { x: 0.1, y: 80.0 / 260.0, width: 0.8, height: 110.0 / 260.0 }, (90, 240, 720, 330), 900, 720),
+                        _ => (CropRect { x: 70.0 / 260.0, y: 0.1, width: 110.0 / 260.0, height: 0.8 }, (210, 90, 330, 720), 780, 330),
+                    };
+                    let before = image::load_from_memory(&call(&service, |reply| Request::Render(info.id, 0, old_width, reply)).unwrap()).unwrap().into_rgb8();
+                    expected.push((image::imageops::crop_imm(&before, region.0, region.1, region.2, region.3).to_image(), new_width, turns));
+                    info = call(&service, |reply| Request::Crop(info.id, 0, info.revision, rect, reply)).unwrap();
+                    sources.push((info, path, source_bytes));
+                }
+                let path = folder.path().join(format!("combined-{original}-{edited}.pdf"));
+                let combined = call(&service, |reply| Request::Combine(combine_source(&sources[0].0), combine_source(&sources[1].0), path.clone(), reply)).unwrap().document;
+                let reopened = call(&service, |reply| Request::Open(path.clone(), reply)).unwrap();
+                let output = lopdf::Document::load(&path).unwrap();
+                for (index, label) in ["First", "Second"].into_iter().enumerate() {
+                    let (expected, width, turns) = &expected[index];
+                    let dimensions = if turns % 2 == 0 { (240.0, 110.0) } else { (110.0, 240.0) };
+                    assert_eq!((combined.pages[index].width, combined.pages[index].height), dimensions);
+                    for id in [combined.id, reopened.id] {
+                        let actual = image::load_from_memory(&call(&service, |reply| Request::Render(id, index as u16, *width, reply)).unwrap()).unwrap().into_rgb8(); assert_same_ink(&actual, expected);
+                        let text = call(&service, |reply| Request::Text(id, index as u16, 0, reply)).unwrap();
+                        let geometry = call(&service, |reply| Request::TextGeometry(id, index as u16, 0, reply)).unwrap(); assert_eq!(geometry.status, "ok");
+                        let copied = geometry.characters.iter().map(|character| character.text.as_str()).collect::<String>();
+                        for token in [format!("{label}Header"), format!("{label}Body")] { assert!(text.contains(&token), "{original}/{edited}: {text}"); assert!(copied.contains(&token), "{original}/{edited}: {copied}"); }
+                        for token in [format!("{label}OutsideTop"), format!("{label}OutsideBottom")] { assert!(!text.contains(&token) && !copied.contains(&token)); }
+                    }
+                    assert!(String::from_utf8_lossy(&output.get_page_content(output.get_pages()[&(index as u32 + 1)])).contains(&format!("{label}OutsideBottom")), "Crop must retain the underlying hidden content");
+                    let (source, source_path, source_bytes) = &sources[index]; assert_eq!(std::fs::read(source_path).unwrap(), *source_bytes);
+                    let undo = call(&service, |reply| Request::Edit(source.id, PageEdit::Undo, reply)).unwrap(); assert_eq!(undo.revision, source.revision + 1); assert!(undo.can_redo);
+                    call(&service, |reply| Request::Close(source.id, reply)).unwrap();
+                }
+                for id in [combined.id, reopened.id] { call(&service, |reply| Request::Close(id, reply)).unwrap(); }
+            }
+        }
+    }
+    #[test]
+    fn combine_duplicate_stale_and_closed_after_preflight_never_write_or_mutate_sources() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")); let service = PdfService::start(root.join("resources/pdfium/bin/pdfium.dll")); let folder = tempfile::tempdir().unwrap();
+        let first = call(&service, |reply| Request::Open(root.join("resources/welcome.pdf"), reply)).unwrap();
+        let second = call(&service, |reply| Request::Open(root.join("resources/welcome.pdf"), reply)).unwrap();
+        let path = folder.path().join("must-not-combine.pdf");
+        let combine = |first, second| call(&service, |reply| Request::Combine(first, second, path.clone(), reply));
+        assert!(combine(combine_source(&first), combine_source(&first)).err().unwrap().contains("different"));
+        call(&service, |reply| Request::CheckCombine(combine_source(&first), combine_source(&second), reply)).unwrap();
+        let changed = call(&service, |reply| Request::Edit(second.id, PageEdit::Rotate { pages: vec![0], clockwise: true }, reply)).unwrap();
+        assert!(combine(combine_source(&first), combine_source(&second)).err().unwrap().contains("changed")); assert!(!path.exists());
+        let restored = call(&service, |reply| Request::Edit(second.id, PageEdit::Undo, reply)).unwrap(); assert!(!restored.dirty && restored.can_redo);
+        call(&service, |reply| Request::CheckCombine(combine_source(&first), combine_source(&restored), reply)).unwrap();
+        call(&service, |reply| Request::Close(second.id, reply)).unwrap(); assert!(combine(combine_source(&first), combine_source(&restored)).err().unwrap().contains("Second document is closed"));
+        call(&service, |reply| Request::Close(first.id, reply)).unwrap(); assert!(combine(combine_source(&first), combine_source(&changed)).err().unwrap().contains("First document is closed"));
+        assert!(!path.exists()); assert_eq!(std::fs::read_dir(folder.path()).unwrap().count(), 0);
     }
     #[test]
     fn crop_rotation_inherited_boxes_preview_text_geometry_print_and_reopened_outputs_agree() {
@@ -1012,6 +1199,7 @@ mod tests {
         let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         let folder = tempfile::tempdir().unwrap();
         let service = PdfService::start(root.join("resources/pdfium/bin/pdfium.dll"));
+        let ordinary = call(&service, |reply| Request::Open(root.join("resources/welcome.pdf"), reply)).unwrap();
         for (version, user_password) in [2, 4, 5].into_iter().flat_map(|version| ["test password", ""].map(|password| (version, password))) {
             let mut pdf = lopdf::Document::load(root.join("resources/welcome.pdf")).unwrap();
             pdf.trailer.set("ID", vec![lopdf::Object::string_literal("password-test-id"), lopdf::Object::string_literal("password-test-id")]);
@@ -1067,9 +1255,12 @@ mod tests {
             let (tx, rx) = oneshot::channel(); service.sender.send(Request::Render(info.id, 0, 101, tx)).unwrap(); assert!(!rx.blocking_recv().unwrap().unwrap().is_empty(), "Rejected crop must preserve a fresh encrypted preview");
             let output = folder.path().join("must-not-export.pdf");
             let (tx, rx) = oneshot::channel(); service.sender.send(Request::Save(info.id, None, output.clone(), tx)).unwrap(); assert!(rx.blocking_recv().unwrap().is_err()); assert!(!output.exists());
+            assert!(call(&service, |reply| Request::CheckCombine(combine_source(&ordinary), combine_source(&info), reply)).is_err(), "Encrypted v{version}-{kind} must not combine");
+            assert!(call(&service, |reply| Request::Combine(combine_source(&info), combine_source(&ordinary), output.clone(), reply)).is_err()); assert!(!output.exists());
             assert_eq!(std::fs::read(&path).unwrap(), source);
             let (tx, rx) = oneshot::channel(); service.sender.send(Request::Close(info.id, tx)).unwrap(); rx.blocking_recv().unwrap().unwrap();
         }
+        call(&service, |reply| Request::Close(ordinary.id, reply)).unwrap();
     }
     #[test]
     fn malformed_middle_page_is_rejected_instead_of_silently_truncated() {

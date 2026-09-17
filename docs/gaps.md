@@ -10,9 +10,9 @@ No validated 60 fps target, 10,000-page open latency, real 300-dpi scan benchmar
 
 ## Remaining tools
 
-Organization now supports rotate/delete/extract, move earlier/later or directly to a numbered position, fixed-size splitting to a new folder, one-page point-inset cropping, undo/redo and save a new copy. Insert/replace/page-label/page-box operations, drag-reordering and extraction into separate files remain unimplemented. Signed or certified documents are rejected for edits; complex page-reference structures are rejected for relevant destructive/structural operations until preservation is implemented. See the tool documentation for exact restrictions.
+Organization now supports rotate/delete/extract, move earlier/later or directly to a numbered position, fixed-size splitting to a new folder, one-page point-inset cropping, undo/redo and save a new copy. Combine Files joins two distinct open PDFs in a chosen order into a new copy using their current edits, retaining only the first PDF’s Info/XMP metadata; it rejects unsupported page-tree/catalog features, caps output at 4,096 pages and 256 MiB, and leaves both source sessions unchanged. Insert/replace/page-label/page-box operations, drag-reordering and extraction into separate files remain unimplemented. Signed or certified documents are rejected for edits; complex page-reference structures are rejected for relevant destructive/structural operations until preservation is implemented. See the tool documentation for exact restrictions.
 
-Creation, combining, text/image editing, format export, OCR, image enhancement, commenting, stamps, measurement, comparison, form preparation, fill/sign, certificate, password security, sanitization, redaction, PDF standards, optimization, accessibility, print preview, action wizard, custom-tool, index and virtual-printer features remain unimplemented. Disabled cards are a roadmap, not evidence of implementation.
+Creation, text/image editing, format export, OCR, image enhancement, commenting, stamps, measurement, comparison, form preparation, fill/sign, certificate, password security, sanitization, redaction, PDF standards, optimization, accessibility, print preview, action wizard, custom-tool, index and virtual-printer features remain unimplemented. Disabled cards are a roadmap, not evidence of implementation.
 
 ## Distribution and verification
 

@@ -6,6 +6,7 @@ mod print_commands;
 mod document_properties;
 mod text_geometry;
 mod split;
+mod combine;
 use service::{DocumentInfo, PdfService};
 use tauri::{Manager, State};
 
@@ -75,12 +76,20 @@ async fn split_document(app: tauri::AppHandle, service: State<'_, PdfService>, i
     match folder { Some(folder) => service.split(id, revision, pages_per_file, folder).await.map(Some), None => Ok(None) }
 }
 
+#[tauri::command]
+async fn combine_documents(app: tauri::AppHandle, service: State<'_, PdfService>, first: service::CombineSource, second: service::CombineSource) -> Result<Option<service::SavedCopy>, String> {
+    service.check_combine(first, second).await?;
+    let window = app.get_webview_window("main").ok_or("Application window is unavailable")?;
+    let path = tauri::async_runtime::spawn_blocking(move || rfd::FileDialog::new().set_parent(&window).set_title("Save combined PDF as a new file").add_filter("PDF documents", &["pdf"]).set_file_name("combined.pdf").save_file()).await.map_err(|error| error.to_string())?;
+    match path { Some(path) => service.combine(first, second, path).await.map(Some), None => Ok(None) }
+}
+
 fn main() {
     tauri::Builder::default().plugin(tauri_plugin_updater::Builder::new().build()).setup(|app| {
         let library = app.path().resource_dir()?.join("resources/pdfium/bin/pdfium.dll");
         app.manage(PdfService::start(library));
         app.manage(print_commands::PrintJobs::default());
         Ok(())
-    }).invoke_handler(tauri::generate_handler![open_document, reopen_document, open_example, render_page, close_document, edit_pages, crop_page, save_copy, split_document, page_text, page_text_geometry, document_bookmarks, document_properties, dependency_notices, unlock_document, cancel_password_request, print_commands::print_document, print_commands::cancel_print])
+    }).invoke_handler(tauri::generate_handler![open_document, reopen_document, open_example, render_page, close_document, edit_pages, crop_page, save_copy, split_document, combine_documents, page_text, page_text_geometry, document_bookmarks, document_properties, dependency_notices, unlock_document, cancel_password_request, print_commands::print_document, print_commands::cancel_print])
       .run(tauri::generate_context!()).expect("Desktop application failed");
 }

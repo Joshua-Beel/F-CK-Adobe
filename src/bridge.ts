@@ -34,7 +34,9 @@ export const pageTextGeometry = (id: number, page: number, revision: number) => 
 export type BookmarkList = { items: { title: string; page: number | null; depth: number }[]; truncated: boolean };
 export const documentBookmarks = (id: number, revision: number) => invoke<BookmarkList>('document_bookmarks', { id, revision });
 export const editPages = (id: number, edit: PageEdit) => invoke<DocumentInfo>('edit_pages', { id, edit });
-export const saveCopy = (id: number, pages?: number[]) => invoke<{ path: string; document: DocumentInfo } | null>('save_copy', { id, pages: pages ?? null });
+export type SavedCopy = { path: string; document: DocumentInfo };
+export const saveCopy = (id: number, pages?: number[]) => invoke<SavedCopy | null>('save_copy', { id, pages: pages ?? null });
+export const combineDocuments = (first: { id: number; revision: number }, second: { id: number; revision: number }) => invoke<SavedCopy | null>('combine_documents', { first, second });
 export type SplitOutput = { folder: string; files: { path: string; first_page: number; last_page: number; page_count: number }[] };
 export const splitDocument = (id: number, revision: number, pagesPerFile: number) => invoke<SplitOutput | null>('split_document', { id, revision, pagesPerFile });
 export const cropPage = (id: number, page: number, revision: number, rect: { x: number; y: number; width: number; height: number }) => invoke<DocumentInfo>('crop_page', { id, page, revision, rect });

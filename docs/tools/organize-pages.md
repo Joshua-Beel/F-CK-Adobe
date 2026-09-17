@@ -2,6 +2,8 @@
 
 Open a PDF, then choose **Organize pages** in All tools. Click thumbnails, Ctrl+click individual pages, Shift+click a range, or enter a range such as `1-3, 5` and press Select.
 
+**Combine Files** is a separate All tools command. With two distinct PDFs open, choose the first and second document; it writes a new copy containing their current edited pages in that order. The first PDF’s Info/XMP metadata is retained without merging or inventing metadata. Both source tabs, including unsaved edits and history, stay unchanged.
+
 Available commands:
 - Rotate selected pages clockwise/counterclockwise.
 - Delete selected pages with confirmation. At least one page must remain. Undo restores deletion.
@@ -14,7 +16,7 @@ Available commands:
 
 Edits remain in memory until saved. Source PDFs are never overwritten. A copy save clears the working document's unsaved indicator; extraction does not. Closing a tab or window with unsaved edits prompts before discarding.
 
-Native extraction output is validated for PDFium readability and page count, written to a temporary file, flushed, and atomically published at a new filename. Split output validates every file in a staged folder before atomically publishing that new folder; existing folders are never replaced. The original source bytes are frozen at open; splitting uses the current edited page order but does not clear the unsaved indicator, alter the save baseline, or change undo/redo history. The 64-output limit and 256 MiB limit per split file protect output creation; neither is an application memory cap.
+Native extraction output is validated for PDFium readability and page count, written to a temporary file, flushed, and atomically published at a new filename. Split output validates every file in a staged folder before atomically publishing that new folder; existing folders are never replaced. Combine validates the two current source plans and every new output before publishing a new file without replacement; it rejects unsupported catalog/page-tree features, caps output at 4,096 pages and 256 MiB, and leaves both source sessions unchanged. These limits protect output creation; they are not application memory caps. The original source bytes are frozen at open; splitting uses the current edited page order but does not clear the unsaved indicator, alter the save baseline, or change undo/redo history.
 
 Limitations:
 - Signed/certified/encrypted files are not edited.
@@ -23,8 +25,8 @@ Limitations:
 - No insert, replace, page labels, page boxes, drag-reorder, or one-file-per-extracted-page yet.
 - Thumbnail cards are all present in the grid; only nearby thumbnails are rasterized. No measured real-document performance claim.
 
-Verification: 52 native tests and 87 frontend/release tests pass, along with the production frontend build and standalone Windows debug build. Split coverage includes current edited pages across all three valid fixtures, output grouping, validation rollback, existing/racing-folder refusal, source/session preservation, invalid UI inputs, canceled native folder selection, retry, duplicate submission, busy-state guarding, and unchanged document state. Crop coverage includes current-page initialization, rotated displayed dimensions, finite/non-negative and one-point boundaries, stale/error/cancel/retry behavior, duplicate guarding, pixel-preserving saved output, and unchanged source bytes. A browser harness verified crop preview and the normalized request with mocked IPC; it does not verify native desktop interaction. Original fixture bytes remain identical. Export, validation, and publication for three outputs took 15.6 ms, 305.2 ms, and 631.6 ms for 5, 97, and 1,499 edited pages respectively; these are split fixture timings, not a whole-application benchmark.
+Verification: 60 native tests and 92 frontend/release tests pass, along with the production frontend build and standalone Windows debug build. Combine coverage includes all six ordered pairs of the three document fixtures, every output page, cropped rotation ink/tokens, metadata, stale/closed/duplicate guards, unsupported-structure refusal, source/history preservation, output validation, and existing/racing-file refusal. A browser harness checked order, page count, metadata notice, and submitted revisions with mocked IPC; it does not verify the native save dialog. Split coverage includes current edited pages across all three valid fixtures, output grouping, validation rollback, existing/racing-folder refusal, source/session preservation, invalid UI inputs, canceled native folder selection, retry, duplicate submission, busy-state guarding, and unchanged document state. Crop coverage includes current-page initialization, rotated displayed dimensions, finite/non-negative and one-point boundaries, stale/error/cancel/retry behavior, duplicate guarding, pixel-preserving saved output, and unchanged source bytes. Original fixture bytes remain identical. Export, validation, and publication for three outputs took 15.6 ms, 305.2 ms, and 631.6 ms for 5, 97, and 1,499 edited pages respectively; these are split fixture timings, not a whole-application benchmark.
 
 Standalone desktop verification: opened the sample, displayed six rendered thumbnails, rotated page 1 to landscape, and saved through the native Save dialog to `artifacts/ui-organized-copy.pdf`. The 6,897-byte output exists and the application reported successful save and cleared its unsaved indicator.
 
-Native folder-dialog interaction for splitting and native crop interaction remain unverified in the desktop application.
+Native folder-dialog interaction for splitting, native crop interaction, and the native save dialog for Combine Files remain unverified in the desktop application.

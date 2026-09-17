@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { Undo2, Redo2 } from 'lucide-react';
 import { ArrowDownToLine, ArrowUpRight, Bookmark, ChevronDown, ChevronLeft, ChevronRight, ChevronsUpDown, CircleHelp, Combine, File, FileCheck2, FileImage, FileOutput, FilePenLine, FilePlus2, Files, FolderOpen, Hand, Highlighter, Home, LayoutGrid, List, Maximize, Menu, MessageSquare, Minus, MoreHorizontal, MousePointer2, PanelLeftClose, Pencil, Plus, Printer, RotateCw, Save, ScanLine, Search, ShieldCheck, Signature, SlidersHorizontal, Star, Sun, Type, X, ZoomIn, ZoomOut, type LucideIcon } from 'lucide-react';
-import { closeDocument, native, openDocument, reopenDocument, editPages, saveCopy, splitDocument, cropPage, type OpenResult, type SplitOutput } from './bridge';
+import { closeDocument, native, openDocument, reopenDocument, editPages, saveCopy, splitDocument, cropPage, combineDocuments, type OpenResult, type SplitOutput, type SavedCopy } from './bridge';
 import { clampPage, toolGroups, type DocumentInfo, type PageEdit } from './model';
 import Viewer from './Viewer';
 import Organizer from './Organizer';
@@ -15,6 +15,7 @@ import PasswordDialog from './PasswordDialog';
 import PrintDialog from './PrintDialog';
 import DocumentProperties from './DocumentProperties';
 import DependencyNotices from './DependencyNotices';
+import CombineDialog from './CombineDialog';
 import { readPreferences, savePreferences } from './preferences';
 import { readRecentFiles, saveRecentFiles, rememberFile } from './recentFiles';
 import s from './Workspace.module.css';
@@ -56,6 +57,7 @@ export default function App() {
   const [target, setTarget] = useState({ page: 0, token: 0 });
   const [recentFiles, setRecentFiles] = useState(readRecentFiles);
   const [organizing, setOrganizing] = useState(false);
+  const [combineOpen, setCombineOpen] = useState(false);
   const [pendingClose, setPendingClose] = useState<number | 'window' | null>(null);
   const closingDocument = useRef<number | null>(null);
   useEffect(() => {
@@ -151,11 +153,31 @@ export default function App() {
     try { updateDocument(await cropPage(doc.id, cropPageIndex, doc.revision, rect)); }
     finally { setBusy(false); }
   };
+  const combine = async (first: { id: number; revision: number }, second: { id: number; revision: number }): Promise<SavedCopy | null> => {
+    if (busy || closingDocument.current !== null) throw new Error('The workspace is not ready to combine PDFs.');
+    if (first.id === second.id) throw new Error('Choose two different open PDFs.');
+    const firstDocument = documents.find(document => document.id === first.id);
+    const secondDocument = documents.find(document => document.id === second.id);
+    if (!firstDocument || !secondDocument) throw new Error('One selected PDF is no longer open. Choose two open PDFs.');
+    if (firstDocument.revision !== first.revision || secondDocument.revision !== second.revision) throw new Error('A selected PDF changed. Choose the order again.');
+    if (firstDocument.pages.length + secondDocument.pages.length > 4096) throw new Error('These PDFs exceed the 4,096-page combine limit.');
+    setBusy(true); setError(''); setNotice('');
+    try {
+      const result = await combineDocuments(first, second);
+      if (result) opened(result.document, false);
+      return result;
+    } finally { setBusy(false); }
+  };
   const launchOrganizer = () => { if (busy || closingDocument.current !== null) return; if (doc) { setOrganizing(true); setView('document'); } else void open(false, true); };
+  const launchCombine = () => {
+    if (busy || closingDocument.current !== null) return;
+    if (documents.length < 2) { setNotice('Open two PDFs to combine them.'); return; }
+    setMenu(false); setOrganizing(false); setView('document'); setCombineOpen(true);
+  };
   const go = (value: number) => { if (doc) { const next = clampPage(value, doc.pages.length); trackPage(next); setTarget(v => ({ page: next, token: v.token + 1 })); } };
   useEffect(() => {
     const listener = (event: KeyboardEvent) => {
-      if (updatesOpen || pageTextOpen || printOpen || propertiesOpen || noticesOpen || passwordRequest || pendingClose !== null) return;
+      if (updatesOpen || pageTextOpen || printOpen || propertiesOpen || noticesOpen || passwordRequest || pendingClose !== null || combineOpen) return;
       if ((event.target as HTMLElement | null)?.closest?.('dialog')) return;
       if (event.ctrlKey && event.key.toLowerCase() === 'o') { event.preventDefault(); void open(); }
       if (event.ctrlKey && event.key.toLowerCase() === 'f' && doc) { event.preventDefault(); setView('document'); setOrganizing(false); setSearchOpen(true); return; }
@@ -184,7 +206,10 @@ export default function App() {
   const changeZoom = (value: number) => { setFit(false); setZoom(Math.max(10, Math.min(400, value))); };
   const toolRow = (name: string, index: number) => {
     const Icon = icons[name] || FileCheck2;
-    return <button key={name} className={s.toolRow} disabled={name !== 'Organize pages' || busy} onClick={launchOrganizer} title={name === 'Organize pages' ? name : `${name} — planned, not implemented yet`}><span className={s.toolIcon} style={{ color: ['#7361b3', '#277bb4', '#239576', '#bc6b25'][index % 4] }}><Icon size={21} strokeWidth={1.7} /></span><span>{name}</span></button>;
+    const available = name === 'Organize pages' || name === 'Combine files';
+    const combine = name === 'Combine files';
+    const disabled = busy || !available || (combine && documents.length < 2);
+    return <button key={name} className={s.toolRow} disabled={disabled} onClick={combine ? launchCombine : launchOrganizer} title={combine && documents.length < 2 ? 'Open two PDFs to combine them' : available ? name : `${name} — planned, not implemented yet`}><span className={s.toolIcon} style={{ color: ['#7361b3', '#277bb4', '#239576', '#bc6b25'][index % 4] }}><Icon size={21} strokeWidth={1.7} /></span><span>{name}</span></button>;
   };
   return <div className={`${s.app} ${dark ? s.dark : ''}`}>
     <header className={s.tabbar}>
@@ -203,7 +228,7 @@ export default function App() {
       <button onClick={() => { setDark(v => !v); setMenu(false); }}>Switch to {dark ? 'light' : 'dark'} theme</button>
       <button disabled={busy} onClick={() => { setMenu(false); setUpdatesOpen(true); }}>Check for updates…</button>
       <button disabled={busy} onClick={() => { setMenu(false); setNoticesOpen(true); }}>Third-party notices…</button>
-      <button onClick={() => { setNotice('PDF viewing, embedded-text search, and Organize Pages are available. Rotate, reorder, delete, extract, undo/redo, and save a new copy. Text editing, OCR, forms, and signatures are not implemented yet.'); setMenu(false); }}>About this build</button>
+      <button onClick={() => { setNotice('PDF viewing, embedded-text search, Combine Files, and Organize Pages are available. Rotate, reorder, delete, extract, undo/redo, and save a new copy. Text editing, OCR, forms, and signatures are not implemented yet.'); setMenu(false); }}>About this build</button>
     </div>}
     {updatesOpen && <Updates dirty={documents.some(document => document.dirty)} busy={busy} setBusy={setBusy} close={() => setUpdatesOpen(false)} />}
     {pageTextOpen && doc && <PageText key={`${doc.id}-${doc.revision}-${page}`} document={doc} page={page} close={() => setPageTextOpen(false)} />}
@@ -211,6 +236,7 @@ export default function App() {
     {printOpen && doc && <PrintDialog document={doc} page={page} setBusy={setBusy} close={() => setPrintOpen(false)} />}
     {propertiesOpen && doc && <DocumentProperties key={`${doc.id}-${doc.revision}`} document={doc} close={() => setPropertiesOpen(false)} />}
     {noticesOpen && <DependencyNotices close={() => setNoticesOpen(false)} />}
+    {combineOpen && <CombineDialog documents={documents} activeId={active} busy={busy} combine={combine} close={() => setCombineOpen(false)} />}
     <div className={s.globalbar}>
       <nav className={s.primaryNav}><button className={toolsOpen && view !== 'home' ? s.selectedNav : ''} onClick={() => view === 'document' ? setToolsOpen(v => !v) : setView('tools')}>All tools</button><button disabled>Edit</button><button disabled>Convert</button><button disabled>E-sign</button></nav>
       <div className={s.globalActions}><IconButton icon={Search} label="Find text" disabled={!doc || busy} active={searchOpen} onClick={() => { setView('document'); setOrganizing(false); searchOpen ? closeSearch() : setSearchOpen(true); }} /><span className={s.divider} /><IconButton icon={Undo2} label="Undo" disabled={busy || !doc?.can_undo} onClick={() => void edit({ kind: 'undo' })} /><IconButton icon={Redo2} label="Redo" disabled={busy || !doc?.can_redo} onClick={() => void edit({ kind: 'redo' })} /><IconButton icon={Save} label="Save a copy" disabled={busy || !doc} onClick={() => void save()} /><IconButton icon={Printer} label="Print" disabled={busy || !doc} onClick={() => setPrintOpen(true)} /><IconButton icon={Sun} label="Toggle theme" onClick={() => setDark(v => !v)} /><IconButton icon={CircleHelp} label="Build information" onClick={() => setNotice('Organize Pages and document search are available. Other tools marked unavailable are planned for later milestones. Save a Copy writes a new file and preserves your original.')} /><button className={s.openButton} onClick={() => void open()} disabled={busy}><FolderOpen size={16} /> {busy ? 'Working…' : 'Open a file'}</button></div>
@@ -220,15 +246,15 @@ export default function App() {
       {view === 'home' ? <>
         <aside className={s.homeSidebar}><h2>Home</h2>{['Recent', 'Starred'].map(item => <button key={item} className={section === item ? s.sidebarSelected : ''} onClick={() => setSection(item)}>{item === 'Recent' ? <Home size={18} /> : <Star size={18} />}{item}</button>)}<div className={s.sidebarCaption}>FILES</div><button onClick={() => void open()}><FolderOpen size={18} /> Your computer</button><div className={s.sidebarBottom}><ShieldCheck size={16} /><span>Local files. Yours to keep.</span></div></aside>
         <section className={s.homeContent}><div className={s.homeHeading}><div><p className={s.eyebrow}>YOUR WORKSPACE</p><h1>Work with your PDFs.</h1></div><button className={s.outlineButton} onClick={() => setView('tools')}>See all tools <ArrowUpRight size={16} /></button></div>
-          <div className={s.quickCards}>{['Edit a PDF', 'Export a PDF', 'Combine files', 'Fill & sign'].map((name, i) => { const Icon = icons[name]; return <div className={s.quickCard} key={name}><span style={{ color: ['#7260b4', '#2c80b2', '#25876b', '#b86a25'][i] }}><Icon size={29} strokeWidth={1.5} /></span><h3>{name}</h3><p>{['Update text and images.', 'Convert to another format.', 'Bring documents together.', 'Complete your paperwork.'][i]}</p><span className={s.planned}>Planned</span></div>; })}</div>
+          <div className={s.quickCards}>{['Edit a PDF', 'Export a PDF', 'Combine files', 'Fill & sign'].map((name, i) => { const Icon = icons[name]; return <div className={s.quickCard} key={name}><span style={{ color: ['#7260b4', '#2c80b2', '#25876b', '#b86a25'][i] }}><Icon size={29} strokeWidth={1.5} /></span><h3>{name}</h3><p>{['Update text and images.', 'Convert to another format.', 'Bring documents together.', 'Complete your paperwork.'][i]}</p><span className={s.planned}>{name === 'Combine files' ? 'Available with two open PDFs' : 'Planned'}</span></div>; })}</div>
           <div className={s.recentHeader}><h2>{section}</h2><div className={s.recentControls}><button className={s.textButton} disabled={!recentFiles.length} onClick={() => setRecentFiles([])}>Clear file history</button><label className={s.search}><Search size={16} /><input aria-label="Search recent files" placeholder="Search your files" value={query} onChange={e => setQuery(e.target.value)} /></label><IconButton icon={List} label="List view" active /></div></div>
           <div className={s.tableHeading}><span>NAME</span><span>LOCATION</span><span>PAGES</span><span /></div>
           {listed.map(file => <div className={s.fileRow} key={file.path}><button disabled={busy} onClick={() => void reopen(file.path)}><FileImage size={25} /><span>{file.name}<small>PDF document</small></span></button><span title={file.path}>This computer</span><span>{file.pages}</span><IconButton icon={Star} label={`${file.starred ? 'Unstar' : 'Star'} ${file.name}`} active={file.starred} onClick={() => setRecentFiles(list => list.map(item => item.path === file.path ? { ...item, starred: !item.starred } : item))} /></div>)}
           {!listed.length && <div className={s.empty}><div className={s.emptyIcon}><Files size={36} strokeWidth={1.25} /></div><h3>{query ? 'No matching files' : section === 'Starred' ? 'Keep important files close' : 'Your documents start here'}</h3><p>{query ? 'Try another file name.' : section === 'Starred' ? 'Star an open file to find it here.' : 'Open a PDF from your computer to start reading.'}</p>{!query && section !== 'Starred' && <><button className={s.openButton} onClick={() => void open()} disabled={busy}>Open a file</button><button className={s.textButton} onClick={() => void open(true)} disabled={busy}>Explore a sample PDF <ChevronRight size={15} /></button></>}</div>}
           <p className={s.foundationNote}>Viewer + Organize Pages · More tools are in development{!native ? ' · Browser preview' : ''}</p>
         </section>
-      </> : view === 'tools' ? <section className={s.toolsCatalog}><div className={s.catalogHeading}><div><p className={s.eyebrow}>THE COMPLETE WORKSPACE</p><h1>All tools</h1><p>Organize Pages is ready. Other advanced tools are planned for later milestones.</p></div><label className={s.search}><Search size={16} /><input aria-label="Search tools" placeholder="Find a tool" value={query} onChange={e => setQuery(e.target.value)} /></label></div>{toolGroups.map(group => <section key={group.name}><h2>{group.name}</h2><div className={s.catalogGrid}>{group.tools.filter(name => name.toLowerCase().includes(query.toLowerCase())).map((name, i) => <div className={s.catalogCard} key={name}>{toolRow(name, i)}<span className={s.planned}>{name === 'Organize pages' ? 'Available' : 'Not available yet'}</span></div>)}</div></section>)}</section> : doc ? <>
-        {toolsOpen && <aside className={s.toolsPanel}><div className={s.panelHeading}><h2>All tools</h2><IconButton icon={PanelLeftClose} label="Collapse all tools" onClick={() => setToolsOpen(false)} /></div>{['Export a PDF', 'Edit a PDF', 'Create a PDF', 'Combine files', 'Organize pages', 'Comment', 'Fill & sign', 'Scan & OCR', 'Protect a PDF', 'Compress a PDF'].map(toolRow)}<button className={s.textButton} onClick={() => setView('tools')}>View all tools <ChevronRight size={15} /></button><div className={s.panelNote}>Organize Pages is available. More tools are in development.</div></aside>}
+      </> : view === 'tools' ? <section className={s.toolsCatalog}><div className={s.catalogHeading}><div><p className={s.eyebrow}>THE COMPLETE WORKSPACE</p><h1>All tools</h1><p>Combine Files and Organize Pages are ready. Other advanced tools are planned for later milestones.</p></div><label className={s.search}><Search size={16} /><input aria-label="Search tools" placeholder="Find a tool" value={query} onChange={e => setQuery(e.target.value)} /></label></div>{toolGroups.map(group => <section key={group.name}><h2>{group.name}</h2><div className={s.catalogGrid}>{group.tools.filter(name => name.toLowerCase().includes(query.toLowerCase())).map((name, i) => <div className={s.catalogCard} key={name}>{toolRow(name, i)}<span className={s.planned}>{name === 'Organize pages' || name === 'Combine files' ? 'Available' : 'Not available yet'}</span></div>)}</div></section>)}</section> : doc ? <>
+        {toolsOpen && <aside className={s.toolsPanel}><div className={s.panelHeading}><h2>All tools</h2><IconButton icon={PanelLeftClose} label="Collapse all tools" onClick={() => setToolsOpen(false)} /></div>{['Export a PDF', 'Edit a PDF', 'Create a PDF', 'Combine files', 'Organize pages', 'Comment', 'Fill & sign', 'Scan & OCR', 'Protect a PDF', 'Compress a PDF'].map(toolRow)}<button className={s.textButton} onClick={() => setView('tools')}>View all tools <ChevronRight size={15} /></button><div className={s.panelNote}>Combine Files and Organize Pages are available. More tools are in development.</div></aside>}
         {organizing ? <Organizer key={doc.id} document={doc} currentPage={page} busy={busy} edit={edit} save={save} split={split} crop={crop} close={() => setOrganizing(false)} /> : <div className={s.documentArea}><Viewer key={`${doc.id}-${doc.revision}`} document={doc} zoom={zoom} fit={fit} target={target} onPage={trackPage} hand={hand} search={activeSearch} /><div className={s.quickToolbar}><IconButton icon={MousePointer2} label="Select text on page" active={!hand} onClick={() => setHand(false)} /><IconButton icon={Hand} label="Pan document" active={hand} onClick={() => setHand(true)} /><IconButton icon={Type} label="Read and copy page text" onClick={() => setPageTextOpen(true)} /><span className={s.horizontalDivider} /><IconButton icon={MessageSquare} label="Add comment" disabled /><IconButton icon={Highlighter} label="Highlight text" disabled /><IconButton icon={Pencil} label="Draw" disabled /><IconButton icon={Type} label="Fill in text" disabled /><IconButton icon={Signature} label="Add signature" disabled /><span className={s.horizontalDivider} /><IconButton icon={MoreHorizontal} label="Customize quick tools" disabled /></div></div>}
         {!organizing && bookmarksOpen && <BookmarksPanel key={`${doc.id}-${doc.revision}`} document={doc} go={go} close={() => setBookmarksOpen(false)} />}
         {!organizing && searchOpen && !bookmarksOpen && <SearchPanel key={`${doc.id}-${doc.revision}`} document={doc} go={go} close={closeSearch} onHighlights={receiveSearch} />}
