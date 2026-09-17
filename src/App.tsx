@@ -45,6 +45,7 @@ export default function App() {
   const [fit, setFit] = useState(preferences.fit);
   const [hand, setHand] = useState(preferences.hand);
   const [page, setPage] = useState(0);
+  const readingPages = useRef(new Map<number, number>());
   const [target, setTarget] = useState({ page: 0, token: 0 });
   const [recentFiles, setRecentFiles] = useState(readRecentFiles);
   const [organizing, setOrganizing] = useState(false);
@@ -66,7 +67,14 @@ export default function App() {
     return () => { void unlisten.then(stop => stop()); };
   }, []);
   const doc = documents.find(d => d.id === active);
-  const activate = (id: number) => { if (busy) return; setActive(id); setView('document'); setPage(0); setTarget(v => ({ page: 0, token: v.token + 1 })); };
+  const activate = (id: number) => {
+    if (busy) return;
+    const document = documents.find(item => item.id === id);
+    if (!document) return;
+    const next = clampPage(readingPages.current.get(id) ?? 0, document.pages.length);
+    setActive(id); setView('document'); setPage(next); setTarget(value => ({ page: next, token: value.token + 1 }));
+  };
+  const trackPage = (value: number) => { if (doc) { const next = clampPage(value, doc.pages.length); readingPages.current.set(doc.id, next); setPage(next); } };
   const opened = (info: DocumentInfo, organize: boolean) => {
     setDocuments(list => [...list, info]); setRecentFiles(list => rememberFile(list, info)); setOrganizing(organize);
     setActive(info.id); setView('document'); setPage(0); setTarget(value => ({ page: 0, token: value.token + 1 }));
@@ -95,11 +103,11 @@ export default function App() {
   const close = async (id: number, discard = false) => {
     if (busy) return;
     if (!discard && documents.find(document => document.id === id)?.dirty) { setPendingClose(id); return; }
-    try { await closeDocument(id); setDocuments(list => list.filter(d => d.id !== id)); if (active === id) { setActive(null); setView('home'); } } catch (e) { setError(String(e)); }
+    try { await closeDocument(id); readingPages.current.delete(id); setDocuments(list => list.filter(d => d.id !== id)); if (active === id) { setActive(null); setView('home'); } } catch (e) { setError(String(e)); }
   };
   const updateDocument = (info: DocumentInfo) => {
     setDocuments(list => list.map(document => document.id === info.id ? info : document));
-    const next = clampPage(page, info.pages.length); setPage(next); setTarget(value => ({ page: next, token: value.token + 1 }));
+    const next = clampPage(page, info.pages.length); readingPages.current.set(info.id, next); setPage(next); setTarget(value => ({ page: next, token: value.token + 1 }));
   };
   const edit = async (action: PageEdit): Promise<boolean> => {
     if (!doc || busy) return false;
@@ -116,7 +124,7 @@ export default function App() {
     } catch (e) { setError(String(e)); } finally { setBusy(false); }
   };
   const launchOrganizer = () => { if (busy) return; if (doc) { setOrganizing(true); setView('document'); } else void open(false, true); };
-  const go = (value: number) => { if (doc) { const next = clampPage(value, doc.pages.length); setPage(next); setTarget(v => ({ page: next, token: v.token + 1 })); } };
+  const go = (value: number) => { if (doc) { const next = clampPage(value, doc.pages.length); trackPage(next); setTarget(v => ({ page: next, token: v.token + 1 })); } };
   useEffect(() => {
     const listener = (event: KeyboardEvent) => {
       if (updatesOpen || pageTextOpen || passwordRequest || pendingClose !== null) return;
@@ -179,7 +187,7 @@ export default function App() {
         </section>
       </> : view === 'tools' ? <section className={s.toolsCatalog}><div className={s.catalogHeading}><div><p className={s.eyebrow}>THE COMPLETE WORKSPACE</p><h1>All tools</h1><p>Organize Pages is ready. Other advanced tools are planned for later milestones.</p></div><label className={s.search}><Search size={16} /><input aria-label="Search tools" placeholder="Find a tool" value={query} onChange={e => setQuery(e.target.value)} /></label></div>{toolGroups.map(group => <section key={group.name}><h2>{group.name}</h2><div className={s.catalogGrid}>{group.tools.filter(name => name.toLowerCase().includes(query.toLowerCase())).map((name, i) => <div className={s.catalogCard} key={name}>{toolRow(name, i)}<span className={s.planned}>{name === 'Organize pages' ? 'Available' : 'Not available yet'}</span></div>)}</div></section>)}</section> : doc ? <>
         {toolsOpen && <aside className={s.toolsPanel}><div className={s.panelHeading}><h2>All tools</h2><IconButton icon={PanelLeftClose} label="Collapse all tools" onClick={() => setToolsOpen(false)} /></div>{['Export a PDF', 'Edit a PDF', 'Create a PDF', 'Combine files', 'Organize pages', 'Comment', 'Fill & sign', 'Scan & OCR', 'Protect a PDF', 'Compress a PDF'].map(toolRow)}<button className={s.textButton} onClick={() => setView('tools')}>View all tools <ChevronRight size={15} /></button><div className={s.panelNote}>Organize Pages is available. More tools are in development.</div></aside>}
-        {organizing ? <Organizer key={doc.id} document={doc} busy={busy} edit={edit} save={save} close={() => setOrganizing(false)} /> : <div className={s.documentArea}><Viewer key={`${doc.id}-${doc.revision}`} document={doc} zoom={zoom} fit={fit} target={target} onPage={setPage} hand={hand} /><div className={s.quickToolbar}><IconButton icon={MousePointer2} label="Read and copy page text" onClick={() => setPageTextOpen(true)} /><IconButton icon={Hand} label="Pan document" active={hand} onClick={() => setHand(v => !v)} /><span className={s.horizontalDivider} /><IconButton icon={MessageSquare} label="Add comment" disabled /><IconButton icon={Highlighter} label="Highlight text" disabled /><IconButton icon={Pencil} label="Draw" disabled /><IconButton icon={Type} label="Fill in text" disabled /><IconButton icon={Signature} label="Add signature" disabled /><span className={s.horizontalDivider} /><IconButton icon={MoreHorizontal} label="Customize quick tools" disabled /></div></div>}
+        {organizing ? <Organizer key={doc.id} document={doc} busy={busy} edit={edit} save={save} close={() => setOrganizing(false)} /> : <div className={s.documentArea}><Viewer key={`${doc.id}-${doc.revision}`} document={doc} zoom={zoom} fit={fit} target={target} onPage={trackPage} hand={hand} /><div className={s.quickToolbar}><IconButton icon={MousePointer2} label="Read and copy page text" onClick={() => setPageTextOpen(true)} /><IconButton icon={Hand} label="Pan document" active={hand} onClick={() => setHand(v => !v)} /><span className={s.horizontalDivider} /><IconButton icon={MessageSquare} label="Add comment" disabled /><IconButton icon={Highlighter} label="Highlight text" disabled /><IconButton icon={Pencil} label="Draw" disabled /><IconButton icon={Type} label="Fill in text" disabled /><IconButton icon={Signature} label="Add signature" disabled /><span className={s.horizontalDivider} /><IconButton icon={MoreHorizontal} label="Customize quick tools" disabled /></div></div>}
         {!organizing && bookmarksOpen && <BookmarksPanel key={`${doc.id}-${doc.revision}`} document={doc} go={go} close={() => setBookmarksOpen(false)} />}
         {!organizing && searchOpen && !bookmarksOpen && <SearchPanel key={`${doc.id}-${doc.revision}`} document={doc} go={go} close={() => setSearchOpen(false)} />}
         {!organizing && nav && !searchOpen && !bookmarksOpen && <aside className={s.pagesPanel}><div className={s.panelHeading}><h2>Pages</h2><IconButton icon={X} label="Close pages" onClick={() => setNav(false)} /></div><button onClick={() => setBookmarksOpen(true)}>Bookmarks</button><div className={s.pageList}>{doc.pages.map((size, i) => <button className={i === page ? s.currentPage : ''} key={i} onClick={() => go(i)}><File size={24} /><span>Page {i + 1}<small>{(size.width / 72).toFixed(1)} × {(size.height / 72).toFixed(1)} in</small></span></button>)}</div></aside>}

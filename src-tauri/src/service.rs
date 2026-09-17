@@ -268,15 +268,32 @@ mod tests {
     use super::*;
     #[test]
     fn encrypted_open_retries_cancels_and_keeps_edits_blocked() {
+        use lopdf::encryption::crypt_filters::{Aes128CryptFilter, Aes256CryptFilter, CryptFilter};
+        use std::{collections::BTreeMap, sync::Arc};
         let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         let folder = tempfile::tempdir().unwrap();
         let service = PdfService::start(root.join("resources/pdfium/bin/pdfium.dll"));
-        for user_password in ["test password", ""] {
+        for (version, user_password) in [2, 4, 5].into_iter().flat_map(|version| ["test password", ""].map(|password| (version, password))) {
             let mut pdf = lopdf::Document::load(root.join("resources/welcome.pdf")).unwrap();
             pdf.trailer.set("ID", vec![lopdf::Object::string_literal("password-test-id"), lopdf::Object::string_literal("password-test-id")]);
-            let state = lopdf::EncryptionState::try_from(lopdf::EncryptionVersion::V2 { document: &pdf, owner_password: "owner password", user_password, key_length: 128, permissions: lopdf::Permissions::all() }).unwrap();
+            let permissions = lopdf::Permissions::all();
+            let fixture_key = [0x42u8; 32];
+            let encryption = match version {
+                2 => lopdf::EncryptionVersion::V2 { document: &pdf, owner_password: "owner password", user_password, key_length: 128, permissions },
+                4 => {
+                    let filter: Arc<dyn CryptFilter> = Arc::new(Aes128CryptFilter);
+                    lopdf::EncryptionVersion::V4 { document: &pdf, encrypt_metadata: true, crypt_filters: BTreeMap::from([(b"StdCF".to_vec(), filter)]), stream_filter: b"StdCF".to_vec(), string_filter: b"StdCF".to_vec(), owner_password: "owner password", user_password, permissions }
+                }
+                5 => {
+                    let filter: Arc<dyn CryptFilter> = Arc::new(Aes256CryptFilter);
+                    lopdf::EncryptionVersion::V5 { encrypt_metadata: true, crypt_filters: BTreeMap::from([(b"StdCF".to_vec(), filter)]), file_encryption_key: &fixture_key, stream_filter: b"StdCF".to_vec(), string_filter: b"StdCF".to_vec(), owner_password: "owner password", user_password, permissions }
+                }
+                _ => unreachable!(),
+            };
+            let state = lopdf::EncryptionState::try_from(encryption).unwrap();
             pdf.encrypt(&state).unwrap();
-            let path = folder.path().join(if user_password.is_empty() { "empty.pdf" } else { "locked.pdf" });
+            let kind = if user_password.is_empty() { "empty" } else { "locked" };
+            let path = folder.path().join(format!("v{version}-{kind}.pdf"));
             pdf.save(&path).unwrap();
             let source = std::fs::read(&path).unwrap();
             let (tx, rx) = oneshot::channel(); service.sender.send(Request::BeginOpen(path.clone(), tx)).unwrap();
@@ -299,7 +316,9 @@ mod tests {
                 opened
             };
             assert_eq!(info.pages.len(), 6);
-            let (tx, rx) = oneshot::channel(); service.sender.send(Request::Render(info.id, 0, 100, tx)).unwrap(); assert!(!rx.blocking_recv().unwrap().unwrap().is_empty());
+            for page in 0..info.pages.len() {
+                let (tx, rx) = oneshot::channel(); service.sender.send(Request::Render(info.id, page as u16, 100, tx)).unwrap(); assert!(!rx.blocking_recv().unwrap().unwrap().is_empty(), "v{version}-{kind} page {page}");
+            }
             let (tx, rx) = oneshot::channel(); service.sender.send(Request::Edit(info.id, PageEdit::Rotate { pages: vec![0], clockwise: true }, tx)).unwrap(); assert!(rx.blocking_recv().unwrap().is_err());
             let output = folder.path().join("must-not-export.pdf");
             let (tx, rx) = oneshot::channel(); service.sender.send(Request::Save(info.id, None, output.clone(), tx)).unwrap(); assert!(rx.blocking_recv().unwrap().is_err()); assert!(!output.exists());
