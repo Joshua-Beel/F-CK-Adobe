@@ -101,7 +101,7 @@ impl EditSession {
                 [b"Resources".as_slice(), b"MediaBox", b"CropBox"].iter().map(|key| Ok((key.to_vec(), inherited(&document, id, key)?))).collect::<Result<_, String>>()?
             } else { Vec::new() };
             let page = document.get_object_mut(id).map_err(|e| e.to_string())?.as_dict_mut().map_err(|e| e.to_string())?;
-            page.set("Rotate", (rotation + i64::from(spec.turns) * 90).rem_euclid(360));
+            page.set("Rotate", (rotation.rem_euclid(360) + i64::from(spec.turns) * 90).rem_euclid(360));
             if let Some(root) = new_root {
                 for (key, value) in attributes { if let Some(value) = value { page.set(key, value); } }
                 page.set("Parent", root);
@@ -218,6 +218,20 @@ mod tests {
         for id in output.get_pages().values() {
             assert!(output.get_dictionary(*id).unwrap().has(b"Resources"));
             assert_eq!(inherited(&output, *id, b"Rotate").unwrap().unwrap().as_i64().unwrap(), 90);
+        }
+    }
+    #[test]
+    fn extreme_rotations_export_without_overflow() {
+        for rotation in [i64::MAX / 90 * 90, i64::MIN / 90 * 90] {
+            let mut document = Document::load_mem(&sample()).unwrap();
+            let first = document.get_pages()[&1];
+            document.get_object_mut(first).unwrap().as_dict_mut().unwrap().set("Rotate", rotation);
+            let mut source = Vec::new(); document.save_to(&mut source).unwrap();
+            let mut session = EditSession::new(source, 6);
+            session.apply(PageEdit::Rotate { pages: vec![0], clockwise: false }).unwrap();
+            let output = Document::load_mem(&session.export(None).unwrap()).unwrap();
+            let actual = inherited(&output, output.get_pages()[&1], b"Rotate").unwrap().unwrap().as_i64().unwrap();
+            assert_eq!(actual, (rotation.rem_euclid(360) + 270) % 360);
         }
     }
     #[test]
