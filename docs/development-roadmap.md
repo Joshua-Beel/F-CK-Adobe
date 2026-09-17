@@ -17,7 +17,7 @@ The README records what is implemented and tested. This plan organizes the remai
 | Search highlighting | On-page text selection source slice | Match locations map to rendered pages without obscuring selection; stale results, page edits, crop offsets and rotations behave explicitly. |
 | Installed printing and update verification | Existing print implementation and a current signed installer | Inspect Print to PDF output and printer cancellation; install and upgrade from 0.2.0, preserve documents/settings, relaunch and exercise interruption/retry. The existing desktop-control blocker must change before repeating attempts. |
 | Create/combine/insert/replace pages | Preservation rules and an expanded document model | Reopened output retains intended order, page content and inherited attributes; originals stay byte-identical; unsupported forms, signatures and references are rejected before mutation. |
-| Split/crop/page labels and page boxes | Page operations and undo/save model | Exact ranges and boxes survive reopening; undo/redo and save branches remain correct; rotated and mixed-size documents are covered. |
+| Crop/page labels and page boxes | Page operations and undo/save model | Exact ranges and boxes survive reopening; undo/redo and save branches remain correct; rotated and mixed-size documents are covered. |
 | Comments, markup and annotation persistence | Page geometry and preservation rules | Create/select/edit/delete supported annotations, reopen saved copies and compare positions/content; existing annotations survive unrelated supported edits. |
 | Fill existing forms, then form preparation | Form-aware preservation and save validation | Fill supported fields and reopen in another viewer; appearances, values and flags agree; unsupported field/signature behavior is explicit. |
 | Text and image editing | Font/image handling and content-preserving export | Changed content, appearance and undo survive reopening; unsupported fonts/layouts cannot silently corrupt or substitute content. |
@@ -29,6 +29,6 @@ The README records what is implemented and tested. This plan organizes the remai
 
 ## Current assignments
 
-On-page selection is accepted for the source build. The native and UI contract has combined-gate evidence for geometry, stale-response handling, caps and browser DOM selection; installed Windows clipboard behavior with real native IPC remains open. Split integration is next: native owns the reversible document operation and save-folder flow, UI owns the bounded dialog and result presentation, and management schedules the combined gate and review.
+On-page selection and fixed-size splitting are accepted for the source build. Selection has combined-gate evidence for geometry, stale-response handling, caps and browser DOM selection; installed Windows clipboard behavior with real native IPC remains open. Splitting has combined-gate evidence for current edited page order, all-output validation, atomic folder publication, output caps, bounded UI input, and unchanged source/session state; the native folder dialog remains open for desktop verification. Search highlighting is next.
 
 The signed 0.2.4 draft predates current source work. It must not be used as evidence that newly implemented tools shipped. No full Acrobat-parity or final-review completion claim is warranted while the remaining gaps are open.

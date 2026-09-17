@@ -1,10 +1,12 @@
 import { useEffect, useRef, useState } from 'react';
-import { ArrowDownToLine, ArrowLeft, ArrowRight, CheckSquare, RotateCcw, RotateCw, Trash2, Undo2, Redo2, X } from 'lucide-react';
+import { ArrowDownToLine, ArrowLeft, ArrowRight, CheckSquare, RotateCcw, RotateCw, Scissors, Trash2, Undo2, Redo2, X } from 'lucide-react';
+import type { SplitOutput } from './bridge';
 import type { DocumentInfo, PageEdit } from './model';
 import { parsePageRange } from './model';
 import { renderPage } from './bridge';
 import s from './Organizer.module.css';
 import ConfirmDialog from './ConfirmDialog';
+import SplitDialog from './SplitDialog';
 
 function Thumbnail({ document, index }: { document: DocumentInfo; index: number }) {
   const element = useRef<HTMLDivElement>(null);
@@ -28,12 +30,13 @@ function Thumbnail({ document, index }: { document: DocumentInfo; index: number 
   return <div ref={element} className={s.thumbnail} style={{ aspectRatio: `${size.width}/${size.height}` }}>{url ? <img src={url} alt={`Page ${index + 1} preview`} draggable={false} /> : <span>{error ? 'Preview unavailable' : 'Loading…'}</span>}</div>;
 }
 
-export default function Organizer({ document, busy, edit, save, close }: { document: DocumentInfo; busy: boolean; edit: (action: PageEdit) => Promise<boolean>; save: (pages?: number[]) => Promise<void>; close: () => void }) {
+export default function Organizer({ document, busy, edit, save, split, close }: { document: DocumentInfo; busy: boolean; edit: (action: PageEdit) => Promise<boolean>; save: (pages?: number[]) => Promise<void>; split: (pagesPerFile: number) => Promise<SplitOutput | null>; close: () => void }) {
   const [selected, setSelected] = useState<number[]>([0]);
   const [range, setRange] = useState('1');
   const [destination, setDestination] = useState('');
   const [error, setError] = useState('');
   const [confirmDelete, setConfirmDelete] = useState(false);
+  const [splitOpen, setSplitOpen] = useState(false);
   const lastClicked = useRef(0);
   useEffect(() => { setSelected(list => list.filter(i => i < document.pages.length)); lastClicked.current = Math.min(lastClicked.current, document.pages.length - 1); }, [document.pages.length]);
   const moveTo = async () => {
@@ -77,11 +80,13 @@ export default function Organizer({ document, busy, edit, save, close }: { docum
       <button disabled={busy || count !== 1} onClick={() => void moveTo()}>Move</button>
       <button aria-label="Undo page edit" disabled={busy || !document.can_undo} onClick={() => void change({ kind: 'undo' })}><Undo2 size={17} /></button>
       <button aria-label="Redo page edit" disabled={busy || !document.can_redo} onClick={() => void change({ kind: 'redo' })}><Redo2 size={17} /></button>
+      <button disabled={busy} onClick={() => setSplitOpen(true)}><Scissors size={16} /> Split</button>
       <button className={s.save} disabled={busy} onClick={() => void save()}>Save a copy</button>
     </div>
     <div className={s.selectionInfo}><span>{count} selected · {document.pages.length} pages{document.dirty ? ' · Unsaved changes' : ''}</span><span>Ctrl+click to add · Shift+click for a range</span></div>
     {error && <p className={s.error} role="alert">{error}</p>}
     <div className={s.grid}>{document.pages.map((_, index) => <button key={index} disabled={busy} aria-label={`Select page ${index + 1}`} aria-pressed={selected.includes(index)} className={`${s.card} ${selected.includes(index) ? s.selected : ''}`} onClick={e => select(index, e.shiftKey, e.ctrlKey || e.metaKey)}><Thumbnail document={document} index={index} /><span className={s.pageLabel}><span className={s.checkbox}>{selected.includes(index) ? '✓' : ''}</span>Page {index + 1}</span></button>)}</div>
     {confirmDelete && <ConfirmDialog title={`Delete ${count} selected ${count === 1 ? 'page' : 'pages'}?`} message="This changes the working document. You can undo it. Your original file stays unchanged." confirmLabel="Delete pages" onCancel={() => setConfirmDelete(false)} onConfirm={() => { setConfirmDelete(false); void change({ kind: 'delete', pages: selected }); }} />}
+    {splitOpen && <SplitDialog pageCount={document.pages.length} busy={busy} split={split} close={() => setSplitOpen(false)} />}
   </section>;
 }

@@ -4,7 +4,7 @@
   "coverage": "Conservative resolved Cargo Windows graph, including build/auxiliary packages, plus non-development npm lock entries. Runtime-candidate is not proof of linked code. PDFium notices are packaged separately. This collection does not resolve source-availability obligations or the app license.",
   "inputHashes": {
     "src-tauri/Cargo.lock": "b49fdff269244b1242d6ed09753119855fbb20e2a70317782f652ab75129219f",
-    "src-tauri/Cargo.toml": "bf3209aa68f5caa7efdfcb710637dd76d5a599fa81fe4bffd084f2bd9f4b1758",
+    "src-tauri/Cargo.toml": "4ba9d92b8b23a24f7cd28dad4c867e2545c7f9437a56821ad2a49180b42a59b5",
     "package-lock.json": "b05d585c1995dcbb236c3cc934f901aefa71d853535e5894d37a1ec3179701ee",
     "package.json": "84f616b520599e836b4d066725af3ce1b74216155e53d6cf9a16a8f23886543a",
     "scripts/notice-supplements/manifest.json": "f0700cbb9d20d43f42d709852e7961194d22937a41bf1fad5063e27f5fae2121"

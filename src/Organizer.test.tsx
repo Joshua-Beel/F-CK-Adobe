@@ -12,7 +12,7 @@ const input = (ui: ReactTestRenderer) => ui.root.findByProps({ 'aria-label': 'De
 
 it('moves to the requested final position and keeps the moved page selected', async () => {
   const edit = vi.fn().mockResolvedValue(true); let ui!: ReactTestRenderer;
-  act(() => { ui = create(<Organizer document={document} busy={false} edit={edit} save={vi.fn()} close={vi.fn()} />); });
+  act(() => { ui = create(<Organizer document={document} busy={false} edit={edit} save={vi.fn()} split={vi.fn()} close={vi.fn()} />); });
   act(() => input(ui).props.onChange({ target: { value: '6' } }));
   await act(async () => input(ui).props.onKeyDown({ key: 'Enter', preventDefault: vi.fn() }));
   expect(edit).toHaveBeenCalledWith({ kind: 'move', from: 0, to: 5 });
@@ -24,7 +24,7 @@ it('moves to the requested final position and keeps the moved page selected', as
 
 it('rejects malformed destinations and preserves selection when the native move fails', async () => {
   const edit = vi.fn().mockResolvedValue(false); let ui!: ReactTestRenderer;
-  act(() => { ui = create(<Organizer document={document} busy={false} edit={edit} save={vi.fn()} close={vi.fn()} />); });
+  act(() => { ui = create(<Organizer document={document} busy={false} edit={edit} save={vi.fn()} split={vi.fn()} close={vi.fn()} />); });
   for (const value of ['', '0', '7', '-1', '2.5', '1e0', 'Infinity', '99999999999999999999']) {
     act(() => input(ui).props.onChange({ target: { value } }));
     await act(async () => input(ui).props.onKeyDown({ key: 'Enter', preventDefault: vi.fn() }));
@@ -40,7 +40,7 @@ it('rejects malformed destinations and preserves selection when the native move 
 
 it('bounds shift selection after deleting pages at the end', () => {
   let ui!: ReactTestRenderer;
-  const props = { busy: false, edit: vi.fn(), save: vi.fn(), close: vi.fn() };
+  const props = { busy: false, edit: vi.fn(), save: vi.fn(), split: vi.fn(), close: vi.fn() };
   act(() => { ui = create(<Organizer {...props} document={document} />); });
   act(() => pageButton(ui, 6).props.onClick({ shiftKey: false, ctrlKey: false }));
   act(() => ui.update(<Organizer {...props} document={{ ...document, pages: document.pages.slice(0, 2), revision: 1 }} />));
@@ -48,5 +48,17 @@ it('bounds shift selection after deleting pages at the end', () => {
   act(() => ui.root.findAllByType('button').find(button => button.children.includes(' Extract'))!.props.onClick());
   expect(props.save).toHaveBeenCalledWith([0, 1]);
   expect(input(ui).props.disabled).toBe(true);
+  act(() => ui.unmount());
+});
+
+it('splits the current page plan without editing or saving the working document', async () => {
+  const edit = vi.fn(), save = vi.fn(), split = vi.fn().mockResolvedValue({ folder: 'C:/splits', files: [{ path: 'C:/splits/part-1.pdf', first_page: 1, last_page: 6, page_count: 6 }] });
+  let ui!: ReactTestRenderer;
+  act(() => { ui = create(<Organizer document={{ ...document, dirty: true, revision: 3 }} busy={false} edit={edit} save={save} split={split} close={vi.fn()} />); });
+  act(() => ui.root.findAllByType('button').find(button => button.children.includes(' Split'))!.props.onClick());
+  await act(async () => ui.root.findAllByType('button').find(button => button.children.includes('Split PDF'))!.props.onClick());
+  expect(split).toHaveBeenCalledWith(1);
+  expect(edit).not.toHaveBeenCalled(); expect(save).not.toHaveBeenCalled();
+  expect(JSON.stringify(ui.toJSON())).toContain('Split complete');
   act(() => ui.unmount());
 });

@@ -35,6 +35,8 @@ export type BookmarkList = { items: { title: string; page: number | null; depth:
 export const documentBookmarks = (id: number, revision: number) => invoke<BookmarkList>('document_bookmarks', { id, revision });
 export const editPages = (id: number, edit: PageEdit) => invoke<DocumentInfo>('edit_pages', { id, edit });
 export const saveCopy = (id: number, pages?: number[]) => invoke<{ path: string; document: DocumentInfo } | null>('save_copy', { id, pages: pages ?? null });
+export type SplitOutput = { folder: string; files: { path: string; first_page: number; last_page: number; page_count: number }[] };
+export const splitDocument = (id: number, revision: number, pagesPerFile: number) => invoke<SplitOutput | null>('split_document', { id, revision, pagesPerFile });
 export async function renderPage(id: number, page: number, width: number) {
   const bytes = await invoke<ArrayBuffer>('render_page', { id, page, width });
   return URL.createObjectURL(new Blob([bytes], { type: 'image/png' }));

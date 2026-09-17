@@ -39,6 +39,7 @@ enum Request {
     Close(u64, Reply<()>),
     Edit(u64, PageEdit, Reply<DocumentInfo>),
     Save(u64, Option<Vec<usize>>, PathBuf, Reply<SavedCopy>),
+    Split(u64, u64, usize, PathBuf, Reply<crate::split::SplitOutput>),
 }
 #[derive(Clone)]
 pub struct PdfService { sender: mpsc::Sender<Request> }
@@ -264,6 +265,30 @@ impl PdfService {
                         })();
                         let _ = reply.send(result);
                     }
+                    Request::Split(id, revision, pages_per_file, folder, reply) => {
+                        if reply.is_closed() { continue; }
+                        let result = (|| {
+                            let (session, _) = sessions.get(&id).ok_or("Document is closed")?;
+                            if session.revision != revision { return Err("Document changed. Start splitting again.".into()); }
+                            let parent = folder.parent().ok_or("Choose a new folder for the split PDFs.")?;
+                            let name = folder.file_name().ok_or("Choose a new folder name for the split PDFs.")?;
+                            let engine = pdfium.as_ref().map_err(Clone::clone)?;
+                            crate::split::prepare_and_publish(session, parent, name, pages_per_file, |bytes, expected| {
+                                if reply.is_closed() { return Err("Split was canceled.".into()); }
+                                let document = engine.load_pdf_from_byte_slice(bytes, None).map_err(|error| format!("Output could not be opened: {error}"))?;
+                                if document.pages().len() as usize != expected { return Err("Output page count differs from the split plan.".into()); }
+                                for index in 0..document.pages().len() {
+                                    let page = document.pages().get(index).map_err(|error| format!("Output page {} could not be read: {error}", index + 1))?;
+                                    let (width, height) = (page.width().value, page.height().value);
+                                    if !width.is_finite() || !height.is_finite() || width <= 0.0 || height <= 0.0 { return Err(format!("Output page {} has invalid dimensions.", index + 1)); }
+                                    let bitmap = page.render_with_config(&PdfRenderConfig::new().set_target_width(64).set_maximum_height(64)).map_err(|error| format!("Output page {} could not be rendered: {error}", index + 1))?;
+                                    if bitmap.width() <= 0 || bitmap.height() <= 0 { return Err(format!("Output page {} has an invalid bitmap.", index + 1)); }
+                                }
+                                Ok(())
+                            })
+                        })();
+                        let _ = reply.send(result);
+                    }
                     Request::Save(id, pages, path, reply) => {
                         let result = (|| {
                             let (session, original) = sessions.get_mut(&id).ok_or("Document is closed")?;
@@ -330,6 +355,9 @@ impl PdfService {
     pub async fn save(&self, id: u64, pages: Option<Vec<usize>>, path: PathBuf) -> Result<SavedCopy, String> {
         let (tx, rx) = oneshot::channel(); self.sender.send(Request::Save(id, pages, path, tx)).map_err(|e| e.to_string())?; rx.await.map_err(|e| e.to_string())?
     }
+    pub async fn split(&self, id: u64, revision: u64, pages_per_file: usize, folder: PathBuf) -> Result<crate::split::SplitOutput, String> {
+        let (tx, rx) = oneshot::channel(); self.sender.send(Request::Split(id, revision, pages_per_file, folder, tx)).map_err(|error| error.to_string())?; rx.await.map_err(|error| error.to_string())?
+    }
 }
 
 fn print_dimensions(width: f32, height: f32, max_width: u32, max_height: u32) -> Result<(u32, u32), String> {
@@ -366,6 +394,58 @@ fn current_info(session: &EditSession, original: &DocumentInfo) -> DocumentInfo 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn split_validates_every_fixture_page_and_preserves_source_revision_and_undo() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let service = PdfService::start(root.join("resources/pdfium/bin/pdfium.dll"));
+        let output = tempfile::tempdir().unwrap();
+        for (fixture, count, group) in [("resources/welcome.pdf", 6usize, 2usize), ("../test-corpus/synthetic-scan-98.pdf", 98, 40), ("../test-corpus/synthetic-text-1500.pdf", 1500, 700)] {
+            let source_path = root.join(fixture); let source = std::fs::read(&source_path).unwrap();
+            let (tx, rx) = oneshot::channel(); service.sender.send(Request::Open(source_path.clone(), tx)).unwrap(); let info = rx.blocking_recv().unwrap().unwrap();
+            for edit in [PageEdit::Move { from: 0, to: 2 }, PageEdit::Rotate { pages: vec![0], clockwise: true }, PageEdit::Delete { pages: vec![1] }] {
+                let (tx, rx) = oneshot::channel(); service.sender.send(Request::Edit(info.id, edit, tx)).unwrap(); let changed = rx.blocking_recv().unwrap().unwrap(); assert!(changed.dirty);
+            }
+            let folder = output.path().join(format!("fixture-{count}"));
+            let split = |revision, pages_per_file, folder: PathBuf| {
+                let (tx, rx) = oneshot::channel(); service.sender.send(Request::Split(info.id, revision, pages_per_file, folder, tx)).unwrap(); rx.blocking_recv().unwrap()
+            };
+            assert!(split(0, group, folder.clone()).unwrap_err().contains("changed")); assert!(!folder.exists());
+            assert!(split(3, 0, folder.clone()).is_err()); assert!(!folder.exists());
+            if count > 64 { assert!(split(3, 1, folder.clone()).unwrap_err().contains("64")); assert!(!folder.exists()); }
+            let started = std::time::Instant::now();
+            let result = split(3, group, folder.clone()).unwrap();
+            println!("split fixture {count}: {} outputs, {} pages, {:?}", result.files.len(), count - 1, started.elapsed());
+            assert_eq!(result.files.len(), 3); assert_eq!(result.folder, folder.canonicalize().unwrap());
+            let mut emitted = 0;
+            for file in result.files {
+                assert_eq!(file.first_page, emitted + 1); assert_eq!(file.last_page, (emitted + group).min(count - 1)); assert_eq!(file.page_count, file.last_page - file.first_page + 1);
+                let (tx, rx) = oneshot::channel(); service.sender.send(Request::Open(file.path.clone(), tx)).unwrap(); let part = rx.blocking_recv().unwrap().unwrap(); assert_eq!(part.pages.len(), file.page_count);
+                for local in 0..part.pages.len() {
+                    let position = emitted + local;
+                    let source_page = match position { 0 => 1, 1 => 0, other => other + 1 };
+                    let (tx, rx) = oneshot::channel(); service.sender.send(Request::Text(part.id, local as u16, 0, tx)).unwrap(); let text = rx.blocking_recv().unwrap().unwrap();
+                    assert!(text.contains(&format!("Page {} of {count}", source_page + 1)), "Incorrect split order: {fixture}, position {position}");
+                }
+                if emitted == 0 {
+                    assert_eq!(part.pages[0].width, info.pages[1].height); assert_eq!(part.pages[0].height, info.pages[1].width);
+                    let (tx, rx) = oneshot::channel(); service.sender.send(Request::Render(info.id, 0, 260, tx)).unwrap(); let current = rx.blocking_recv().unwrap().unwrap();
+                    let (tx, rx) = oneshot::channel(); service.sender.send(Request::Render(part.id, 0, 260, tx)).unwrap(); let copied = rx.blocking_recv().unwrap().unwrap();
+                    assert_eq!(image::load_from_memory(&current).unwrap().into_rgba8(), image::load_from_memory(&copied).unwrap().into_rgba8(), "Split rotation/render differs from current edited page: {fixture}");
+                }
+                emitted += part.pages.len();
+                let (tx, rx) = oneshot::channel(); service.sender.send(Request::Close(part.id, tx)).unwrap(); rx.blocking_recv().unwrap().unwrap();
+            }
+            assert_eq!(emitted, count - 1); assert_eq!(std::fs::read(&source_path).unwrap(), source);
+            assert!(split(3, group, folder.clone()).unwrap_err().contains("already exists"));
+            let (tx, rx) = oneshot::channel(); service.sender.send(Request::Text(info.id, 0, 3, tx)).unwrap(); assert!(rx.blocking_recv().unwrap().unwrap().contains(&format!("Page 2 of {count}")));
+            for undo in 0..3 {
+                let (tx, rx) = oneshot::channel(); service.sender.send(Request::Edit(info.id, PageEdit::Undo, tx)).unwrap(); let changed = rx.blocking_recv().unwrap().unwrap();
+                assert_eq!(changed.revision, 4 + undo); assert_eq!(changed.pages.len(), count); assert_eq!(changed.dirty, undo != 2); assert!(changed.can_redo); assert_eq!(changed.can_undo, undo != 2);
+            }
+            let (tx, rx) = oneshot::channel(); service.sender.send(Request::Close(info.id, tx)).unwrap(); rx.blocking_recv().unwrap().unwrap();
+            let closed = output.path().join(format!("closed-{count}")); assert!(split(6, group, closed.clone()).unwrap_err().contains("closed")); assert!(!closed.exists());
+        }
+    }
     #[test]
     fn text_geometry_preserves_spaces_generated_newlines_and_unicode() {
         let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
