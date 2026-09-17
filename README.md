@@ -6,7 +6,7 @@ You can already read PDFs, rearrange pages, and save your changes to a new file.
 
 ## Install
 
-Download the Windows setup file from the [latest release](https://github.com/Joshua-Beel/F-CK-Adobe/releases/latest). The installer includes the PDF engine. Once installed, open a file or choose **Explore a sample PDF** to try it out.
+Download the Windows setup file from the [latest release](https://github.com/Joshua-Beel/Smacrobat/releases/latest). The installer includes the PDF engine. Once installed, open a file or choose **Explore a sample PDF** to try it out.
 
 For updates, use **Menu > Check for updates**. The app shows what's new and lets you choose when to install. Save any edited documents first; the app won't install an update while you have unsaved changes.
 
@@ -94,6 +94,7 @@ For more background, see the [architecture notes](docs/decisions.md), [PDFium do
 
 ## Recent changes
 
+- Moved the canonical repository and updater endpoints to [Smacrobat](https://github.com/Joshua-Beel/Smacrobat). The former update URL currently redirects to this repository; future manifests and update checks now use the canonical address directly.
 - Added exact source archives for five locked MPL-2.0 crates to the source build's bundled resources, with manifest hashes, official archive locations, cache/source-tree verification, and installer freshness checks. A fresh unsigned debug installer extraction matched all five archive hashes plus both notice files; it does not verify installation, updates, signatures, or a release installer. Native render cleanup now lets Close and EndPrint move ahead of a bounded run of queued viewer renders while preserving all other command ordering. The source gate passed 95 frontend tests, 73 native tests, the production frontend build, and a standalone unsigned-debug NSIS build; see [review findings](docs/review-findings.md) and the [license inventory](docs/license-inventory.md).
 - Hardened native worker-reply cleanup. An abandoned raw Open, BeginOpen, Unlock, or Combine result now releases only its newly registered session, and an abandoned password prompt clears its pending token; accepted results remain usable and an unclaimed combined file stays saved. This covers the worker-to-service handoff, not later WebView or JavaScript receipt. The source checks passed 69 native tests, the unchanged 92 frontend/release tests, the production frontend build, and the standalone Windows debug build; see [review findings](docs/review-findings.md).
 - Hardened native print and open-reply cleanup. Dropping an unread completed print reply no longer occupies one of four snapshot slots, and an ordinary open whose reply closes before delivery no longer leaves an unreachable document; the print job keeps its snapshot through spool-thread handoff, completion, and panic. The source gate passed 92 frontend/release tests, 63 native tests, the production frontend build, and the standalone Windows debug build. Native printer output and driver cancellation still need verification; see [review findings](docs/review-findings.md).

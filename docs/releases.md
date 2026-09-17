@@ -1,10 +1,10 @@
 # Installers and GitHub updates
 
-Download the Windows x64 setup executable from https://github.com/Joshua-Beel/F-CK-Adobe/releases/latest. Run it once; it installs for the current user and includes PDFium and its license notices. WebView2 is installed if needed, which requires internet access. The published 0.2.0 installer has no Windows publisher signature. Future release builds are configured for Joshua's existing Azure publisher profile, with repository credentials now saved. Tauri update signatures are separate and are enabled.
+Download the Windows x64 setup executable from https://github.com/Joshua-Beel/Smacrobat/releases/latest. Run it once; it installs for the current user and includes PDFium and its license notices. WebView2 is installed if needed, which requires internet access. The published 0.2.0 installer has no Windows publisher signature. Future release builds are configured for Joshua's existing Azure publisher profile, with repository credentials now saved. Tauri update signatures are separate and are enabled.
 
 In the installed app, choose **Menu > Check for updates**. The dialog shows the installed version, newer release notes, and download progress. Installation requires a click and is disabled while any document has unsaved edits or an operation is running. The verified update starts the installer, closes the app, and relaunches it. Open documents are not automatically restored. Checks are manual; ordinary commits do not update installed apps.
 
-The public update endpoint is `https://github.com/Joshua-Beel/F-CK-Adobe/releases/latest/download/latest.json`. It contains the version, notes, Windows x64 installer URL, and detached signature. Update downloads use HTTPS and the Tauri plugin verifies signatures with the public key embedded in the installed application. Failed checks or downloads show an error and allow retry. Downgrades are not offered.
+The public update endpoint is `https://github.com/Joshua-Beel/Smacrobat/releases/latest/download/latest.json`. It contains the version, notes, Windows x64 installer URL, and detached signature. Update downloads use HTTPS and the Tauri plugin verifies signatures with the public key embedded in the installed application. Failed checks or downloads show an error and allow retry. Downgrades are not offered. The former repository endpoint currently redirects here; new builds use the canonical URL directly.
 
 ## Signing key
 
