@@ -1,9 +1,28 @@
 param([switch]$AzureSigning)
 $ErrorActionPreference = 'Stop'
+function New-AzureSigningConfig {
+    param([string]$Endpoint, [string]$Account, [string]$Profile)
+    foreach ($entry in @(@('AZURE_SIGNING_ENDPOINT', $Endpoint), @('AZURE_SIGNING_ACCOUNT', $Account), @('AZURE_SIGNING_PROFILE', $Profile))) {
+        if ([string]::IsNullOrWhiteSpace($entry[1])) { throw "Missing required signing setting: $($entry[0])" }
+    }
+    if ($Endpoint -cnotmatch '^https://[a-z0-9-]+\.codesigning\.azure\.net/?$') { throw 'Invalid AZURE_SIGNING_ENDPOINT: use an HTTPS Azure code-signing service endpoint without credentials, query, or custom path.' }
+    foreach ($entry in @(@('AZURE_SIGNING_ACCOUNT', $Account), @('AZURE_SIGNING_PROFILE', $Profile))) {
+        if ($entry[1] -cnotmatch '^[A-Za-z0-9][A-Za-z0-9-]{0,127}$') { throw "Invalid signing identifier: $($entry[0])" }
+    }
+    return @{ bundle = @{ windows = @{ signCommand = @{ cmd = 'artifact-signing-cli'; args = @('-e', $Endpoint, '-a', $Account, '-c', $Profile, '-d', 'PDF Workstation', '%1') } } } }
+}
 $projectRoot = Split-Path -Parent $PSScriptRoot
 Set-Location -LiteralPath $projectRoot
 $env:PATH = (Join-Path $env:USERPROFILE '.cargo\bin') + ';' + $env:PATH
 if ($AzureSigning) {
+    foreach ($name in @('AZURE_SIGNING_ENDPOINT', 'AZURE_SIGNING_ACCOUNT', 'AZURE_SIGNING_PROFILE')) {
+        $setting = [Environment]::GetEnvironmentVariable($name)
+        if ($env:GITHUB_ACTIONS -eq 'true' -and $setting) {
+            $mask = $setting.Replace('%', '%25').Replace("`r", '%0D').Replace("`n", '%0A')
+            Write-Output "::add-mask::$mask"
+        }
+    }
+    $azureConfig = New-AzureSigningConfig -Endpoint $env:AZURE_SIGNING_ENDPOINT -Account $env:AZURE_SIGNING_ACCOUNT -Profile $env:AZURE_SIGNING_PROFILE
     foreach ($name in @('AZURE_TENANT_ID', 'AZURE_CLIENT_ID', 'AZURE_CLIENT_SECRET')) {
         if (-not [Environment]::GetEnvironmentVariable($name)) { throw "Missing required signing credential: $name" }
     }
@@ -22,11 +41,21 @@ if ($LASTEXITCODE -ne 0) { throw 'Exact MPL source archives are missing or stale
 node scripts/dependency-notices.mjs --check
 if ($LASTEXITCODE -ne 0) { throw 'Dependency notices are missing or stale. Regenerate and review them before building an installer.' }
 if ($AzureSigning) {
-    npm.cmd run tauri -- build --ci --bundles nsis --config src-tauri/tauri.azure.conf.json
+    $configDirectory = Join-Path $projectRoot 'src-tauri/target/signing-config'
+    New-Item -ItemType Directory -Path $configDirectory -Force | Out-Null
+    $configPath = Join-Path $configDirectory ([Guid]::NewGuid().ToString('N') + '.json')
+    try {
+        [IO.File]::WriteAllText($configPath, ($azureConfig | ConvertTo-Json -Depth 8), [Text.UTF8Encoding]::new($false))
+        npm.cmd run tauri -- build --ci --bundles nsis --config $configPath
+        $buildExitCode = $LASTEXITCODE
+    } finally {
+        if (Test-Path -LiteralPath $configPath -PathType Leaf) { Remove-Item -LiteralPath $configPath }
+    }
 } else {
     npm.cmd run tauri -- build --ci --bundles nsis
+    $buildExitCode = $LASTEXITCODE
 }
-if ($LASTEXITCODE -ne 0) { throw 'Installer build failed.' }
+if ($buildExitCode -ne 0) { throw 'Installer build failed.' }
 if ($AzureSigning) {
     $version = (Get-Content -LiteralPath 'src-tauri/tauri.conf.json' -Raw -Encoding UTF8 | ConvertFrom-Json).version
     $installer = "src-tauri/target/release/bundle/nsis/PDF Workstation_${version}_x64-setup.exe"
